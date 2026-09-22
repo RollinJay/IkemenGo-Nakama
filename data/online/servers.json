@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "default": "official",
+  "servers": [
+    {
+      "id": "official",
+      "name": "Official Online Server",
+      "host": "online.example.com",
+      "port": 7350,
+      "server_key": "defaultkey",
+      "ssl": true,
+      "status": true,
+      "game": "my_game",
+      "build": "1.0.0",
+      "region": "us-west",
+      "stun_servers": []
+    }
+  ]
+}
