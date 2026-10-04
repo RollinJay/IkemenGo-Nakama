@@ -83,9 +83,7 @@ func (s *System) beginRenderSurface(rect [4]int32, aspect drawAspectState) {
 	if gfx != nil {
 		gfx.SetViewport(rect[0], rect[1], rect[2], rect[3])
 	}
-	if gfxFont != nil {
-		gfxFont.UpdateResolution(int(rect[2]), int(rect[3]))
-	}
+	// TTF fonts already refresh their resolution per draw (Fnt.DrawTtf).
 }
 
 func (s *System) restoreRenderSurface(st renderSurfaceState) {
@@ -95,9 +93,6 @@ func (s *System) restoreRenderSurface(st renderSurfaceState) {
 	if gfx != nil {
 		viewport := [4]int32{st.origin[0], st.origin[1], st.scrrect[2], st.scrrect[3]}
 		gfx.SetViewport(viewport[0], viewport[1], viewport[2], viewport[3])
-	}
-	if gfxFont != nil {
-		gfxFont.UpdateResolution(int(st.scrrect[2]), int(st.scrrect[3]))
 	}
 }
 

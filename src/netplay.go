@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -36,6 +37,8 @@ const (
 	replaySyncSearchLimit        = int64(64 << 20)
 
 	netLoadingPollTimeout = time.Millisecond
+	// Bound for the session handshake over an attached stream (AttachStream).
+	netStreamHandshakeTimeout = 10 * time.Second
 
 	netLoadingReadyToken byte = 0xC7
 	netLoadingAckToken   byte = 0x7C
@@ -176,8 +179,12 @@ func (nb *NetBuffer) readNetBufferAnalog() [6]int8 {
 
 // NetConnection manages the communication between players
 type NetConnection struct {
-	ln                 *net.TCPListener
-	conn               *net.TCPConn
+	ln *net.TCPListener
+	// conn is the TCP connection from Accept/Connect, or the stream given to
+	// AttachStream (the Nakama P2P session stream). Only net.Conn is used.
+	conn               net.Conn
+	connMu             sync.Mutex // guards the handshake goroutine's publication of conn
+	attachErr          atomic.Pointer[error]
 	st                 NetState
 	sendEnd            chan bool
 	recvEnd            chan bool
@@ -406,7 +413,7 @@ func (nc *NetConnection) Accept(port int) error {
 			tempConn.Close()
 			return
 		}
-		nc.conn = tempConn
+		nc.publishConn(tempConn)
 	})
 
 	return nil
@@ -462,17 +469,80 @@ func (nc *NetConnection) Connect(server string, port int) {
 				tcpConn.Close()
 				return
 			}
-			nc.conn = tcpConn
+			nc.publishConn(tcpConn)
 			return
 		}
 	})
+}
+
+// AttachStream starts the session over an already-connected stream, such as
+// the Nakama P2P stream, instead of listening or dialing. The handshake is the
+// same as Accept/Connect: the host sends it first and the guest echoes it.
+func (nc *NetConnection) AttachStream(stream net.Conn, host bool) {
+	nc.host = host
+	nc.conn = nil // Make sure this is a new connection
+	if host {
+		nc.locIn, nc.remIn = nc.GetHostGuestRemap()
+	} else {
+		nc.remIn, nc.locIn = nc.GetHostGuestRemap()
+	}
+	SafeGo(func() {
+		_ = stream.SetDeadline(time.Now().Add(netStreamHandshakeTimeout))
+		magic := []byte("IKEMENGO")
+		buf := make([]byte, len(magic))
+		var err error
+		if host {
+			if _, err = stream.Write(magic); err == nil {
+				_, err = io.ReadFull(stream, buf)
+			}
+		} else if _, err = io.ReadFull(stream, buf); err == nil && string(buf) == string(magic) {
+			_, err = stream.Write(magic)
+		}
+		if err == nil && string(buf) != string(magic) {
+			err = Error("Unexpected netplay handshake from the other player")
+		}
+		_ = stream.SetDeadline(time.Time{})
+		if err != nil || nc.isClosing() {
+			stream.Close()
+			if err != nil {
+				nc.attachErr.Store(&err)
+			}
+			return
+		}
+		nc.publishConn(stream)
+	})
+}
+
+// publishConn hands a connection finished by a handshake goroutine to the
+// main thread, which picks it up through hasConn/IsConnected.
+func (nc *NetConnection) publishConn(c net.Conn) {
+	nc.connMu.Lock()
+	nc.conn = c
+	nc.connMu.Unlock()
+}
+
+func (nc *NetConnection) hasConn() bool {
+	nc.connMu.Lock()
+	defer nc.connMu.Unlock()
+	return nc.conn != nil
+}
+
+// AttachError reports why an AttachStream handshake failed, if it did.
+func (nc *NetConnection) AttachError() error {
+	if nc == nil {
+		return nil
+	}
+	if err := nc.attachErr.Load(); err != nil {
+		return *err
+	}
+	return nil
 }
 
 func (nc *NetConnection) IsConnected() bool {
 	if nc == nil {
 		return false
 	}
-	connected := nc.conn != nil
+	connected := nc.hasConn()
 	// Stop a held button from registering as a fresh press and auto-accepting the first menu.
 	if connected && !nc.uiInputDebounced {
 		nc.uiInputDebounced = true
@@ -707,18 +777,17 @@ func (nc *NetConnection) Synchronize() (err error) {
 		for nc.st == NS_Playing {
 			// Check if there are unsent frames
 			if nb.senT < nb.inpT {
-				// Write digital inputs
-				if err := nc.writeI16(int16(nb.buf[nb.senT&(NETBUF_NUM_FRAMES-1)])); err != nil {
+				// One write per frame (digital inputs, then analog axes) so each
+				// frame leaves as one TCP segment or one KCP datagram.
+				idx := nb.senT & (NETBUF_NUM_FRAMES - 1)
+				var frame [REPLAY_INPUT_BYTES]byte
+				binary.LittleEndian.PutUint16(frame[:2], uint16(nb.buf[idx]))
+				for j, axis := range nb.axisBuf[idx] {
+					frame[2+j] = byte(axis)
+				}
+				if _, err := nc.conn.Write(frame[:]); err != nil {
 					nc.st = NS_Error
 					return
-				} else {
-					// Write analog inputs
-					for j := 0; j < len(nb.axisBuf[nb.senT&(NETBUF_NUM_FRAMES-1)]); j++ {
-						if err := nc.writeI8(nb.axisBuf[nb.senT&(NETBUF_NUM_FRAMES-1)][j]); err != nil {
-							nc.st = NS_Error
-							return
-						}
-					}
 				}
 				nb.senT++
 			}
@@ -830,7 +899,8 @@ func (nc *NetConnection) tryReadU8() (byte, bool, error) {
 		return b[0], true, nil
 	}
 	if err != nil {
-		if ne, ok := err.(net.Error); ok && ne.Timeout() {
+		var ne net.Error
+		if errors.As(err, &ne) && ne.Timeout() {
 			return 0, false, nil
 		}
 		return 0, false, err
@@ -1123,15 +1193,35 @@ func writeReplaySync(w io.Writer, seed, pmTime int32) error {
 }
 
 type ReplayFile struct {
-	file               *os.File
+	file *os.File
+	// Live replays (a watched lobby match) read a NakamaReplayBuffer instead
+	// of a file; see replay_live.go.
 	liveBuffer         *NakamaReplayBuffer
 	liveFrame          int32
+	liveStarted        bool
+	liveEnded          bool
+	liveCatchUp        bool
+	liveDelay          int32 // the live stream's delay (frames)
 	ibit               [REPLAY_NUM_INPUTS]InputBits
 	iaxes              [REPLAY_NUM_INPUTS][6]int8
 	preMatchTime       int32
 	strictSettings     []SyncSetting
 	hostSettings       []SyncSetting
 	contentFingerprint string
+
+	// A match replay file (replay_match.go) plays like a live stream whose
+	// sessions have all arrived: fromFile, with the sessions after the
+	// current one in fileSegments.
+	fromFile     bool
+	fileSegments []*NakamaReplayBuffer
+
+	// frameUsed: the match ran on the current frame's inputs since it was
+	// read (runMatch sets it for each frame drawn in which the match ran). A
+	// live replay reads its next frame only then, so pausing it keeps its
+	// place.
+	frameUsed bool
+	// local: the current session was played offline (ReplayStreamHeader.Local).
+	local bool
 }
 
 func NewLiveReplayFile(buffer *NakamaReplayBuffer) (*ReplayFile, error) {
@@ -1286,18 +1376,7 @@ func (rf *ReplayFile) atReplaySyncMarker() bool {
 // Read system variables from replay file
 func (rf *ReplayFile) Synchronize() {
 	if rf.liveBuffer != nil {
-		header := rf.liveBuffer.Header()
-		if header == nil {
-			log.Printf("Live replay synchronization failed: missing replay header")
-			sys.esc = true
-			rf.Close()
-			return
-		}
-		Srand(header.Seed)
-		rf.preMatchTime = header.PreMatchTime
-		sys.preMatchTime = header.PreMatchTime
-		rf.Update()
-		log.Printf("Live replay synchronized: seed=%d pmTime=%d delay=%d", header.Seed, header.PreMatchTime, header.DelayFrames)
+		rf.liveSynchronize()
 		return
 	}
 	if rf.file != nil {
@@ -1320,26 +1399,11 @@ func (rf *ReplayFile) Synchronize() {
 // Read a chunk of inputs from the replay file
 func (rf *ReplayFile) Update() bool {
 	if rf.liveBuffer != nil {
-		if !rf.liveBuffer.WaitForFrame(rf.liveFrame, 250*time.Millisecond) {
-			if finalFrame, ended := rf.liveBuffer.FinalFrame(); ended && rf.liveFrame >= finalFrame {
-				rf.Close()
-				return false
-			}
-			log.Printf("Live replay stalled waiting for input frame %d", rf.liveFrame)
-			sys.esc = true
-			rf.Close()
-			return false
+		if rf.liveStarted && !rf.frameUsed {
+			return !sys.gameEnd
 		}
-		frame, ok := rf.liveBuffer.Frame(rf.liveFrame)
-		if !ok {
-			sys.esc = true
-			rf.Close()
-			return false
-		}
-		rf.ibit = frame.Inputs
-		rf.iaxes = frame.Axes
-		rf.liveFrame++
-		return !sys.gameEnd
+		rf.frameUsed = false
+		return rf.liveUpdate()
 	}
 	if rf.file == nil {
 		sys.esc = true
@@ -1750,35 +1814,45 @@ func (s *System) currentContentFingerprint() string {
 	writeFile("motif.def", s.motif.Def)
 	writeFile("fight_screen.def", s.fightScreen.def)
 
-	for i := range s.cgi {
-		label := fmt.Sprintf("char.%d.def", i)
-		writeFile(label, s.cgi[i].def)
-		for j, fxPath := range s.cgi[i].fxPath {
-			writeFile(fmt.Sprintf("char.%d.fx.%d", i, j), fxPath)
-		}
-	}
+	// The first synchronize() runs right after connecting, before character
+	// select, and later syncs reuse the session override. Characters/stages
+	// loaded at that moment are leftovers from earlier local play, so hashing
+	// them made peers with different histories mismatch while never covering the
+	// real match. Hash the roster definition instead.
+	writeFile("select.def", s.motif.Files.Select)
 
-	if s.stage != nil {
-		writeFile("stage.def", s.stage.def)
-		for i, attached := range s.stage.attachedchardef {
-			writeFile(fmt.Sprintf("stage.attachedchar.%d", i), attached)
-		}
-	}
-
-	// Common FightFX are held in a map, so sort their paths to make the digest
-	// independent of Go map iteration order. These files can affect the loaded
-	// match environment even when they are not owned by a specific character.
+	// Common FightFX affect the match environment even though no character
+	// owns them: those the fight screen loads at startup, and the configured
+	// Common.Fx, which the first match loads and which then stay loaded. The
+	// configured ones are resolved here as the loader resolves them, so that
+	// the digest does not change with a client's first match (a client that
+	// has played and one that has not must agree). Character FightFX stay in
+	// the map after a match and are left out, like the characters. The paths
+	// are sorted, as the map's iteration order is random.
 	commonFX := make([]string, 0, len(s.ffx))
 	seenFX := make(map[string]struct{}, len(s.ffx))
+	addFX := func(filename string) {
+		if filename == "" {
+			return
+		}
+		if _, ok := seenFX[filename]; ok {
+			return
+		}
+		seenFX[filename] = struct{}{}
+		commonFX = append(commonFX, filename)
+	}
 	for _, ffx := range s.ffx {
-		if ffx == nil || ffx.fileName == "" {
-			continue
+		if ffx != nil && !ffx.isCharFX {
+			addFX(ffx.fileName)
 		}
-		if _, ok := seenFX[ffx.fileName]; ok {
-			continue
+	}
+	for _, key := range SortedKeys(s.cfg.Common.Fx) {
+		for _, v := range s.cfg.Common.Fx[key] {
+			_ = LoadFile(&v, []string{s.fightScreen.def, s.motif.Def, "", "data/"}, "", func(filename string) error {
+				addFX(filename)
+				return nil
+			})
 		}
-		seenFX[ffx.fileName] = struct{}{}
-		commonFX = append(commonFX, ffx.fileName)
 	}
 	sort.Strings(commonFX)
 	for i, filename := range commonFX {
@@ -1796,7 +1870,12 @@ func (s *System) beginSessionOverride(source string, strict, host []SyncSetting,
 	if err != nil {
 		return err
 	}
+	if host, err = sessionHostSettings(originalHost, host); err != nil {
+		return err
+	}
 	if err := applySyncSettings(&s.cfg, host, source == "netplay"); err != nil {
+		// A setting that failed leaves none of the session's applied.
+		_ = applySyncSettings(&s.cfg, originalHost, false)
 		return err
 	}
 	appliedHost, err := collectSyncSettings(&s.cfg, syncHost)
@@ -1804,18 +1883,71 @@ func (s *System) beginSessionOverride(source string, strict, host []SyncSetting,
 		return err
 	}
 	s.netplayOverride = SessionConfigOverride{
-		Active:             true,
-		Source:             source,
-		Strict:             cloneSyncSettings(strict),
-		OriginalHost:       originalHost,
-		AppliedHost:        cloneSyncSettings(host),
+		Active:       true,
+		Source:       source,
+		Strict:       cloneSyncSettings(strict),
+		OriginalHost: originalHost,
+		// The session's host settings as they apply, the common ones included
+		// (a replay of the session records them).
+		AppliedHost:        cloneSyncSettings(appliedHost),
 		SyncVersion:        syncConfigVersion,
 		ContentFingerprint: contentFingerprint,
 	}
 	log.Printf("%s sync config override started: strict=%d host=%d fingerprint=%q",
 		strings.Title(source), len(strict), len(host), contentFingerprint)
-	logSyncVerification(strings.Title(source)+" host override verification", host, appliedHost)
+	// The session's host settings: the host's, and this game's common ones.
+	expected := cloneSyncSettings(host)
+	for _, st := range originalHost {
+		if isCommonSyncPath(st.Path) {
+			expected = append(expected, st)
+		}
+	}
+	logSyncVerification(strings.Title(source)+" host override verification", expected, appliedHost)
 	return nil
+}
+
+// sessionHostSettings returns the host settings of a netplay host or a
+// replay file that this game applies for the session: only settings this
+// game has as host settings. The common files and code (Common.*: state,
+// command, animation, constant and FightFX files, Lua modules and the Lua
+// code the game runs every frame) are never taken from a host or a file,
+// which can come from anyone: they must be the same as this game's, or the
+// session does not start.
+func sessionHostSettings(local, incoming []SyncSetting) ([]SyncSetting, error) {
+	localValues := settingsToMap(local)
+	remoteValues := settingsToMap(incoming)
+	mismatch := func(path string) error {
+		format := sys.motif.WarningInfo.Text.Text["config"]
+		if format == "" {
+			format = "Netplay/replay startup config mismatch:\n%s"
+		}
+		sys.sessionWarning = fmt.Sprintf(format, path+" differs")
+		return Error(sys.sessionWarning)
+	}
+	for path := range localValues {
+		if _, ok := remoteValues[path]; isCommonSyncPath(path) && !ok {
+			return nil, mismatch(path)
+		}
+	}
+	out := make([]SyncSetting, 0, len(incoming))
+	for _, st := range incoming {
+		lv, ok := localValues[st.Path]
+		switch {
+		case isCommonSyncPath(st.Path) && (!ok || st.Value != lv):
+			return nil, mismatch(st.Path)
+		case !ok:
+			log.Printf("Ignoring sync setting %s: not a host setting of this game", st.Path)
+		case !isCommonSyncPath(st.Path):
+			out = append(out, st)
+		}
+	}
+	return out, nil
+}
+
+// isCommonSyncPath reports whether a sync setting is one of the common files
+// and code (Common.*).
+func isCommonSyncPath(path string) bool {
+	return strings.HasPrefix(strings.ToLower(path), "common.")
 }
 
 func (s *System) endSyncSessionOverride() error {
@@ -1900,6 +2032,11 @@ func (s *System) synchronizeNetplayConfig(nc *NetConnection) (*ReplayHeader, err
 		if err := validateStrictCompatibility(localStrict, guestPayload.Strict, false); err != nil {
 			return nil, err
 		}
+		// The peer's common files and code must be this game's (see
+		// sessionHostSettings); the peer checks the same.
+		if _, err := sessionHostSettings(localHost, guestPayload.Host); err != nil {
+			return nil, err
+		}
 		if err := validateContentFingerprint(localFingerprint, guestPayload.ContentFingerprint); err != nil {
 			return nil, err
 		}
@@ -1953,6 +2090,12 @@ func (s *System) synchronizeNetplayConfig(nc *NetConnection) (*ReplayHeader, err
 		return nil, err
 	}
 	if err := validateStrictCompatibility(localStrict, hostPayload.Strict, false); err != nil {
+		if werr := sendGuestPayload(); werr != nil {
+			return nil, werr
+		}
+		return nil, err
+	}
+	if _, err := sessionHostSettings(localHost, hostPayload.Host); err != nil {
 		if werr := sendGuestPayload(); werr != nil {
 			return nil, werr
 		}

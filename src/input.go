@@ -2683,6 +2683,9 @@ func (cl *CommandList) InputUpdate(char *Char, controller int) bool {
 				char.analogAxes = [6]float32{0, 0, 0, 0, 0, 0}
 			}
 		}
+		if b, ok := cbrInput(char); ok {
+			buttons = b
+		}
 	} else if sys.replayFile != nil {
 		buttons = sys.replayFile.readReplayInput(controller)
 		rawAxes := sys.replayFile.readReplayInputAnalog(controller)
@@ -2700,15 +2703,21 @@ func (cl *CommandList) InputUpdate(char *Char, controller int) bool {
 		if controller >= 0 {
 			if controller < len(sys.inputRemap) {
 				in := sys.inputRemap[controller] // remapped input index/config
-				buttons = cl.Buffer.InputReader.LocalInput(in)
-				// Keep analog axes in sync with the same remap used for digital inputs
-				if in >= 0 && in < len(sys.joystickConfig) &&
-					sys.joystickConfig[in].Joy >= 0 &&
-					sys.joystickConfig[in].Joy < input.GetMaxJoystickCount() &&
-					input.IsJoystickPresent(sys.joystickConfig[in].Joy) {
-					axes = input.GetJoystickAxes(sys.joystickConfig[in].Joy)
+				if b, raw, ok := localReplay.input(in); ok {
+					// A recorded local match reads its frame's inputs, as its
+					// replay will (replay_local.go)
+					buttons, axes = b, NormalizeAxes(&raw)
 				} else {
-					axes = [6]float32{0, 0, 0, 0, 0, 0}
+					buttons = cl.Buffer.InputReader.LocalInput(in)
+					// Keep analog axes in sync with the same remap used for digital inputs
+					if in >= 0 && in < len(sys.joystickConfig) &&
+						sys.joystickConfig[in].Joy >= 0 &&
+						sys.joystickConfig[in].Joy < input.GetMaxJoystickCount() &&
+						input.IsJoystickPresent(sys.joystickConfig[in].Joy) {
+						axes = input.GetJoystickAxes(sys.joystickConfig[in].Joy)
+					} else {
+						axes = [6]float32{0, 0, 0, 0, 0, 0}
+					}
 				}
 			}
 		}

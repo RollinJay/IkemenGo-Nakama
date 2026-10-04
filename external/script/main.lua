@@ -645,6 +645,10 @@ end
 
 main.pauseMenuActive = false
 require('external.script.debug')
+-- Nakama matchmaking into netplay (loaded early for the -nakama-match command line)
+online = require('external.script.online')
+-- Match replays: saved per online match, played from the replay menu
+replay = require('external.script.replay')
 
 loadDebugFont(gameOption('Debug.Font'), gameOption('Debug.FontScale'))
 
@@ -1101,6 +1105,11 @@ function main.f_commandLine()
 	setTeamMode(2, t_teamMode[2], t_numChars[2])
 	if gameOption('Debug.DumpLuaTables') then main.f_printTable(t, 'debug/t_quickvs.txt') end
 	local t_params = {}
+	-- The match's description for its match replay (replay.lua), when it is
+	-- one the replay menu can load: one player per side, no CPU and no
+	-- command-line life or power.
+	local t_replay = {p1 = {}, p2 = {}}
+	local replayable = t_teamMode[1] ~= 1 and t_teamMode[2] ~= 1
 	--iterate over the table in -p order ascending
 	for _, v in main.f_sortKeys(t, function(t, a, b) return t[b].num > t[a].num end) do
 		local charKey = v.character:lower()
@@ -1121,6 +1130,10 @@ function main.f_commandLine()
 		selectChar(v.player, charRef, v.pal)
 		setCom(v.num, v.ai)
 		remapInput(v.num, v.input)
+		table.insert(t_replay['p' .. v.player], {char = v.character, def = getCharFileName(charRef), name = getCharName(charRef), pal = v.pal})
+		if v.ai ~= 0 or v.input ~= v.player or next(v.override) ~= nil then
+			replayable = false
+		end
 		-- fold overrides into loadStart() params (p1.<member>.<field>=...)
 		local member = math.ceil(v.num / 2)
 		for k2, v2 in pairs(v.override) do
@@ -1156,6 +1169,36 @@ function main.f_commandLine()
 			main.f_clearShuffleTables()
 		end
 		refresh()
+	elseif flags['-nakama-match'] ~= nil then
+		-- Same as -ip, with the opponent found by Nakama matchmaking.
+		local ok, reason = online.f_connect(flags['-nakama-match'], false)
+		if not ok then
+			print('Online match failed: ' .. online.f_reasonText(reason))
+			online.f_leave()
+			os.exit()
+		end
+		online.f_setMatchNames()
+		refresh()
+		if not synchronize() then
+			replayStop()
+			exitNetPlay()
+			exitReplay()
+			print(getSessionWarning())
+			online.f_leave()
+			os.exit()
+		end
+		if replayable then
+			replay.f_describe({
+				p1teammode = replay.f_teamModeName(t_teamMode[1]),
+				p2teammode = replay.f_teamModeName(t_teamMode[2]),
+				p1 = t_replay.p1,
+				p2 = t_replay.p2,
+			}, {mode = gameMode(), matchwins = t_matchWins, roundtime = roundTime})
+		end
+		if loadMotif then
+			main.f_clearShuffleTables()
+		end
+		refresh()
 	end
 	if loadMotif then
 		table.insert(t_params, 1, start.f_buildLoadStartParams())
@@ -1169,6 +1212,12 @@ function main.f_commandLine()
 	game()
 	if flags['-log'] ~= nil then
 		main.f_printTable(getGameStats().Matches[matchNo()], flags['-log'])
+	end
+	if flags['-nakama-match'] ~= nil then
+		-- Close the P2P session so the other player is not left waiting.
+		replayStop()
+		exitNetPlay()
+		online.f_leave()
 	end
 	os.exit()
 end
@@ -1837,6 +1886,7 @@ setPlayers()
 start = require('external.script.start')
 options = require('external.script.options')
 menu = require('external.script.menu')
+lobby = require('external.script.lobby')
 
 if getCommandLineValue("-storyboard") ~= nil then
 	main.f_storyboard(getCommandLineValue("-storyboard"))
@@ -2277,6 +2327,18 @@ main.t_itemname = {
 			showSessionWarning()
 		end
 		return nil
+	end,
+	--ONLINE QUICK MATCH (Nakama matchmaking, then the netplay menu)
+	['onlinematch'] = function(t, item)
+		return online.f_menuMatch('unranked', t, item, enterSyncedNetplayMenu, showSessionWarning)
+	end,
+	--ONLINE RANKED MATCH
+	['onlineranked'] = function(t, item)
+		return online.f_menuMatch('ranked', t, item, enterSyncedNetplayMenu, showSessionWarning)
+	end,
+	--ONLINE LOBBIES (lobby search, lobby settings and lobby rooms)
+	['onlinelobby'] = function(t, item)
+		return lobby.f_menu(t, item)
 	end,
 	--STORY MODE ARC
 	['storyarc'] = function(t, item)
@@ -3118,15 +3180,24 @@ function main.f_replay()
 		elseif getInput(-1, motif[main.group].menu.done.key) then
 			main.f_waitForPreloads(true)
 			sndPlay(motif.Snd, motif[main.group].cursor.done.snd.default[1], motif[main.group].cursor.done.snd.default[2])
-			if enterReplay(t[item].itemname) and synchronize() then
-				main.replayActive = true
-				enterSyncedNetplayMenu()
+			local rp, err = replayMatchInfo(t[item].itemname)
+			if rp ~= nil or err ~= nil then
+				-- A match replay: the fight it describes (external/script/replay.lua).
+				replay.f_play(t[item].itemname, rp, err)
+				bgReset(motif.replaybgdef.BGDef)
+				fadeInInit(motif.replay_info.fadein.FadeData)
+				playBgm({source = "motif.replay"})
+			else
+				if enterReplay(t[item].itemname) and synchronize() then
+					main.replayActive = true
+					enterSyncedNetplayMenu()
+				end
+				main.replayActive = false
+				replayStop()
+				exitNetPlay()
+				exitReplay()
+				showSessionWarning()
 			end
-			main.replayActive = false
-			replayStop()
-			exitNetPlay()
-			exitReplay()
-			showSessionWarning()
 		end
 	end
 end
@@ -3157,7 +3228,7 @@ function main.f_connect(server, str)
 		bgDraw(motif[main.background].BGDef, 1)
 		refresh()
 	end
-	replayRecord('save/replays/' .. os.date("%Y-%m-%d_%Hh%Mm%Ss") .. '.replay')
+	replay.f_record()
 	return true
 end
 

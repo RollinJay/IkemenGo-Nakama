@@ -2635,10 +2635,10 @@ func PopulateDataPointers(obj interface{}, rootLocalcoord [2]int32) {
 			t := v.Type()
 			// We make a local copy of the currentLocalCoord to allow an override.
 			localCoordForThisStruct := currentLocalCoord
-			// Border elements use the border's own coordinate space by default.
-			// Individual animation/text/overlay entries can still override this with
-			// their explicit localcoord value.
-			if t == reflect.TypeOf(BorderInfoProperties{}) {
+			// Border and lobby elements use their section's own coordinate space by
+			// default. Individual animation/text/overlay entries can still override
+			// this with their explicit localcoord value.
+			if t == reflect.TypeOf(BorderInfoProperties{}) || t == reflect.TypeOf(LobbyInfoProperties{}) {
 				if lc := v.FieldByName("Localcoord"); lc.IsValid() && lc.Kind() == reflect.Array && lc.Len() == 2 &&
 					lc.Index(0).Int() > 0 && lc.Index(1).Int() > 0 {
 					localCoordForThisStruct = [2]int32{int32(lc.Index(0).Int()), int32(lc.Index(1).Int())}

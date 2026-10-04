@@ -1002,7 +1002,9 @@ func (s *System) renderFrame() {
 		s.drawTop()
 	}
 
-	s.restoreRenderSurface(outer)
+	// The foreground is authored in canvas space: re-enter the canvas surface with
+	// the canvas aspect state (outer holds the fight's logical aspect).
+	s.beginRenderSurface(s.presentation.canvas, s.outerRenderState())
 	s.motif.drawBorderForeground()
 	if s.luaLState != nil {
 		if err := s.luaLState.DoString("hook.run('game.border')"); err != nil {
@@ -1010,6 +1012,7 @@ func (s *System) renderFrame() {
 		}
 		s.luaFlushDrawQueue()
 	}
+	s.restoreRenderSurface(outer)
 
 	if s.debugDisplay {
 		s.drawDebugText(logicState)
@@ -1026,16 +1029,22 @@ func (s *System) beginNakamaSpectatorLoading() {
 	s.nakamaSpectatorLoadingProgress = nil
 	s.nakamaSpectatorLoadingDetail = nil
 
-	buildText := func(props *TextProperties, text string) *TextSprite {
-		if props == nil || props.TextSpriteData == nil {
+	copyText := func(src *TextSprite, text string) *TextSprite {
+		if src == nil {
 			return nil
 		}
-		ts := props.TextSpriteData.Copy()
+		ts := src.Copy()
 		ts.text = text
 		ts.textInit = text
 		ts.textDelay = 0
 		ts.Reset()
 		return ts
+	}
+	buildText := func(props *TextProperties, text string) *TextSprite {
+		if props == nil {
+			return nil
+		}
+		return copyText(props.TextSpriteData, text)
 	}
 
 	loading := &s.motif.NakamaInfo.Loading
@@ -1043,7 +1052,7 @@ func (s *System) beginNakamaSpectatorLoading() {
 		// A screenpack can explicitly disable the Nakama-specific layer and keep
 		// using the engine's established loading motif element.
 		wait := &s.motif.TitleInfo.Loading.Wait
-		s.nakamaSpectatorLoadingText = buildText(&wait.TextProperties, wait.Text)
+		s.nakamaSpectatorLoadingText = copyText(wait.TextSpriteData, wait.Text)
 		return
 	}
 	baseLoading := &loading.AnimationTextProperties
@@ -1055,7 +1064,7 @@ func (s *System) beginNakamaSpectatorLoading() {
 		ts.Reset()
 		s.nakamaSpectatorLoadingText = ts
 	} else if s.motif.TitleInfo.Loading.Wait.TextSpriteData != nil {
-		s.nakamaSpectatorLoadingText = buildText(&s.motif.TitleInfo.Loading.Wait.TextProperties, s.motif.TitleInfo.Loading.Wait.Text)
+		s.nakamaSpectatorLoadingText = copyText(s.motif.TitleInfo.Loading.Wait.TextSpriteData, s.motif.TitleInfo.Loading.Wait.Text)
 	}
 	if s.motif.NakamaInfo.Title.TextSpriteData != nil && strings.TrimSpace(s.motif.NakamaInfo.Title.Text) != "" {
 		s.nakamaSpectatorLoadingTitle = buildText(&s.motif.NakamaInfo.Title, s.motif.NakamaInfo.Title.Text)
@@ -1089,7 +1098,7 @@ func (s *System) updateNakamaSpectatorLoading() bool {
 			ts.Update()
 		}
 	}
-	buffer := s.nakama.ReplayBuffer()
+	buffer := s.nakama.WatchReplayBuffer()
 	header := buffer.Header()
 	if header == nil {
 		return true
@@ -1099,7 +1108,7 @@ func (s *System) updateNakamaSpectatorLoading() bool {
 		s.endNakamaSpectatorLoading()
 		return true
 	}
-	if buffer.BufferedThrough() < header.DelayFrames {
+	if !liveReplayReady(buffer) {
 		return true
 	}
 	if s.replayFile != nil || s.netConnection != nil || s.rollback.session != nil {
@@ -1109,6 +1118,12 @@ func (s *System) updateNakamaSpectatorLoading() bool {
 
 	rf, err := NewLiveReplayFile(buffer)
 	if err != nil {
+		LogMessage("Nakama spectator replay could not start: %v", err)
+		s.endNakamaSpectatorLoading()
+		return true
+	}
+	if err := validateContentFingerprint(s.currentContentFingerprint(), rf.contentFingerprint); err != nil {
+		rf.Close()
 		LogMessage("Nakama spectator replay could not start: %v", err)
 		s.endNakamaSpectatorLoading()
 		return true
@@ -1141,7 +1156,7 @@ func (s *System) drawNakamaSpectatorLoading() {
 
 	buffered, delay := int32(0), int32(0)
 	if s.nakama != nil {
-		buffer := s.nakama.ReplayBuffer()
+		buffer := s.nakama.WatchReplayBuffer()
 		buffered = buffer.BufferedThrough()
 		if header := buffer.Header(); header != nil {
 			delay = header.DelayFrames
@@ -1201,9 +1216,10 @@ func (s *System) update() bool {
 	}
 
 	// preMatchTime normally follows the local UI clock until gameplay begins.
-	// Preserve the synchronized prematch time while rollback waits for its first frame.
+	// Preserve the synchronized prematch time while rollback waits for its first frame,
+	// and the one a recorded local match started with (its replay keeps it).
 	rollbackMatchStarting := s.rollback.session != nil && s.rollback.netConnection != nil
-	if s.matchTime == 0 && !rollbackMatchStarting && s.replayFile == nil {
+	if s.matchTime == 0 && !rollbackMatchStarting && s.replayFile == nil && !localReplay.open {
 		s.preMatchTime = s.frameCounter
 	}
 
@@ -1243,7 +1259,8 @@ func (s *System) update() bool {
 	}
 
 	if s.replayFile != nil {
-		if s.anyHardButton() {
+		// Holding a button fast-forwards; a late spectator catches up the same way.
+		if s.anyHardButton() || s.replayFile.liveCatchingUp() {
 			s.await(s.gameRenderSpeed() * 4)
 		} else {
 			s.await(s.gameRenderSpeed())
@@ -1256,7 +1273,10 @@ func (s *System) update() bool {
 		return s.netConnection.Update()
 	}
 
-	return s.await(s.gameRenderSpeed())
+	ok := s.await(s.gameRenderSpeed())
+	// A recorded local match moves to its next frame where its replay will.
+	localReplay.advance()
+	return ok
 }
 
 func (s *System) tickSound() {
@@ -1433,6 +1453,9 @@ func (s *System) synchronize() error {
 		s.replayFile.Synchronize()
 	} else if s.netConnection != nil {
 		return s.netConnection.Synchronize()
+	} else {
+		// A recorded local match is seeded as a netplay match is.
+		localReplay.synchronize()
 	}
 	return nil
 }
@@ -1490,6 +1513,9 @@ func (s *System) anyButton() bool {
 	}
 	if s.rollback.session != nil {
 		return s.rollback.anyButton()
+	}
+	if pressed, ok := localReplay.anyButton(); ok {
+		return pressed
 	}
 	return s.anyHardButton()
 }
@@ -2806,7 +2832,9 @@ func (s *System) resetRound() {
 }
 
 func (s *System) debugPaused() bool {
-	return s.paused && !s.frameStepFlag && s.oldTickCount < s.tickCount
+	// A match run by replay timing pauses from the next pass, between ticks
+	// or not (replayTiming).
+	return s.paused && !s.frameStepFlag && (s.oldTickCount < s.tickCount || s.replayTiming())
 }
 
 func (s *System) motifPauseGame() bool {
@@ -2841,8 +2869,9 @@ func (s *System) tickFrame() bool {
 // "Tick next frame" is right after the "tick frame"
 // Where for instance the collision detections happen
 func (s *System) tickNextFrame() bool {
+	// A match run by replay timing can pause between ticks: it stays paused.
 	return int(s.tickCountF+s.nextAddTime) > s.tickCount &&
-		(!s.paused || s.frameStepFlag || s.oldTickCount >= s.tickCount)
+		(!s.paused || s.frameStepFlag || (s.oldTickCount >= s.tickCount && !s.replayTiming()))
 }
 
 // This divides a frame into fractions for the purpose of drawing position interpolation
@@ -2868,6 +2897,130 @@ func (s *System) addFrameTime(t float32) bool {
 		s.oldNextAddTime = 0
 		return true
 	}
+	return s.advanceFrameTime(t)
+}
+
+// replayTiming reports whether the match runs by replay timing: a local match
+// being recorded (replay_local.go) or a replay. A replay reads a frame of
+// inputs per frame drawn, which can take several passes of the runMatch loop
+// (the game runs faster than normal) or a pass without a tick (slower), so
+// such a match runs the same passes whether it is paused or not:
+//
+//   - a pass that starts paused leaves the match as it is: it does not move
+//     to the next round, the frame time holds (nextFrameTime) and the
+//     per-frame Lua waits; the menus' reading of the players' input and the
+//     random numbers, which the pause menu reads and draws from, are restored
+//     when the match runs again (holdPausedState);
+//   - a pass that ran the match moves the frame time on, although a pause
+//     began during it (the pause menu opens after the match ran);
+//   - a pause takes effect from the next pass, between ticks or not;
+//   - a frame step runs the match unpaused for a frame drawn, at its speed.
+func (s *System) replayTiming() bool {
+	return localReplay.open || s.replayFile != nil
+}
+
+// nextFrameTime moves the frame time on after a pass of the runMatch loop
+// that ran the match (ran) or was paused; see addFrameTime and replayTiming.
+func (s *System) nextFrameTime(ran bool) bool {
+	if !s.replayTiming() {
+		return s.addFrameTime(s.turbo)
+	}
+	if !ran {
+		s.oldNextAddTime = 0
+		return true
+	}
+	return s.advanceFrameTime(s.turbo)
+}
+
+// pausedState is what code run while a match run by replay timing is paused
+// changes that the match reads, as it was when the pause began
+// (holdPausedState); heldPass is set during a paused pass of such a match.
+var (
+	pausedState *heldMatchState
+	heldPass    bool
+)
+
+type heldMatchState struct {
+	menuInput []CommandList
+	randseed  int32
+}
+
+// holdPausedState keeps what the match reads that code run while a match run
+// by replay timing is paused can change: the menus' reading of the players'
+// input (sys.commandLists, which the fight's dialogues and scripts read as the
+// match runs, and the pause menu reads meanwhile) and the random numbers
+// (scripts draw from the match's). They are saved when a pause starts
+// (paused) and restored when the match runs again.
+func (s *System) holdPausedState(paused bool) {
+	if !s.replayTiming() {
+		pausedState = nil
+		return
+	}
+	switch {
+	case paused && pausedState == nil:
+		pausedState = &heldMatchState{menuInput: make([]CommandList, len(s.commandLists)), randseed: s.randseed}
+		for i, cl := range s.commandLists {
+			if cl != nil {
+				pausedState.menuInput[i] = cl.inputState()
+			}
+		}
+	case !paused && pausedState != nil:
+		for i, cl := range s.commandLists {
+			if cl != nil && i < len(pausedState.menuInput) {
+				cl.restoreInputState(&pausedState.menuInput[i])
+			}
+		}
+		s.randseed = pausedState.randseed
+		pausedState = nil
+	}
+}
+
+// inputState returns a copy of the list's input state: its buffer and its
+// commands' progress.
+func (cl *CommandList) inputState() CommandList {
+	st := *cl
+	if cl.Buffer != nil {
+		buf := *cl.Buffer
+		if cl.Buffer.InputReader != nil {
+			ir := *cl.Buffer.InputReader
+			buf.InputReader = &ir
+		}
+		st.Buffer = &buf
+	}
+	st.Commands = make([][]Command, len(cl.Commands))
+	for i := range cl.Commands {
+		st.Commands[i] = make([]Command, len(cl.Commands[i]))
+		for j, c := range cl.Commands[i] {
+			c.completed = append([]bool(nil), c.completed...)
+			c.stepTimers = append([]int32(nil), c.stepTimers...)
+			c.loopOrder = append([]int(nil), c.loopOrder...)
+			st.Commands[i][j] = c
+		}
+	}
+	return st
+}
+
+// restoreInputState sets the list's input state to st (inputState), in place.
+// Commands added since st was taken keep their state.
+func (cl *CommandList) restoreInputState(st *CommandList) {
+	if cl.Buffer != nil && st.Buffer != nil {
+		ir := cl.Buffer.InputReader
+		*cl.Buffer = *st.Buffer
+		cl.Buffer.InputReader = ir
+		if ir != nil && st.Buffer.InputReader != nil {
+			*ir = *st.Buffer.InputReader
+		}
+	}
+	for i := range cl.Commands {
+		if i < len(st.Commands) && len(st.Commands[i]) == len(cl.Commands[i]) {
+			copy(cl.Commands[i], st.Commands[i])
+		}
+	}
+}
+
+// advanceFrameTime moves the frame time on by t ticks. It reports false for a
+// pass that catches up with the game's speed, which is not drawn.
+func (s *System) advanceFrameTime(t float32) bool {
 	s.oldTickCount = s.tickCount
 	if int(s.tickCountF) > s.tickCount {
 		s.tickCount++
@@ -3133,6 +3286,7 @@ func (s *System) action() {
 	if s.tickNextFrame() {
 		s.globalCollision() // This could perhaps happen during "tick frame" instead? Would need more testing
 		s.globalTick()
+		cbrFrame()
 	}
 
 	// Run camera
@@ -3244,6 +3398,11 @@ func (s *System) uiAction() {
 
 	// Common Lua calls
 	// Needs to happen after motif update or motif inputs will lag 1 frame
+	// The per-frame code, whose hooks can change the match, waits while a
+	// match run by replay timing is paused.
+	if heldPass {
+		return
+	}
 	for _, key := range SortedKeys(sys.cfg.Common.Lua) {
 		for _, v := range sys.cfg.Common.Lua[key] {
 			if err := sys.luaLState.DoString(v); err != nil {
@@ -4232,6 +4391,7 @@ func (s *System) keepMatchRunning() bool {
 // Called to start each match, on hard reset with shift+F4,
 // and at the start of any round where a new character tags in for turns mode
 func (s *System) runMatch() (reload bool) {
+	defer cbrMatchEnd()
 	// Reset variables
 	s.matchTime = 0
 	s.fightLoopEnd = false
@@ -4267,6 +4427,8 @@ func (s *System) runMatch() (reload bool) {
 		s.esc = true
 		return false
 	}
+	// A recorded local match saves this runMatch's session when it returns.
+	defer localReplay.end()
 	if s.netConnection != nil {
 		defer func() {
 			// Keep delay-netplay alive across Turns character swaps;
@@ -4285,6 +4447,7 @@ func (s *System) runMatch() (reload bool) {
 	debugInput := func() {
 		select {
 		case cl := <-s.commandLine:
+			localReplay.interrupt("a debug console command ran")
 			if err := s.luaLState.DoString(cl); err != nil {
 				s.luaLState.RaiseError("Error during Debug Input Lua execution:\nCode: %s\nDetails: %s", cl, err.Error())
 			}
@@ -4292,8 +4455,17 @@ func (s *System) runMatch() (reload bool) {
 		}
 	}
 
-	// Reset round state
+	// Reset round state. A run whose rounds persist counts this one; replays
+	// record the count before it (ReplayMatchContext).
+	sessionRoundCount = s.persistRoundCount
 	s.resetRound()
+
+	// Match replays: a replay starts from the players' state in the recorded
+	// session, and a recorded match keeps it.
+	if s.replayFile != nil {
+		s.replayFile.applyStartState()
+	}
+	recordMatchStartState()
 
 	// Make a first backup once everything is initialized
 	s.roundBackup.Save()
@@ -4317,18 +4489,39 @@ func (s *System) runMatch() (reload bool) {
 	// Now switch to rollback if applicable
 	// TODO: More merging so we don't hijack this function at all
 	if s.usesRollbackMatch() {
+		// The rollback sync test runs an offline match in its own loop.
+		localReplay.interrupt("the match runs in the rollback sync test")
 		return s.rollback.hijackRunMatch()
 	}
+
+	// A frame step of a match run by replay timing lasts until the next frame
+	// drawn, and a pause keeps what the match reads (replayTiming).
+	stepping := false
+	pausedState = nil
 
 	// Loop until end of match
 	for s.keepMatchRunning() {
 		s.frameStepFlag = false
 
+		// Hotkeys change the match from outside it: a recorded local match
+		// stops being recorded when one does (replay_local.go).
+		outside := localReplay.watch()
 		for _, v := range s.shortcutScripts {
 			if v.Activate {
+				if v.DebugKey {
+					localReplay.interrupt("a debug key was used")
+				}
+				localReplay.ranOutside()
 				if err := s.luaLState.DoString(v.Script); err != nil {
 					s.luaLState.RaiseError("Error executing Lua code: %s\n%v", v.Script, err.Error())
 				}
+			}
+		}
+		localReplay.check(outside)
+		if s.frameStepFlag && s.replayTiming() {
+			s.frameStepFlag = false
+			if s.paused && !s.motif.me.active {
+				s.paused, stepping = false, true
 			}
 		}
 
@@ -4342,16 +4535,38 @@ func (s *System) runMatch() (reload bool) {
 		s.saveStateFlag = false
 		s.loadStateFlag = false
 
+		// A replay reads its frames of inputs, and a recorded local match
+		// keeps them, from the passes that run the match; a paused pass of a
+		// match run by replay timing leaves it as it is (replayTiming). The
+		// pass where the next round or Turns character ends the loop is one
+		// of them, as in a rollback match.
+		paused := s.matchPaused()
+		localReplay.pass(!paused)
+		s.holdPausedState(paused)
+
 		// If next round
-		if !s.runNextRound() {
+		if (!paused || !s.replayTiming()) && !s.runNextRound() {
 			break
 		}
 
-		// Update game state
+		// Update game state. A character can reset the round or restart the
+		// match, which a replay does not repeat.
+		inside := localReplay.watch()
 		s.action()
+		localReplay.checkMatch(inside)
 
-		// Update motif
+		// Update motif. Menus and the debug console can change the match from
+		// outside it too.
+		outside = localReplay.watch()
+		heldPass = paused && s.replayTiming()
+		wasPaused := s.paused
 		s.uiAction()
+		heldPass = false
+		if s.paused && !wasPaused && !s.motif.me.active {
+			// A script paused the match (a mod waiting for its players'
+			// answer, which a replay does not have).
+			localReplay.interrupt("a script paused the match")
+		}
 
 		// Patch: Pause stage videos while game is paused
 		// This is necessary for the time being because videos are paused in the stage's action() and pauses now just skip that entirely
@@ -4368,8 +4583,9 @@ func (s *System) runMatch() (reload bool) {
 		s.tickSound()
 
 		debugInput()
+		localReplay.check(outside)
 
-		if !s.addFrameTime(s.turbo) {
+		if !s.nextFrameTime(!paused) {
 			if !s.eventUpdate() {
 				return false
 			}
@@ -4380,7 +4596,9 @@ func (s *System) runMatch() (reload bool) {
 			s.roundResetMatchStart = false
 		}
 
-		if s.matchResetFlg {
+		// A character's match restart takes effect after a pass that ran the
+		// match, which a paused pass of a match run by replay timing is not.
+		if s.matchResetFlg && (!paused || !s.replayTiming()) {
 			s.matchResetFlg = false
 
 			// If a member has already been changed in Turns mode
@@ -4451,13 +4669,21 @@ func (s *System) runMatch() (reload bool) {
 		s.cueDraw()
 		s.renderFrame()
 
-		// Update system. Break if update returns false (engine shutdown).
+		// Update system. Break if update returns false (engine shutdown). A
+		// replay moves to its next frame of inputs after a pass that ran the
+		// match, and a frame step ends.
+		if s.replayFile != nil {
+			s.replayFile.frameUsed = !paused
+		}
 		if !s.update() {
 			break
 		}
+		if stepping && !paused {
+			s.paused, stepping = true, false
+		}
 
 		// Exit the replay match loop before EOF can reuse the last input sample.
-		if s.replayFile != nil && s.replayFile.file == nil {
+		if s.replayFile != nil && s.replayFile.exhausted() {
 			break
 		}
 
@@ -4677,9 +4903,10 @@ func (s *System) gameLogicSpeed() int32 {
 
 func (s *System) gameRenderSpeed() int {
 	var spd int32
-	if !s.gameRunning || s.motif.me.active || s.rollback.session != nil || s.replayFile != nil {
+	if !s.gameRunning || s.motif.me.active || s.rollback.session != nil || s.replayFile != nil || localReplay.open {
 		// Standalone Lua screens and the Lua-driven pause menu execute one
-		// complete update-and-draw frame per call. Rollback is also fixed at 60 Hz.
+		// complete update-and-draw frame per call. Rollback is also fixed at 60 Hz,
+		// and so are replays and the local matches recorded for them.
 		// TODO: Rollback should render at Framerate but sync at Gamespeed
 		spd = 60
 	} else {

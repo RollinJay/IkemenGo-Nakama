@@ -2159,10 +2159,10 @@ func (nm *FightScreenName) bgDraw(layerno int16) {
 	nm.bg.Draw(float32(nm.pos[0])+sys.fightScreen.offsetX, float32(nm.pos[1]), layerno, sys.fightScreen.scale)
 }
 
-func (nm *FightScreenName) draw(layerno int16, charpn int, f map[int]*Fnt, side int) {
+func (nm *FightScreenName) draw(layerno int16, charpn int, f map[int]*Fnt, side int, slot int) {
 	if nm.name.fnt != nil {
 		nm.name.lay.DrawText((float32(nm.pos[0]) + sys.fightScreen.offsetX), float32(nm.pos[1]), sys.fightScreen.scale, layerno,
-			sys.cgi[charpn].lifebarname, nm.name.fnt, nm.name.font[1], nm.name.font[2], nm.name.palfx, nm.name.frgba)
+			fightScreenNameFor(side, slot, charpn, nm.name.fnt, nm.name.font[1]), nm.name.fnt, nm.name.font[1], nm.name.font[2], nm.name.palfx, nm.name.frgba)
 	}
 
 	nm.top.Draw(float32(nm.pos[0])+sys.fightScreen.offsetX, float32(nm.pos[1]), layerno, sys.fightScreen.scale)
@@ -5876,7 +5876,7 @@ func (fs *FightScreen) draw(layerno int16) {
 						fs.names[layout][side].drawTeammates(layerno, fs.fnt, side)
 					}
 					fs.names[layout][barpn].bgDraw(layerno)
-					fs.names[layout][barpn].draw(layerno, charpn, fs.fnt, side)
+					fs.names[layout][barpn].draw(layerno, charpn, fs.fnt, side, slot)
 				}
 			}
 

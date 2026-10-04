@@ -39,6 +39,8 @@ data/*
 !data/training.zss
 font/*
 !font/Open_Sans/
+!font/MPLUS1/
+!font/mplus1.def
 !font/debug.def
 !font/default-3x5-bold.def
 !font/default-3x5-bold.sff
@@ -91,3 +93,16 @@ external/script/version
 # Nakama client/server profiles
 !data/online/
 !data/online/servers.json
+
+# Files the game and its builds need that match the patterns above. They are
+# listed here so that adding everything with `git add -A` keeps them: the
+# release packaging uses Ikemen_GO.command and IkemenCylia_256.png, and the
+# rematch and CBR mods ship in external/mods.
+!build/Ikemen_GO.command
+!external/icons/*.png
+!third_party/ggpo/*.png
+!external/mods/.keep
+!external/mods/cbr.lua
+!external/mods/ik_rematch.lua
+!external/mods/ik_rematch.zss
+!external/mods/rematch.def

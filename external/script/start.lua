@@ -64,6 +64,11 @@ function start.f_waitOnlineP2P(timeoutFrames)
 end
 
 function start.f_leaveOnlineSession()
+	-- A netplay session started through Nakama (external/script/online.lua)
+	-- runs over the P2P socket; it is closed when that session ends.
+	if online ~= nil and online.f_sessionActive() then
+		return
+	end
 	if nakama ~= nil then
 		if nakama.stopP2P ~= nil then nakama.stopP2P() end
 		if nakama.leaveMatch ~= nil and nakama.currentMatch ~= nil and nakama.currentMatch() ~= '' then
@@ -297,6 +302,10 @@ end
 
 --calculates AI level
 function start.f_difficulty(player, offset)
+	-- A match replay plays with the AI levels it recorded (replay.lua).
+	if start.replayAILevels ~= nil and tonumber(start.replayAILevels[player]) ~= nil then
+		return tonumber(start.replayAILevels[player])
+	end
 	local t = {}
 	if main.f_playerSide(player) == 1 then
 		t = start.f_getCharData(start.p[1].t_selected[math.floor(player / 2 + 0.5)].ref)
@@ -1826,6 +1835,9 @@ function start.f_game(common)
 	end
 	local winner = -1
 	local rankedAfter = nil
+	-- Scripts that prepare for the fight about to start: its match replay's
+	-- description (replay.lua) and its online names (online.lua).
+	hook.run("start.f_game")
 	winner, start.challenger = game()
 	local forfeitUser = start.onlineForfeitUserId
 	start.onlineForfeitUserId = nil
@@ -1924,11 +1936,9 @@ function start.f_selectMode()
 			return
 		elseif start.onlineNextAction == 'select' then
 			start.f_clearOnlineRematchState()
+			-- P2P starts after selection: a socket opened before the select screen
+			-- times out while players are still choosing.
 			start.onlineP2PRequested = true
-			if not start.f_startOnlineP2P() then
-				start.f_leaveOnlineSession()
-				return
-			end
 			start.f_selectReset(false)
 		elseif start.onlineNextAction == 'new_set' then
 			if nakama == nil or nakama.rankedSetStartNextSet == nil or not nakama.rankedSetStartNextSet() then
@@ -1939,10 +1949,6 @@ function start.f_selectMode()
 			start.rankedSetFinished = false
 			start.f_clearOnlineRematchState()
 			start.onlineP2PRequested = true
-			if not start.f_startOnlineP2P() then
-				start.f_leaveOnlineSession()
-				return
-			end
 			start.f_selectReset(false)
 		elseif start.onlineNextAction == 'rematch' then
 			local snap = start.onlineRematchSnapshot
@@ -1955,7 +1961,7 @@ function start.f_selectMode()
 				start.f_leaveOnlineSession()
 				return
 			end
-			if not start.f_waitOnlineP2P(300) then
+			if not start.f_waitOnlineP2P(1200) then
 				start.f_leaveOnlineSession()
 				return
 			end
@@ -2011,7 +2017,7 @@ function start.f_selectMode()
 			return
 		end
 		if start.onlineP2PRequested then
-			if not start.f_waitOnlineP2P(300) then
+			if not start.f_startOnlineP2P() or not start.f_waitOnlineP2P(1200) then
 				start.onlineP2PRequested = false
 				start.f_leaveOnlineSession()
 				return
@@ -2452,6 +2458,9 @@ function launchFight(data)
 		t.stageNo = start.f_getStageRef(t.stage)
 		t.stageAssigned = data.stageNo ~= nil or t.stage ~= ''
 		t.stageNo = data.stageNo or start.f_getStageRef(t.stage)
+		-- The given stage is used even where the stage menu or a random stage
+		-- would choose one (online rematches, lobby spectators).
+		t.forceStage = data.forceStage == true
 		start.p[1].numChars = data.p1numchars or math.max(start.p[1].numChars, #t.p1char)
 		start.p[1].teamMode = start.f_stringToTeamMode(data.p1teammode) or start.p[1].teamMode
 		start.p[2].numChars = data.p2numchars or math.max(start.p[2].numChars, #t.p2char)
@@ -2467,11 +2476,19 @@ function launchFight(data)
 				reset = true
 			end
 			cnt = cnt + 1
+			-- An entry may be {ref = n, pal = n}: an exact selection (online
+			-- rematch and lobby spectator snapshots).
+			local entryPal = nil
+			if type(v) == 'table' then
+				entryPal = v.pal
+				v = v.ref
+			end
 			local ref = type(v) == 'number' and math.floor(v) or start.f_getCharRef(v)
 			local pal = t.p1pal
 			if type(pal) == 'table' then
 				pal = pal[cnt]
 			end
+			pal = entryPal or pal
 			table.insert(start.p[1].t_selected, {
 				ref = ref,
 				pal = pal or start.f_selectPal(ref),
@@ -2491,11 +2508,17 @@ function launchFight(data)
 		cnt = 0
 		for _, v in main.f_sortKeys(t.p2char) do
 			cnt = cnt + 1
+			local entryPal = nil
+			if type(v) == 'table' then
+				entryPal = v.pal
+				v = v.ref
+			end
 			local ref = type(v) == 'number' and math.floor(v) or start.f_getCharRef(v)
 			local pal = t.p2pal
 			if type(pal) == 'table' then
 				pal = pal[cnt]
 			end
+			pal = entryPal or pal
 			table.insert(start.p[2].t_selected, {
 				ref = ref,
 				pal = pal or start.f_selectPal(ref),

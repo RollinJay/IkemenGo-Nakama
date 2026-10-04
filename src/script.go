@@ -965,9 +965,12 @@ func luaKeyToString(k lua.LValue) string {
 // -------------------------------------------------------------------------------------------------
 // Register external functions to be called from Lua scripts
 func systemScriptInit(l *lua.LState) {
+	cbrRegisterLua(l)
 	triggerRedirection(l)
 	triggerFunctions(l)
 	nakamaScriptInit(l)
+	matchReplayScriptInit(l)
+	localReplayScriptInit(l)
 	luaRegister(l, "addChar", func(l *lua.LState) int {
 		/*Add a character definition to the select screen.
 		@function addChar
@@ -2920,6 +2923,8 @@ func systemScriptInit(l *lua.LState) {
 				sys.loader.reset()
 			}
 		}()
+		// A recorded local match is saved when the game ends.
+		defer localReplay.finish()
 		sys.keyString = ""
 		sys.keyInput = KeyUnknown
 		sys.luaDiscardDrawQueue()
@@ -4819,6 +4824,19 @@ func systemScriptInit(l *lua.LState) {
 		buildFlatOrder("Option Info", []string{"option_info", "keymenu"}, "keymenu.itemname.", lTable)
 		populateItemName("Select Info", []string{"select_info", "teammenu"}, "teammenu.itemname.", "team", lTable)
 		buildTeamOrder("Select Info", []string{"select_info", "teammenu"}, lTable)
+		// Lobby menus: order and hiding follow the INI, as in [Title Info].
+		for _, s := range []struct {
+			prefix string
+			path   []string
+		}{
+			{"browser.menu.itemname.", []string{"lobby_info", "browser", "menu"}},
+			{"settings.menu.itemname.", []string{"lobby_info", "settings", "menu"}},
+			{"room.menu.itemname.", []string{"lobby_info", "room", "menu"}},
+			{"room.playermenu.itemname.", []string{"lobby_info", "room", "playermenu"}},
+		} {
+			populateItemName("Lobby Info", s.path, s.prefix, "flat", lTable)
+			buildFlatOrder("Lobby Info", s.path, s.prefix, lTable)
+		}
 
 		l.Push(lTable)
 		return 1
@@ -5719,6 +5737,9 @@ func systemScriptInit(l *lua.LState) {
 		if sys.netConnection != nil {
 			sys.netConnection.recording, _ = os.Create(strArg(l, 1))
 			sys.netConnection.headerWritten = false
+			if sys.netConnection.recording != nil {
+				matchReplay.setSessionFile(strArg(l, 1))
+			}
 		}
 		return 0
 	})
@@ -5736,6 +5757,9 @@ func systemScriptInit(l *lua.LState) {
 			sys.netConnection.recording = nil
 			sys.netConnection.headerWritten = false
 		}
+		// Match replays: the matches that ended are written, and the
+		// session's own replay (closed above) goes when they cover it.
+		matchReplay.stop()
 		return 0
 	})
 	luaRegister(l, "resetAILevel", func(l *lua.LState) int {
@@ -7148,12 +7172,16 @@ func systemScriptInit(l *lua.LState) {
 		/*Set the text content of a text sprite.
 		@function textImgSetText
 		@tparam TextSprite ts Text sprite userdata.
-		@tparam string text Text to display.*/
+		@tparam string text Text to display.
+		@tparam[opt] boolean literal If `true`, the text is drawn as given: the
+		  two characters `\n` stay as they are instead of starting a new line
+		  (for text typed by players). Real line breaks still start new lines.*/
 		ts, ok := toUserData(l, 1).(*TextSprite)
 		if !ok {
 			userDataError(l, 1, ts)
 		}
 		ts.text = strArg(l, 2)
+		ts.literal = !nilArg(l, 3) && boolArg(l, 3)
 		if ts.textWrap {
 			ts.wrapText(ts.text, len([]rune(ts.text)))
 		}

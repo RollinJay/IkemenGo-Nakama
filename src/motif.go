@@ -1377,6 +1377,8 @@ type Motif struct {
 	WarningInfo     WarningInfoProperties               `ini:"warning_info"`
 	NakamaInfo      NakamaInfoProperties                `ini:"nakama_info"`
 	NakamaBgDef     BgDefProperties                     `ini:"nakamabgdef"`
+	LobbyInfo       LobbyInfoProperties                 `ini:"lobby_info"`
+	LobbyBgDef      BgDefProperties                     `ini:"lobbybgdef"`
 	Border          BorderInfoProperties                `ini:"border"`
 	Glyphs          map[string]*GlyphProperties         `ini:"glyphs" literal:"true" insensitivekeys:"false" sff:"GlyphsSff"`
 	fntIndexByKey   map[string]int                      // filepath|height -> index
@@ -1765,6 +1767,7 @@ func loadMotif(def string) (*Motif, error) {
 				"victorybg", "winbg",
 				"optionbg", "replaybg", "attractbg",
 				"challengerbg", "hiscorebg",
+				"nakamabg", "lobbybg",
 			} {
 				if strings.HasPrefix(lb, p) {
 					// Allow BgDef sections that should be mapped into BgDefProperties.
@@ -2532,6 +2535,16 @@ func (m *Motif) loadFiles() {
 	if _, err := m.IniFile.GetSection("NakamaBgDef"); err == nil {
 		m.loadBgDefProperties(&m.NakamaBgDef, "nakamabg", m.Files.Spr)
 	}
+	// The lobby screens are lists and panels like the options screen, so a
+	// screenpack without [LobbyBgDef] gets its options background, and the
+	// title background without that.
+	if _, err := m.UserIniFile.GetSection("LobbyBgDef"); err == nil {
+		m.loadBgDefProperties(&m.LobbyBgDef, "lobbybg", m.Files.Spr)
+	} else if _, err := m.UserIniFile.GetSection("OptionBgDef"); err == nil {
+		m.LobbyBgDef = m.OptionBgDef
+	} else {
+		m.LobbyBgDef = m.TitleBgDef
+	}
 	if _, err := m.UserIniFile.GetSection("HiscoreBgDef"); err == nil {
 		m.loadBgDefProperties(&m.HiscoreBgDef, "hiscorebg", m.Files.Spr)
 	} else {
@@ -2729,6 +2742,10 @@ func (m *Motif) applyPostParsePosAdjustments() {
 		&m.ReplayInfo.Menu,
 		&m.AttractMode.Menu,
 		&m.OptionInfo.KeyMenu.MenuProperties,
+		&m.LobbyInfo.Browser.Menu,
+		&m.LobbyInfo.Settings.Menu,
+		&m.LobbyInfo.Room.Menu,
+		&m.LobbyInfo.Room.PlayerMenu,
 	} {
 		shiftMenu(me)
 	}
@@ -3386,7 +3403,9 @@ func (me *MotifMenu) init(m *Motif) {
 		}
 		me.reopenLock = false
 	}
-	openPressed := sys.esc || sys.uiRawInput(pm.Menu.Cancel.Key, -1)
+	// A match replay's input is its players'; the viewer opens the menu (or
+	// leaves the replay) with Esc only.
+	openPressed := sys.esc || (!sys.playingMatchReplay() && sys.uiRawInput(pm.Menu.Cancel.Key, -1))
 
 	if !sys.sel.gameParams.PauseMenu {
 		if openPressed {
@@ -6168,7 +6187,7 @@ func (vi *MotifVictory) isEnabled() bool {
 func (vi *MotifVictory) init(m *Motif) {
 	if !m.VictoryScreen.Enabled || !vi.isEnabled() || sys.winnerTeam() < 1 ||
 		(sys.winnerTeam() == 2 && !m.VictoryScreen.Cpu.Enabled) ||
-		((sys.gameMode == "versus" || sys.gameMode == "netplayversus") && !m.VictoryScreen.Vs.Enabled) {
+		((sys.gameMode == "versus" || sys.gameMode == "netplayversus" || sys.gameMode == "netplaylobby") && !m.VictoryScreen.Vs.Enabled) {
 		vi.initialized = true
 		return
 	}

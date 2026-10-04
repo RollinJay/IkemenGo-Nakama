@@ -347,20 +347,56 @@ func runNakamaServer(ctx context.Context, cfg IkemenServerConfig) error {
 	if binary == "" {
 		return errors.New("Nakama executable not found; set nakama_binary in the server config")
 	}
-	args := append([]string{}, cfg.ExtraArgs...)
-	if cfg.NakamaConfig != "" {
-		configPath := cfg.NakamaConfig
-		if !filepath.IsAbs(configPath) && cfg.WorkingDir == "" {
-			configPath = filepath.Join(sys.baseDir, configPath)
-		}
-		args = append([]string{"--config", configPath}, args...)
-	}
-	cmd := exec.CommandContext(ctx, binary, args...)
+	workDir := sys.baseDir
 	if cfg.WorkingDir != "" {
-		cmd.Dir = cfg.WorkingDir
-	} else {
-		cmd.Dir = sys.baseDir
+		workDir = cfg.WorkingDir
 	}
+	configPath := ""
+	if cfg.NakamaConfig != "" {
+		configPath = cfg.NakamaConfig
+		if !filepath.IsAbs(configPath) {
+			configPath = filepath.Join(workDir, configPath)
+		}
+		// Nakama runs fine without a YAML file; the wizard only suggests a path.
+		if _, err := os.Stat(configPath); err != nil {
+			fmt.Fprintf(os.Stdout, "[SERVER] %s not found; starting Nakama with command-line settings only\n", configPath)
+			configPath = ""
+		}
+	}
+	// The wizard's values must reach Nakama, otherwise the generated client
+	// profile (port/key) can disagree with the running server. ExtraArgs come
+	// last so a host can still override any of them.
+	args := []string{}
+	if configPath != "" {
+		args = append(args, "--config", configPath)
+	}
+	if cfg.DatabaseDSN != "" {
+		args = append(args, "--database.address", cfg.DatabaseDSN)
+	}
+	dbArgs := append([]string{}, args...)
+	args = append(args,
+		"--socket.port", strconv.Itoa(cfg.NakamaHTTPPort),
+		"--socket.server_key", cfg.ServerKey,
+		"--console.port", strconv.Itoa(cfg.NakamaConsolePort),
+		// IKEMEN's replay header exceeds Nakama's 4 KiB default message limit.
+		"--socket.max_message_size_bytes", "65536",
+	)
+	if cfg.BindAddress != "" && cfg.BindAddress != "0.0.0.0" {
+		args = append(args, "--socket.address", cfg.BindAddress)
+	}
+	args = append(args, cfg.ExtraArgs...)
+
+	// Nakama refuses to start on an unmigrated database; migrate is idempotent.
+	migrate := exec.CommandContext(ctx, binary, append([]string{"migrate", "up"}, dbArgs...)...)
+	migrate.Dir = workDir
+	migrate.Env = append(os.Environ(), cfg.Environment...)
+	migrate.Stdout, migrate.Stderr = os.Stdout, os.Stderr
+	if err := migrate.Run(); err != nil {
+		return fmt.Errorf("nakama database migration failed: %w", err)
+	}
+
+	cmd := exec.CommandContext(ctx, binary, args...)
+	cmd.Dir = workDir
 	cmd.Env = append(os.Environ(), cfg.Environment...)
 	var output io.Writer = os.Stdout
 	if cfg.LogFile != "" {

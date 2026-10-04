@@ -33,6 +33,20 @@ type RollbackProperties struct {
 	DesyncTest            bool `ini:"DesyncTest" sync:"host"`
 	DesyncTestFrames      int  `ini:"DesyncTestFrames" sync:"host"`
 	DesyncTestAI          bool `ini:"DesyncTestAI" sync:"host"`
+	// Local publication delay for the Nakama spectator stream; not gameplay state.
+	ReplayBroadcastDelay int `ini:"ReplayBroadcastDelay"`
+}
+
+// netAddrIP returns the IP of a TCP or UDP address (the session may run over
+// TCP or over the Nakama P2P stream).
+func netAddrIP(addr net.Addr) net.IP {
+	switch a := addr.(type) {
+	case *net.TCPAddr:
+		return a.IP
+	case *net.UDPAddr:
+		return a.IP
+	}
+	return nil
 }
 
 // TODO: Merge with system.go
@@ -110,9 +124,9 @@ func (rs *RollbackSystem) preMatchSetup() error {
 		if !sys.netConnection.IsConnected() || sys.netConnection.isClosing() || sys.esc || sys.gameEnd {
 			return Error("Rollback connection was closed before startup")
 		}
-		// Use the actual TCP peer address (also resolves client-side hostnames).
-		remoteIP := sys.netConnection.conn.RemoteAddr().(*net.TCPAddr).IP
-		localIP := sys.netConnection.conn.LocalAddr().(*net.TCPAddr).IP
+		// Use the actual peer address (also resolves client-side hostnames).
+		remoteIP := netAddrIP(sys.netConnection.conn.RemoteAddr())
+		localIP := netAddrIP(sys.netConnection.conn.LocalAddr())
 		if remoteIP.To4() == nil {
 			return Error("Rollback currently requires an IPv4 peer address")
 		}
@@ -120,47 +134,50 @@ func (rs *RollbackSystem) preMatchSetup() error {
 		localPort := rs.session.config.Port
 		remotePort := sys.netConnection.rollbackRemotePort
 
-		if localPort < 1 || localPort > 65535 || remotePort < 1 || remotePort > 65535 {
-			return Error("Rollback UDP ports were not negotiated")
-		}
-
-		// A local/proxy peer needs different UDP ports or packets loop back into our own rollback socket.
-		if (remoteIP.IsLoopback() || remoteIP.Equal(localIP)) && localPort == remotePort {
-			return fmt.Errorf("Cannot use UDP port %d for both rollback players on the same machine.\nConfigure a different Rollback.Port for each instance.", localPort)
-		}
-
-		// A Nakama P2P socket, when present, is the preferred gameplay transport.
-		// It is already bound to the rollback port and has completed the NAT handshake,
-		// so transferring it into GGPO preserves the NAT mapping instead of rebinding.
-		var gameplayConn *net.UDPConn
+		// A ready Nakama P2P socket is the preferred gameplay transport: GGPO
+		// gets its own channel on the socket that already passed the NAT
+		// handshake (and, for Nakama sessions, carries the netplay stream), so
+		// nothing is rebound and the NAT mapping is kept.
+		var gameplayConn net.PacketConn
 		transportName := "legacy-udp"
 		if sys.nakama != nil && sys.nakama.CurrentMatchID() != "" {
 			p2p := sys.nakama.P2P()
+			if p2p != nil && !sys.nakama.P2PReady() {
+				// A failed/unfinished handshake must not block the match: release the
+				// port and use the legacy UDP path to the TCP-negotiated endpoint.
+				log.Printf("Nakama P2P not ready; falling back to legacy rollback UDP")
+				sys.nakama.StopP2P()
+				p2p = nil
+			}
 			if p2p != nil {
-				if p2p.LocalPort() != localPort {
-					return fmt.Errorf("Nakama P2P socket is bound to UDP port %d but rollback requires local port %d; start P2P with the configured Rollback.Port", p2p.LocalPort(), localPort)
-				}
-				var p2pRemote *net.UDPAddr
-				var err error
-				gameplayConn, p2pRemote, err = sys.nakama.TakeP2PTransport()
+				conn, p2pRemote, err := sys.nakama.P2PGameplayConn()
 				if err != nil {
 					return fmt.Errorf("Nakama P2P transport is not ready: %w", err)
 				}
 				if p2pRemote == nil || p2pRemote.IP.To4() == nil || p2pRemote.Port < 1 || p2pRemote.Port > 65535 {
-					if gameplayConn != nil {
-						_ = gameplayConn.Close()
-					}
+					_ = conn.Close()
 					return Error("Nakama P2P transport returned an invalid remote endpoint")
 				}
+				gameplayConn = conn
 				remoteIP = p2pRemote.IP.To4()
 				remotePort = p2pRemote.Port
 				transportName = "nakama-p2p"
 			}
 		}
 
+		if gameplayConn == nil {
+			if localPort < 1 || localPort > 65535 || remotePort < 1 || remotePort > 65535 {
+				return Error("Rollback UDP ports were not negotiated")
+			}
+			// A local/proxy peer needs different UDP ports or packets loop back into our own rollback socket.
+			if (remoteIP.IsLoopback() || remoteIP.Equal(localIP)) && localPort == remotePort {
+				return fmt.Errorf("Cannot use UDP port %d for both rollback players on the same machine.\nConfigure a different Rollback.Port for each instance.", localPort)
+			}
+		}
+
 		rs.session.remoteIp = remoteIP.String()
 		rs.session.remotePort = remotePort
-		log.Printf("Rollback startup: TCP local=%s peer=%s; UDP transport=%s local=0.0.0.0:%d peer=%s",
+		log.Printf("Rollback startup: session local=%s peer=%s; UDP transport=%s local=0.0.0.0:%d peer=%s",
 			sys.netConnection.conn.LocalAddr(), sys.netConnection.conn.RemoteAddr(), transportName, localPort,
 			net.JoinHostPort(rs.session.remoteIp, fmt.Sprint(remotePort)))
 		var err error
@@ -187,12 +204,56 @@ func (rs *RollbackSystem) preMatchSetup() error {
 		// Borrow netConnection replay recording
 		rs.session.recording = sys.netConnection.recording
 
-		// If Nakama has a joined relay/signaling match, publish the rollback-resolved
-		// input stream through it. The ten-second settlement window is enforced by
-		// RollbackReplayStream rather than by the transport.
-		if sys.nakama != nil && sys.nakama.CurrentMatchID() != "" {
-			rs.session.replayStream.SetSink(&nakamaReplaySink{client: sys.nakama})
-			rs.session.replayStream.Begin(sys.netConnection.replayHeader, sys.netConnection.syncSeed, sys.netConnection.preMatchTime)
+		// If Nakama has a joined relay/signaling match, the netplay host (P1)
+		// publishes the rollback-resolved input stream through it; spectators
+		// need one copy. The settlement delay is enforced by RollbackReplayStream
+		// rather than by the transport, and a lobby sets it, the match
+		// description, or no publication at all (nakama.setReplayPublish).
+		if sys.nakama != nil && sys.nakama.CurrentMatchID() != "" && rs.session.host == "" {
+			if publish := sys.nakama.ReplayPublish(); !publish.Disabled {
+				stage := ""
+				if sys.stage != nil {
+					stage = sys.stage.def
+				}
+				rs.session.replayStream.SetDelay(publish.DelaySeconds)
+				rs.session.replayStream.SetSink(&nakamaReplaySink{client: sys.nakama})
+				rs.session.replayStream.Begin(ReplayStreamStart{
+					Header:       sys.netConnection.replayHeader,
+					Seed:         sys.netConnection.syncSeed,
+					PreMatchTime: sys.netConnection.preMatchTime,
+					MatchTime:    sys.matchTime,
+					Stage:        stage,
+					Info:         publish.Info,
+					Segment:      sys.nakama.nextReplaySegment(sys.roundNo),
+					Rules:        currentMatchRules(),
+					InputRemap:   currentInputRemap(),
+					AILevels:     currentAILevels(),
+					Context:      currentMatchContext(),
+					Params:       currentMatchParams(),
+				})
+			}
+		}
+
+		// Match replays (replay_match.go) record every rollback session of
+		// the match, whether or not a stream is published.
+		if matchReplay.active() {
+			stage := ""
+			if sys.stage != nil {
+				stage = sys.stage.def
+			}
+			matchReplay.beginSession(ReplayStreamStart{
+				Header:       sys.netConnection.replayHeader,
+				Seed:         sys.netConnection.syncSeed,
+				PreMatchTime: sys.netConnection.preMatchTime,
+				MatchTime:    sys.matchTime,
+				Stage:        stage,
+				Rules:        currentMatchRules(),
+				InputRemap:   currentInputRemap(),
+				AILevels:     currentAILevels(),
+				Context:      currentMatchContext(),
+				StartState:   matchStartState,
+				Params:       currentMatchParams(),
+			}, sys.roundNo)
 		}
 
 		// Transfer the active netConnection to the rollback system
@@ -692,6 +753,9 @@ func (rs *RollbackSession) SaveReplay() {
 	if rs.replayStream != nil {
 		rs.replayStream.End(int32(frameCount), rs)
 	}
+	if !rs.syncTest {
+		matchReplay.endSession(rs, frameCount)
+	}
 
 	if rs.recording == nil || frameCount <= 0 {
 		return
@@ -1021,7 +1085,7 @@ func (rs *RollbackSession) AnyButton() bool {
 	return false
 }
 
-func (rs *RollbackSession) InitP1(numPlayers int, localPort int, remotePort int, remoteIp string, preboundConn ...*net.UDPConn) error {
+func (rs *RollbackSession) InitP1(numPlayers int, localPort int, remotePort int, remoteIp string, preboundConn ...net.PacketConn) error {
 	if rs.config.GgpoLogsEnabled {
 		logFileName := fmt.Sprintf("save/logs/Rollback-%s.log", rs.timestamp)
 		f, err := os.OpenFile(logFileName, os.O_CREATE|os.O_RDWR, 0666)
@@ -1078,7 +1142,7 @@ func (rs *RollbackSession) InitP1(numPlayers int, localPort int, remotePort int,
 	return nil
 }
 
-func (rs *RollbackSession) InitP2(numPlayers int, localPort int, remotePort int, remoteIp string, preboundConn ...*net.UDPConn) error {
+func (rs *RollbackSession) InitP2(numPlayers int, localPort int, remotePort int, remoteIp string, preboundConn ...net.PacketConn) error {
 	if rs.config.GgpoLogsEnabled {
 		logFileName := fmt.Sprintf("save/logs/Rollback-%s.log", rs.timestamp)
 		f, err := os.OpenFile(logFileName, os.O_CREATE|os.O_RDWR, 0666)

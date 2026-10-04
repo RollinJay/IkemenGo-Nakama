@@ -1,0 +1,4 @@
+M PLUS 1 Regular, from https://github.com/coz-m/MPLUS_FONTS
+(fonts/MPLUS1/ttf/MPLUS1-Regular.ttf at commit
+8dbb180f464f388b76bd5d7d79e303a5ce93388e), unmodified.
+License: SIL Open Font License 1.1 (OFL.txt).

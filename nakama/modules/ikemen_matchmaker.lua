@@ -2,18 +2,22 @@ local nk = require("nakama")
 
 -- IKEMEN GO ranked/unranked matchmaking.
 --
--- Elo is read from Nakama storage, not trusted from the client ticket.
--- Game developers tune per-game ranked settings below.
+-- Built on Nakama's own matchmaker (the Lua runtime has no matchmaker
+-- processor/override hook; those are Go-runtime only). Compatibility buckets
+-- come from the client's "+properties.<key>:<value>" query clauses. For ranked
+-- tickets a realtime before-hook replaces the client-supplied Elo with the
+-- stored rating and appends the allowed Elo window to the ticket query, so
+-- the rating is never trusted from the client.
 
 local DEFAULTS = {
     initial_rating = 1000,
-    k_factor = 32,
     elo_range = 100,
+    max_elo_range = 1000,
 }
 
 local GAME_CONFIG = {
     -- Example:
-    -- ["my_game"] = { initial_rating = 1000, k_factor = 32, elo_range = 100 },
+    -- ["my_game"] = { initial_rating = 1000, elo_range = 100, max_elo_range = 400 },
 }
 
 local function config_for(game)
@@ -30,118 +34,37 @@ local function get_rating(user_id, game)
     if #records == 0 then
         return cfg.initial_rating
     end
-
     local value = records[1].value
     if type(value) == "table" and value.rating ~= nil then
         return tonumber(value.rating) or cfg.initial_rating
     end
-
-    if type(value) == "string" then
-        local decoded = nk.json_decode(value)
-        if type(decoded) == "table" and decoded.rating ~= nil then
-            return tonumber(decoded.rating) or cfg.initial_rating
-        end
-    end
-
     return cfg.initial_rating
 end
 
-local function prop_string(entry, key, fallback)
-    local value = entry.properties and entry.properties[key]
-    if value == nil then
-        return fallback
+local function before_matchmaker_add(context, envelope)
+    local add = envelope.matchmaker_add
+    if type(add) ~= "table" then
+        return envelope
     end
-    return tostring(value)
-end
-
-local function entry_key(entry)
-    local mode = prop_string(entry, "mode", "unranked")
-    local game = prop_string(entry, "game", "")
-    local build = prop_string(entry, "build", "")
-    local region = prop_string(entry, "region", "")
-    local best_of = prop_string(entry, "ranked_best_of", "3")
-    local switch_sides = prop_string(entry, "ranked_switch_sides", "false")
-    local winner_keeps = prop_string(entry, "ranked_winner_keeps_selection", "false")
-    if mode ~= "ranked" then
-        best_of, switch_sides, winner_keeps = "0", "false", "false"
-    end
-    return table.concat({ game, build, mode, region, best_of, switch_sides, winner_keeps }, "\31")
-end
-
-local function numeric_property(entry, key, fallback)
-    local value = entry.properties and entry.properties[key]
-    local number = tonumber(value)
-    if number == nil then
-        return fallback
-    end
-    return number
-end
-
-local function process_bucket(entries, game)
-    local groups = {}
-    local used = {}
-
-    for i, first in ipairs(entries) do
-        if not used[i] then
-            local first_mode = prop_string(first, "mode", "unranked")
-            local best_index = nil
-            local best_distance = nil
-
-            if first_mode == "ranked" then
-                local first_rating = get_rating(first.presence.user_id, game)
-                local first_range = numeric_property(first, "elo_range", config_for(game).elo_range)
-                for j, candidate in ipairs(entries) do
-                    if i ~= j and not used[j] then
-                        local candidate_rating = get_rating(candidate.presence.user_id, game)
-                        local candidate_range = numeric_property(candidate, "elo_range", config_for(game).elo_range)
-                        local distance = math.abs(first_rating - candidate_rating)
-                        local allowed = math.max(first_range, candidate_range)
-                        if distance <= allowed and (best_distance == nil or distance < best_distance) then
-                            best_index = j
-                            best_distance = distance
-                        end
-                    end
-                end
-            else
-                for j = i + 1, #entries do
-                    if not used[j] then
-                        best_index = j
-                        break
-                    end
-                end
-            end
-
-            if best_index ~= nil then
-                used[i] = true
-                used[best_index] = true
-                table.insert(groups, { first, entries[best_index] })
-            end
-        end
-    end
-	return groups
-end
-
-local function matchmaker_processor(context, entries)
-    local buckets = {}
-    for _, entry in ipairs(entries) do
-        local key = entry_key(entry)
-        if buckets[key] == nil then
-            buckets[key] = {}
-        end
-        table.insert(buckets[key], entry)
+    add.string_properties = add.string_properties or {}
+    add.numeric_properties = add.numeric_properties or {}
+    if add.string_properties.mode ~= "ranked" then
+        return envelope
     end
 
-    local groups = {}
-    for _, bucket in pairs(buckets) do
-        local game = prop_string(bucket[1], "game", "")
-        local processed = process_bucket(bucket, game)
-        for _, group in ipairs(processed) do
-            if #group >= 2 then
-                table.insert(groups, group)
-            end
-        end
-    end
-    return groups
+    local game = tostring(add.string_properties.game or "")
+    local cfg = config_for(game)
+    local rating = math.floor(get_rating(context.user_id, game) + 0.5)
+    local range = math.floor(tonumber(add.numeric_properties.elo_range) or cfg.elo_range)
+    if range < 0 then range = 0 end
+    if range > cfg.max_elo_range then range = cfg.max_elo_range end
+
+    -- Server-authoritative values; the client's copies are overwritten.
+    add.numeric_properties.elo = rating
+    add.numeric_properties.elo_range = range
+    add.query = string.format("%s +properties.elo:>=%d +properties.elo:<=%d",
+        tostring(add.query or ""), rating - range, rating + range)
+    return envelope
 end
 
 local function matchmaker_matched(context, matched_users)
@@ -160,5 +83,5 @@ local function matchmaker_matched(context, matched_users)
     })
 end
 
-nk.register_matchmaker_processor(matchmaker_processor)
+nk.register_rt_before(before_matchmaker_add, "MatchmakerAdd")
 nk.register_matchmaker_matched(matchmaker_matched)

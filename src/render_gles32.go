@@ -1467,7 +1467,8 @@ func (r *Renderer_GLES32) prepareModelPipeline(bufferIndex uint32, env *Environm
 	gl.BindVertexArray(r.modelVAO)
 	gl.BindFramebuffer(gl.FRAMEBUFFER, r.fbo)
 
-	gl.Viewport(0, 0, sys.scrrect[2], sys.scrrect[3])
+	// Honor the border presentation origin; the shadow pass changed the viewport.
+	r.SetViewport(sys.presentation.origin[0], sys.presentation.origin[1], sys.scrrect[2], sys.scrrect[3])
 	r.SetDepthMask(true)
 	gl.Clear(gl.DEPTH_BUFFER_BIT)
 	//gl.Enable(gl.TEXTURE_2D)

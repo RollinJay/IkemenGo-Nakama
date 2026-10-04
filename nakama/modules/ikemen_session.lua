@@ -40,6 +40,8 @@ local function match_init(context, params)
         rematch_round = 1,
         rematch_choices = {},
         rematch_set_final = false,
+        departed = {},
+        empty_ticks = 0,
     }
     for _, entry in ipairs(params.expected_users or {}) do
         if entry.presence and entry.presence.user_id then
@@ -133,9 +135,36 @@ local function match_join(context, dispatcher, tick, state, presences)
         state.players[presence.user_id] = {
             session_id = presence.session_id,
             username = presence.username,
+            presence = presence,
         }
+        state.departed[presence.user_id] = nil
     end
     return state
+end
+
+-- Relay to everyone except the sender, and keep the sender presence on the
+-- message so clients can tell who published it.
+local function relay(dispatcher, state, message)
+    local sender_id = message.sender and message.sender.user_id or ""
+    local targets = {}
+    for user_id, player in pairs(state.players) do
+        if user_id ~= sender_id and player.presence ~= nil then
+            targets[#targets + 1] = player.presence
+        end
+    end
+    if #targets > 0 then
+        dispatcher.broadcast_message(message.op_code, message.data, targets, message.sender)
+    end
+end
+
+-- A 1v1 post-match decision cannot complete once the opponent has left.
+local function resolve_departure(dispatcher, state, reason)
+    local departed_id = next(state.departed)
+    if state.mode == "ranked" and not state.rematch_set_final and departed_id ~= nil then
+        rematch_decision(dispatcher, state, "forfeit", nil, departed_id, reason)
+    else
+        rematch_decision(dispatcher, state, "exit", nil, departed_id or "", reason)
+    end
 end
 
 local function match_leave(context, dispatcher, tick, state, presences)
@@ -146,6 +175,7 @@ local function match_leave(context, dispatcher, tick, state, presences)
         end
         state.players[presence.user_id] = nil
         state.rematch_choices[presence.user_id] = nil
+        state.departed[presence.user_id] = true
     end
     local count = 0
     for _ in pairs(state.players) do
@@ -185,8 +215,8 @@ local function match_loop(context, dispatcher, tick, state, messages)
                         elseif action == "forfeit" then
                             if state.mode == "ranked" and not state.rematch_set_final then
                                 rematch_decision(dispatcher, state, "forfeit", nil, sender_id, "player_forfeit")
-                            elseif state.rematch_set_final then
-                                rematch_decision(dispatcher, state, "exit", nil, sender_id, "invalid_final_action")
+                            else
+                                rematch_decision(dispatcher, state, "exit", nil, sender_id, "invalid_forfeit_action")
                             end
                         elseif action == "select" then
                             if state.rematch_set_final then
@@ -199,6 +229,10 @@ local function match_loop(context, dispatcher, tick, state, messages)
                             -- An exit/forfeit from either side still resolves immediately.
                             if state.mode == "ranked" and state.rematch_set_final then
                                 state.rematch_choices[sender_id] = true
+                                if player_count(state) < 2 then
+                                    resolve_departure(dispatcher, state, "opponent_left")
+                                    return state
+                                end
                                 local choice_count = 0
                                 for _ in pairs(state.rematch_choices) do
                                     choice_count = choice_count + 1
@@ -216,6 +250,10 @@ local function match_loop(context, dispatcher, tick, state, messages)
                                 rematch_decision(dispatcher, state, "select", nil, sender_id, "invalid_snapshot")
                             else
                                 state.rematch_choices[sender_id] = command.snapshot
+                                if player_count(state) < 2 then
+                                    resolve_departure(dispatcher, state, "opponent_left")
+                                    return state
+                                end
                                 local choice_count = 0
                                 local ids = {}
                                 for user_id in pairs(state.rematch_choices) do
@@ -242,8 +280,17 @@ local function match_loop(context, dispatcher, tick, state, messages)
             end
         else
             -- Signaling, replay, and other match messages are forwarded unchanged.
-            dispatcher.broadcast_message(message.op_code, message.data, nil, nil)
+            relay(dispatcher, state, message)
         end
+    end
+    -- Matches are not stopped automatically when empty (or never joined).
+    if player_count(state) == 0 then
+        state.empty_ticks = state.empty_ticks + 1
+        if state.empty_ticks > 10 * 60 then
+            return nil
+        end
+    else
+        state.empty_ticks = 0
     end
     return state
 end

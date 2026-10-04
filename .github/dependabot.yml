@@ -28,3 +28,6 @@ updates:
       # go-sdl2 is pinned to a pre-release pseudo-version that is newer than the
       # latest tag (v0.4.x); dependabot would "bump" it backwards.
       - dependency-name: "github.com/veandco/go-sdl2"
+      # src/model.go is written against gltf v0.24's API; v0.29 changed texture
+      # indices and accessor reads, and the engine no longer builds with it.
+      - dependency-name: "github.com/qmuntal/gltf"

@@ -43,18 +43,26 @@ nakama.on("chat_message", function(_, event)
     -- event.chat contains the Nakama channel message.
 end)
 
--- Default lobby behavior is FIFO queue rotation.
-nakama.createLobby({
-    name = "Open Lobby",
-    format = "queue",
-    max_players = 8
-})
+-- Lobbies (see README.md, Lobbies). Lobby requests need the connection, so
+-- the example lobby is created once "connected" has arrived. The lobby
+-- screens (external/script/lobby.lua) create, list and join lobbies the same
+-- way. These handlers are named ("example"), so they do not replace another
+-- script's handlers for the same events.
+nakama.on("connected", function(_, event)
+    -- The default format is FIFO queue rotation. A winner-keeps-playing lobby
+    -- whose winner stays for at most three games in a row would use
+    -- settings = {name = "Winner Stays - 3 Game Cap", format = "winner_stays_on", max_games = 3}.
+    nakama.createLobby({
+        settings = {
+            name = "Open Lobby",
+            size = 8,
+            format = "queue"
+        }
+    })
+end, "example")
 
--- Optional winner-keeps-playing lobby. The winner may remain active for
--- at most three consecutive games before returning to the end of the queue.
-nakama.createLobby({
-    name = "Winner Stays - 3 Game Cap",
-    format = "winner_stays_on",
-    max_players = 8,
-    max_games = 3
-})
+nakama.on("lobby_created", function(_, event)
+    -- event.match_id, and event.payload.code: the room ID. A client is in one
+    -- match at a time: leave the current one (nakama.leaveMatch()) first.
+    nakama.joinMatch(event.match_id, nil, {code = event.payload.code})
+end, "example")

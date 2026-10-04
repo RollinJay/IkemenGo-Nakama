@@ -13,7 +13,7 @@
       "game": "my_game",
       "build": "1.0.0",
       "region": "us-west",
-      "stun_servers": []
+      "stun_servers": ["stun.l.google.com:19302", "stun.cloudflare.com:3478"]
     }
   ]
 }

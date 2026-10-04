@@ -21,7 +21,10 @@ const (
 	p2pHello             = "hello"
 	p2pAck               = "ack"
 	p2pDefaultInterval   = 75 * time.Millisecond
-	p2pDefaultTimeout    = 5 * time.Second
+	p2pDefaultTimeout    = 20 * time.Second
+	p2pResignalInterval  = 500 * time.Millisecond
+	p2pSTUNTimeout       = 3 * time.Second
+	p2pSTUNRetry         = 500 * time.Millisecond
 	stunBindingRequest   = 0x0001
 	stunBindingSuccess   = 0x0101
 	stunMappedAddress    = 0x0001
@@ -40,6 +43,10 @@ type P2PSignal struct {
 	MatchID    string         `json:"match_id"`
 	Token      string         `json:"token"`
 	Candidates []P2PCandidate `json:"candidates"`
+	// From and To are Nakama user ids. A lobby relays every signal to every
+	// member, so each signal names its sender and the peer it is meant for.
+	From string `json:"from,omitempty"`
+	To   string `json:"to,omitempty"`
 }
 
 type p2PPacket struct {
@@ -50,8 +57,9 @@ type p2PPacket struct {
 }
 
 // NakamaP2P owns the UDP socket used for NAT discovery and hole punching.
-// The socket deliberately remains open after a successful handshake so the
-// caller can transfer it to the GGPO transport without losing the NAT mapping.
+// After a successful handshake the socket stays open for the whole session:
+// a p2pMux shares it between the netplay stream (OpenStream) and GGPO
+// (OpenGameplay), so the NAT mapping is created once and kept alive.
 type NakamaP2P struct {
 	mu          sync.Mutex
 	conn        *net.UDPConn
@@ -61,6 +69,10 @@ type NakamaP2P struct {
 	remoteAddr  *net.UDPAddr
 	local       []P2PCandidate
 	remote      []P2PCandidate
+	selfID      string
+	peerID      string
+	mux         *p2pMux
+	readMu      sync.Mutex // held by whichever code is reading conn
 	ready       chan struct{}
 	closed      chan struct{}
 	readyOnce   sync.Once
@@ -96,6 +108,21 @@ func NewNakamaP2P(matchID string, localPort int, signal func(P2PSignal) error) (
 		timeout:  p2pDefaultTimeout,
 	}
 	return p, nil
+}
+
+// SetPeer names this client and the intended peer (Nakama user ids). Signals
+// then carry both ids, and signals from anyone else are ignored.
+func (p *NakamaP2P) SetPeer(selfID, peerID string) {
+	p.mu.Lock()
+	p.selfID, p.peerID = selfID, peerID
+	p.mu.Unlock()
+}
+
+func (p *NakamaP2P) localSignal() P2PSignal {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return P2PSignal{Magic: p2pMagic, MatchID: p.matchID, Token: p.token,
+		Candidates: append([]P2PCandidate(nil), p.local...), From: p.selfID, To: p.peerID}
 }
 
 func (p *NakamaP2P) UDPConn() *net.UDPConn {
@@ -150,7 +177,7 @@ func (p *NakamaP2P) Start(ctx context.Context, stunServers []string) error {
 	p.local = local
 	p.mu.Unlock()
 	if p.signal != nil {
-		if err := p.signal(P2PSignal{Magic: p2pMagic, MatchID: p.matchID, Token: p.token, Candidates: local}); err != nil {
+		if err := p.signal(p.localSignal()); err != nil {
 			p.Close()
 			return err
 		}
@@ -174,6 +201,12 @@ func (p *NakamaP2P) HandleSignal(signal P2PSignal) error {
 		p.mu.Unlock()
 		// Nakama match broadcasts may be delivered to the sender as well.
 		// Ignore the local signal instead of treating our own socket as the peer.
+		return nil
+	}
+	if (signal.To != "" && p.selfID != "" && signal.To != p.selfID) ||
+		(signal.From != "" && p.peerID != "" && signal.From != p.peerID) {
+		p.mu.Unlock()
+		// Addressed to, or sent by, another lobby member.
 		return nil
 	}
 	p.remoteToken = signal.Token
@@ -225,6 +258,8 @@ func (p *NakamaP2P) gatherCandidates(ctx context.Context, stunServers []string) 
 func (p *NakamaP2P) punchLoop() {
 	timer := time.NewTicker(p.interval)
 	defer timer.Stop()
+	resignal := time.NewTicker(p2pResignalInterval)
+	defer resignal.Stop()
 	deadline := time.NewTimer(p.timeout)
 	defer deadline.Stop()
 	for {
@@ -232,10 +267,18 @@ func (p *NakamaP2P) punchLoop() {
 		case <-p.closed:
 			return
 		case <-p.ready:
+			p.startMux()
 			return
 		case <-deadline.C:
 			p.Close()
 			return
+		case <-resignal.C:
+			// Nakama only relays to peers present when the message is sent, so
+			// keep publishing until the handshake completes; knowing the peer's
+			// token does not mean the peer has received ours.
+			if signal := p.localSignal(); p.signal != nil && len(signal.Candidates) > 0 {
+				_ = p.signal(signal)
+			}
 		case <-timer.C:
 			p.sendPunches()
 		}
@@ -243,6 +286,11 @@ func (p *NakamaP2P) punchLoop() {
 }
 
 func (p *NakamaP2P) sendPunches() {
+	select {
+	case <-p.ready:
+		return // the mux owns the socket now
+	default:
+	}
 	p.mu.Lock()
 	conn := p.conn
 	remote := append([]P2PCandidate(nil), p.remote...)
@@ -265,6 +313,10 @@ func (p *NakamaP2P) sendPunches() {
 }
 
 func (p *NakamaP2P) readHandshake(expectedToken string) error {
+	if !p.readMu.TryLock() {
+		return nil // the mux is reading the socket
+	}
+	defer p.readMu.Unlock()
 	p.mu.Lock()
 	conn := p.conn
 	matchID := p.matchID
@@ -288,14 +340,18 @@ func (p *NakamaP2P) readHandshake(expectedToken string) error {
 		}
 		if packet.Kind == p2pHello && packet.Token == expectedToken {
 			ack, _ := json.Marshal(p2PPacket{Magic: p2pMagic, Kind: p2pAck, MatchID: matchID, Token: p.token})
-			_, _ = conn.WriteToUDP(ack, addr)
-			p.markReady(addr)
+			// Acks are sent redundantly; the mux also answers any later hello,
+			// so a peer whose acks were all lost still completes.
+			for i := 0; i < 3; i++ {
+				_, _ = conn.WriteToUDP(ack, addr)
+			}
 			_ = conn.SetReadDeadline(time.Time{})
+			p.markReady(addr)
 			return nil
 		}
 		if packet.Kind == p2pAck && packet.Token == expectedToken {
-			p.markReady(addr)
 			_ = conn.SetReadDeadline(time.Time{})
+			p.markReady(addr)
 			return nil
 		}
 	}
@@ -303,31 +359,134 @@ func (p *NakamaP2P) readHandshake(expectedToken string) error {
 
 func (p *NakamaP2P) markReady(addr *net.UDPAddr) {
 	p.mu.Lock()
+	if p.mux != nil || p.conn == nil {
+		p.mu.Unlock()
+		return
+	}
 	copy := *addr
 	p.remoteAddr = &copy
+	p.mux = newP2PMux(p.conn, &copy, p.handleLateHandshake)
 	p.mu.Unlock()
 	p.readyOnce.Do(func() { close(p.ready) })
 }
 
-// TakeUDPConn transfers ownership of the already-bound socket to the caller.
-// The P2P object will no longer close the connection after the transfer.
-func (p *NakamaP2P) TakeUDPConn() (*net.UDPConn, error) {
-	if p == nil {
-		return nil, errors.New("nil p2p connection")
+func (p *NakamaP2P) startMux() {
+	p.mu.Lock()
+	m := p.mux
+	p.mu.Unlock()
+	if m != nil {
+		m.start(&p.readMu)
 	}
+}
+
+// handleLateHandshake answers handshake packets that arrive after the local
+// side is ready. The peer keeps sending hellos until it receives an ack, and
+// each address a valid packet arrives from is accepted for session traffic.
+func (p *NakamaP2P) handleLateHandshake(data []byte, from *net.UDPAddr) {
+	var packet p2PPacket
+	if json.Unmarshal(data, &packet) != nil || packet.Magic != p2pMagic {
+		return
+	}
+	p.mu.Lock()
+	conn, m := p.conn, p.mux
+	valid := packet.MatchID == p.matchID && packet.Token != "" && packet.Token == p.remoteToken
+	matchID, token := p.matchID, p.token
+	p.mu.Unlock()
+	if !valid || conn == nil || m == nil {
+		return
+	}
+	m.addKnown(from)
+	if packet.Kind == p2pHello {
+		ack, _ := json.Marshal(p2PPacket{Magic: p2pMagic, Kind: p2pAck, MatchID: matchID, Token: token})
+		_, _ = conn.WriteToUDP(ack, from)
+	}
+}
+
+func (p *NakamaP2P) readyMux() (*p2pMux, error) {
 	select {
 	case <-p.ready:
 	default:
 		return nil, errors.New("p2p connection is not ready")
 	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.conn == nil {
-		return nil, errors.New("p2p UDP socket is already closed or transferred")
+	select {
+	case <-p.closed:
+		return nil, errors.New("p2p connection closed")
+	default:
 	}
-	conn := p.conn
-	p.conn = nil
-	return conn, nil
+	p.mu.Lock()
+	m := p.mux
+	p.mu.Unlock()
+	if m == nil {
+		return nil, errors.New("p2p connection is not ready")
+	}
+	m.start(&p.readMu)
+	return m, nil
+}
+
+// OpenStream opens the reliable netplay stream to the peer. Both peers derive
+// the same KCP conversation id from the two handshake tokens.
+func (p *NakamaP2P) OpenStream() (net.Conn, error) {
+	m, err := p.readyMux()
+	if err != nil {
+		return nil, err
+	}
+	p.mu.Lock()
+	conv := p2pConv(p.token, p.remoteToken, "stream")
+	p.mu.Unlock()
+	return openP2PStream(m, conv)
+}
+
+// OpenGameplay returns a fresh GGPO channel on the shared socket and the peer
+// address to send to. Each rollback match takes a new one; closing it leaves
+// the socket and the netplay stream open.
+func (p *NakamaP2P) OpenGameplay() (net.PacketConn, *net.UDPAddr, error) {
+	m, err := p.readyMux()
+	if err != nil {
+		return nil, nil, err
+	}
+	ch, err := m.attach(p2pTagGGPO, 0)
+	if err != nil {
+		return nil, nil, err
+	}
+	return ch, m.remoteAddr(), nil
+}
+
+// RTT returns the round trip to the peer measured over the punched path
+// (smoothed), and the number of pings behind it; 0, 0 before the handshake
+// or while the peer does not answer pings.
+func (p *NakamaP2P) RTT() (time.Duration, int) {
+	p.mu.Lock()
+	m := p.mux
+	p.mu.Unlock()
+	if m == nil {
+		return 0, 0
+	}
+	return m.rtt()
+}
+
+// State reports the handshake state: connecting, ready, failed or closed.
+func (p *NakamaP2P) State() string {
+	ready, closed := false, false
+	select {
+	case <-p.ready:
+		ready = true
+	default:
+	}
+	select {
+	case <-p.closed:
+		closed = true
+	default:
+	}
+	switch {
+	case ready && closed:
+		return "closed"
+	case ready:
+		return "ready"
+	case closed:
+		return "failed"
+	default:
+		return "connecting"
+	}
 }
 
 func (p *NakamaP2P) Close() {
@@ -404,31 +563,43 @@ func stunBinding(ctx context.Context, conn *net.UDPConn, server *net.UDPAddr) (*
 	binary.BigEndian.PutUint16(request[2:4], 0)
 	binary.BigEndian.PutUint32(request[4:8], stunMagicCookie)
 	copy(request[8:20], tx[:])
-	if _, err := conn.WriteToUDP(request, server); err != nil {
-		return nil, err
-	}
-	deadline := time.Now().Add(p2pDefaultTimeout)
+	deadline := time.Now().Add(p2pSTUNTimeout)
 	if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
 		deadline = d
 	}
-	_ = conn.SetReadDeadline(deadline)
+	defer conn.SetReadDeadline(time.Time{})
 	buf := make([]byte, 4096)
-	for {
-		n, _, err := conn.ReadFromUDP(buf)
-		if err != nil {
+	// UDP requests get lost; resend until an answer or the overall deadline.
+	for time.Now().Before(deadline) {
+		if _, err := conn.WriteToUDP(request, server); err != nil {
 			return nil, err
 		}
-		if n < 20 || binary.BigEndian.Uint32(buf[4:8]) != stunMagicCookie || !equalBytes(buf[8:20], tx[:]) {
-			continue
+		retry := time.Now().Add(p2pSTUNRetry)
+		if retry.After(deadline) {
+			retry = deadline
 		}
-		if binary.BigEndian.Uint16(buf[0:2]) != stunBindingSuccess {
-			continue
-		}
-		addr, err := parseSTUNMappedAddress(buf[:n])
-		if err == nil {
-			return addr, nil
+		_ = conn.SetReadDeadline(retry)
+		for {
+			n, _, err := conn.ReadFromUDP(buf)
+			if err != nil {
+				var ne net.Error
+				if errors.As(err, &ne) && ne.Timeout() {
+					break
+				}
+				return nil, err
+			}
+			if n < 20 || binary.BigEndian.Uint32(buf[4:8]) != stunMagicCookie || !equalBytes(buf[8:20], tx[:]) {
+				continue
+			}
+			if binary.BigEndian.Uint16(buf[0:2]) != stunBindingSuccess {
+				continue
+			}
+			if addr, err := parseSTUNMappedAddress(buf[:n]); err == nil {
+				return addr, nil
+			}
 		}
 	}
+	return nil, fmt.Errorf("no STUN answer from %s", server)
 }
 
 func parseSTUNMappedAddress(packet []byte) (*net.UDPAddr, error) {

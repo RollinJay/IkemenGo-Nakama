@@ -783,6 +783,7 @@ type TextSprite struct {
 	textSpacing    [2]float32
 	textDelay      float32
 	textWrap       bool
+	literal        bool // text is drawn as given: "\n" is not decoded (text typed by players)
 	vel            [2]float32
 	accel          [2]float32
 	friction       [2]float32
@@ -1033,6 +1034,17 @@ func (ts *TextSprite) getLineLength(windowWrap bool) int32 {
 
 func (ts *TextSprite) decodeEscapes(text string) string {
 	return strings.ReplaceAll(text, "\\n", "\n")
+}
+
+// drawnText is the text as Draw lays it out: each tab as 4 spaces (first, so
+// that length checks are accurate) and "\n" as a line break, unless the text
+// is literal.
+func (ts *TextSprite) drawnText() string {
+	text := strings.ReplaceAll(ts.text, "\t", "    ")
+	if !ts.literal {
+		text = ts.decodeEscapes(text)
+	}
+	return text
 }
 
 // wrapText wraps the fullLine text based on the typedLen and other parameters
@@ -1390,10 +1402,7 @@ func (ts *TextSprite) draw(ln int16, clip *[4]int32) {
 		window = intersectRect(window, *clip)
 	}
 
-	// Replace each tab with 4 spaces
-	// We do this first so that length checks are accurate
-	text := strings.ReplaceAll(ts.text, "\t", "    ")
-	text = ts.decodeEscapes(text)
+	text := ts.drawnText()
 
 	maxChars := int32(len(text))
 
@@ -1455,6 +1464,7 @@ func (ts *TextSprite) Reset() {
 	ts.SetWindow(ts.windowInit)
 	ts.SetVelocity(ts.velocityInit[0], ts.velocityInit[1])
 	ts.text = ts.textInit
+	ts.literal = false
 	if ts.palfx != nil {
 		ts.palfx.clear()
 	}

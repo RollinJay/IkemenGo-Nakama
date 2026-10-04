@@ -1,0 +1,74 @@
+;------------------------------------------------------------------------- kame
+; IKEMEN GO Rematch 1.6 - extended with an online rematch decision menu.
+; Set ik_rematch.override to true from another Lua module to disable this mod.
+[Rematch]
+enabled = 1
+accept.key = a, b, c, x, y, z, s
+pausegame = 0
+starttime = 175
+rematch.text = "Rematch?"
+rematch.offset = 300,340
+rematch.font = 5,0,0
+rematch.scale = .3,.3
+victoryscreen = 0
+p1.font = 1,0,0,128,128,128
+p1.active.font = 1,0,0,255,0,0
+p1.offset = 160,300
+p1.spacing = 0,40
+p1.scale = 1,1
+p1.yes.text = "Yes"
+p1.no.text = "No"
+p1.cursor.snd = 50,0
+p1.done.snd = 50,1
+
+p2.font = 1,0,0,128,128,128
+p2.active.font = 1,0,0,0,0,255
+p2.offset = 440,300
+p2.spacing = 0,40
+p2.yes.text = "Yes"
+p2.no.text = "No"
+p2.scale = 1,1
+p2.cursor.snd = 50,0
+p2.done.snd = 50,1
+
+enabledmodes = "arcade","freebattle","teamcoop","versus"
+
+[RematchOnline]
+; Ranked non-final: Rematch / Character Select / Forfeit. Other online modes: Rematch / Character Select / Exit. Final ranked set: Play Another Set / Exit.
+p1.font = 1,0,0,128,128,128
+p1.active.font = 1,0,0,255,0,0
+p1.offset = 160,300
+p1.spacing = 0,40
+p1.scale = 1,1
+p1.rematch.text = "Rematch"
+p1.select.text = "Character Select"
+p1.exit.text = "Exit"
+p1.forfeit.text = "Forfeit"
+p1.newset.text = "Play Another Set"
+p1.waiting.text = "Waiting for opponent..."
+
+p2.font = 1,0,0,128,128,128
+p2.active.font = 1,0,0,0,0,255
+p2.offset = 440,300
+p2.spacing = 0,40
+p2.scale = 1,1
+p2.rematch.text = "Rematch"
+p2.select.text = "Character Select"
+p2.exit.text = "Exit"
+p2.forfeit.text = "Forfeit"
+p2.newset.text = "Play Another Set"
+p2.waiting.text = "Waiting for opponent..."
+
+waiting.font = 1,0,0,160,160,160
+waiting.offset = 300,400
+waiting.scale = 1,1
+newset.prompt.text = "Play Another Set?"
+newset.prompt.font = 1,0,0,255,255,255
+
+; Optional comma-separated STUN servers used when the next P2P session starts.
+; Example: stun.example.net:3478,stun2.example.net:3478
+p2p.stunservers = ""
+
+[RematchBGdef]
+spr = ""
+bgclearcolor = 0, 0, 0

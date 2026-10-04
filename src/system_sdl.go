@@ -214,8 +214,12 @@ func (w *Window) GetScaledViewportSize() (int32, int32, int32, int32) {
 
 	var x, y, resizedWidth, resizedHeight int32 = 0, 0, int32(winWidth), int32(winHeight)
 
-	// Select stage or default aspect ratio
+	// Select stage or default aspect ratio. With a border canvas the window shows
+	// the whole canvas, so keep the canvas aspect instead of the fight aspect.
 	aspectGame := sys.getCurrentAspect()
+	if sys.presentationEnabled() {
+		aspectGame = CalculateAspect(sys.presentation.canvas[2], sys.presentation.canvas[3])
+	}
 	aspectWindow := float32(winWidth) / float32(winHeight)
 
 	// Keep aspect ratio

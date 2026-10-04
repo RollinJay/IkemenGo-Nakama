@@ -24,6 +24,8 @@ local function rating_key(game)
     return game
 end
 
+-- Returns the rating record plus the storage version ("*" when absent) so the
+-- settlement write can use optimistic concurrency.
 local function read_rating(user_id, game)
     local cfg = config_for(game)
     local records = nk.storage_read({{
@@ -31,32 +33,35 @@ local function read_rating(user_id, game)
         key = rating_key(game),
         user_id = user_id,
     }})
+    local record = { rating = cfg.initial_rating, wins = 0, losses = 0, games = 0 }
     if #records == 0 then
-        return { rating = cfg.initial_rating, wins = 0, losses = 0, games = 0 }
+        return record, "*"
     end
-
     local value = records[1].value
     if type(value) == "table" then
-        return {
-            rating = tonumber(value.rating) or cfg.initial_rating,
-            wins = tonumber(value.wins) or 0,
-            losses = tonumber(value.losses) or 0,
-            games = tonumber(value.games) or 0,
-        }
+        record.rating = tonumber(value.rating) or cfg.initial_rating
+        record.wins = tonumber(value.wins) or 0
+        record.losses = tonumber(value.losses) or 0
+        record.games = tonumber(value.games) or 0
     end
-
-    return { rating = cfg.initial_rating, wins = 0, losses = 0, games = 0 }
+    return record, records[1].version
 end
 
-local function write_rating(user_id, game, record)
-    nk.storage_write({{
+local function rating_object(user_id, game, record, version)
+    return {
         collection = "ikemen_rating",
         key = rating_key(game),
         user_id = user_id,
         value = record,
+        version = version,
         permission_read = 1,
         permission_write = 0,
-    }})
+    }
+end
+
+local function is_settled(match_id)
+    local marker = nk.storage_read({{ collection = "ikemen_settlement", key = match_id }})
+    return #marker > 0
 end
 
 local function submit_result(context, payload)
@@ -76,21 +81,15 @@ local function submit_result(context, payload)
 
     local key = match_id .. ":" .. context.user_id
 
-    local settlement_key = match_id .. ":settled"
-    local settled = nk.storage_read({{
-        collection = "ikemen_result",
-        key = settlement_key,
-        user_id = context.user_id,
-    }})
-    if #settled > 0 then
-        local existing = settled[1].value
-        if type(existing) == "table" then
-            return nk.json_encode({
-                accepted = true,
-                settled = true,
-                rating = read_rating(context.user_id, game).rating,
-            })
-        end
+    -- One system-owned marker per match. It is created with version "*"
+    -- (insert-if-absent) in the same storage transaction as both rating
+    -- updates, so retries and simultaneous submissions cannot settle twice.
+    if is_settled(match_id) then
+        return nk.json_encode({
+            accepted = true,
+            settled = true,
+            rating = (read_rating(context.user_id, game)).rating,
+        })
     end
 
     nk.storage_write({{
@@ -136,45 +135,49 @@ local function submit_result(context, payload)
     end
 
     local cfg = config_for(game)
-    local me = read_rating(context.user_id, game)
-    local them = read_rating(opponent_id, game)
-    local expected_me = 1 / (1 + math.pow(10, (them.rating - me.rating) / cfg.rating_scale))
-    local expected_them = 1 - expected_me
-    me.rating = me.rating + cfg.k_factor * (result - expected_me)
-    them.rating = them.rating + cfg.k_factor * ((1 - result) - expected_them)
-    me.games = me.games + 1
-    them.games = them.games + 1
-    if result == 1 then
-        me.wins = me.wins + 1
-        them.losses = them.losses + 1
-    else
-        them.wins = them.wins + 1
-        me.losses = me.losses + 1
+    for _ = 1, 3 do
+        local me, my_version = read_rating(context.user_id, game)
+        local them, their_version = read_rating(opponent_id, game)
+        local expected_me = 1 / (1 + math.pow(10, (them.rating - me.rating) / cfg.rating_scale))
+        local expected_them = 1 - expected_me
+        me.rating = me.rating + cfg.k_factor * (result - expected_me)
+        them.rating = them.rating + cfg.k_factor * ((1 - result) - expected_them)
+        me.games = me.games + 1
+        them.games = them.games + 1
+        if result == 1 then
+            me.wins = me.wins + 1
+            them.losses = them.losses + 1
+        else
+            them.wins = them.wins + 1
+            me.losses = me.losses + 1
+        end
+
+        local ok = pcall(nk.storage_write, {
+            {
+                collection = "ikemen_settlement",
+                key = match_id,
+                value = { players = { context.user_id, opponent_id }, game = game },
+                version = "*",
+                permission_read = 0,
+                permission_write = 0,
+            },
+            rating_object(context.user_id, game, me, my_version),
+            rating_object(opponent_id, game, them, their_version),
+        })
+        if ok then
+            return nk.json_encode({
+                accepted = true,
+                settled = true,
+                rating = me.rating,
+                opponent_rating = them.rating,
+            })
+        end
+        if is_settled(match_id) then
+            return nk.json_encode({ accepted = true, settled = true })
+        end
+        -- Otherwise a rating record changed underneath us (another match); retry.
     end
-
-    write_rating(context.user_id, game, me)
-    write_rating(opponent_id, game, them)
-
-    nk.storage_write({{
-        collection = "ikemen_result",
-        key = settlement_key,
-        user_id = context.user_id,
-        value = {
-            match_id = match_id,
-            player_id = context.user_id,
-            opponent_id = opponent_id,
-            game = game,
-        },
-        permission_read = 0,
-        permission_write = 0,
-    }})
-
-    return nk.json_encode({
-        accepted = true,
-        settled = true,
-        rating = me.rating,
-        opponent_rating = them.rating,
-    })
+    error("IKEMEN result settlement conflicted; retry")
 end
 
 local function get_rating(context, payload)

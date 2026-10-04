@@ -298,6 +298,7 @@ func processCommandLine() {
 -server-config <path>    Uses a dedicated-server JSON configuration
 -nakama-server <id>      Selects a shipped Nakama client server profile
 -nakama-config <path>    Loads Nakama client server profiles from JSON
+-nakama-connection <type> Reports the connection type as wired, wifi or mobile
 	
 Quick VS Options:
 -p<n> <playername>      Loads player n, eg. -p3 kfm
@@ -316,6 +317,8 @@ Quick VS Options:
 -s <stagename>          Loads stage <stagename>
 -loadmotif              Fully loads motif/chars/stages
 -ip <hostip>            Connect to <hostip> for netplay; leave blank for host
+-nakama-match <mode>    Finds the opponent by Nakama matchmaking (unranked or ranked)
+-nakama-stun <list>     Comma-separated STUN servers for the Nakama P2P handshake
 	
 Debug Options:
 -nojoy                  Disables joysticks

@@ -5643,7 +5643,7 @@ func (c *Char) command(pn, i int) bool {
 
 	// AI cheating for commands longer than 1 button
 	// Maybe it could just cheat all of them and skip these checks
-	if !c.asf(ASF_noaicheat) && c.controller < 0 && len(cl) > 0 {
+	if !c.asf(ASF_noaicheat) && c.controller < 0 && len(cl) > 0 && !cbrSuppressAICheat(c, cl) {
 		steps := cl[0].steps
 		multiStep := len(steps) > 1
 		multiKey := len(steps) > 0 && len(steps[0].keys) > 1
@@ -5861,8 +5861,8 @@ func (c *Char) isPlayerType() bool {
 }
 
 func (c *Char) isHost() bool {
-	// Local play has no host
-	if sys.netConnection == nil && sys.replayFile == nil && sys.rollback.session == nil {
+	// Local play has no host, nor has its replay
+	if sys.netConnection == nil && (sys.replayFile == nil || sys.replayFile.local) && sys.rollback.session == nil {
 		return false
 	}
 
@@ -12229,6 +12229,9 @@ func (c *Char) actionPrepare() {
 			// All this does right now is make IsAsserted more accurate, but that's already inaccurate in other places
 			keptflags := ASF_runfirst | ASF_runlast
 			c.assertFlag &= keptflags
+		}
+		if cbrMaskAILevel(c) {
+			c.setASF(ASF_noailevel)
 		}
 
 		// The flags below also reset during hitpause, but are new to Ikemen and don't need the exception above

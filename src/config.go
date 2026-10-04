@@ -125,6 +125,9 @@ type Config struct {
 		TrainingStage     string   `ini:"TrainingStage"`
 		GamepadMappings   string   `ini:"GamepadMappings"`
 		LegacyTime        bool     `ini:"LegacyTime" sync:"host"`
+
+		// Save local versus matches as match replays (external/script/replay.lua).
+		LocalVersusReplays bool `ini:"LocalVersusReplays"`
 	} `ini:"Config"`
 	Debug struct {
 		AllowDebugMode      bool    `ini:"AllowDebugMode"`
@@ -351,6 +354,9 @@ func (c *Config) normalize() {
 	c.SetValueUpdate("Options.Tag.Max", int(Clamp(int32(c.Options.Tag.Max), int32(c.Options.Tag.Min), int32(MaxSimul))))
 	c.SetValueUpdate("Options.Tag.Min", int(Clamp(int32(c.Options.Tag.Min), 2, int32(MaxSimul))))
 	c.SetValueUpdate("Video.Framerate", int(Clamp(int32(c.Video.Framerate), 1, 840)))
+	// Each character allocates its palette table by this count; a netplay host
+	// or a replay file sets it too.
+	c.SetValueUpdate("Config.PaletteMax", Clamp(c.Config.PaletteMax, 1, 10000))
 	if c.Video.Border.Width < 1 {
 		c.SetValueUpdate("Video.Border.Width", c.Video.GameWidth)
 	}
