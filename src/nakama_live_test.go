@@ -5,7 +5,10 @@ package main
 // nakama/modules and:
 //   --socket.max_message_size_bytes 65536 --session.token_expiry_sec 8
 //   --matchmaker.interval_sec 2
-// Enable with NAKAMA_LIVE=1.
+// on 127.0.0.1:7350 (NAKAMA_PORT for another port) with the server key
+// "defaultkey". Enable with NAKAMA_LIVE=1. The ranked set tests
+// (nakama_ranked_live_test.go) also call the server's moderator RPCs, with
+// its runtime http_key: NAKAMA_HTTP_KEY, or Nakama's default.
 
 import (
 	"context"
@@ -15,6 +18,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -60,9 +64,17 @@ func randID() string {
 	return "review-" + hex.EncodeToString(b)
 }
 
+// livePort is the live server's port: NAKAMA_PORT, or 7350.
+func livePort() int {
+	if port, err := strconv.Atoi(os.Getenv("NAKAMA_PORT")); err == nil && port > 0 {
+		return port
+	}
+	return 7350
+}
+
 func liveClient(t *testing.T) (*NakamaClient, *evRecorder) {
 	t.Helper()
-	c := NewNakamaClient(NakamaConfig{Host: "127.0.0.1", Port: 7350, ServerKey: "defaultkey", DeviceID: randID(), Game: "g", GameBuild: "1.0.0", Region: "r", RequestTTL: 5 * time.Second})
+	c := NewNakamaClient(NakamaConfig{Host: "127.0.0.1", Port: livePort(), ServerKey: "defaultkey", DeviceID: randID(), Game: "g", GameBuild: "1.0.0", Region: "r", RequestTTL: 5 * time.Second})
 	rec := newRecorder()
 	c.SetEventHandler(rec.fn)
 	if err := c.Connect(context.Background()); err != nil {
@@ -198,23 +210,29 @@ func TestNakamaLive_MatchmakerRankedServerElo(t *testing.T) {
 func TestNakamaLive_MatchmakerEloWindow(t *testing.T) {
 	fixedEnabled(t)
 	ctx := context.Background()
+	game := "g5-" + randID()
 	a, recA := liveClient(t)
-	// Raise A's stored rating by settling wins against helper accounts.
-	for i := 0; i < 14; i++ {
-		h, _ := liveClient(t)
-		mid := "boost-" + randID()
-		_, _ = a.SubmitResult(ctx, NakamaResultRequest{MatchID: mid, OpponentID: h.Session().UserID, Game: "g5", Result: 1})
-		_, _ = h.SubmitResult(ctx, NakamaResultRequest{MatchID: mid, OpponentID: a.Session().UserID, Game: "g5", Result: 0})
-		h.Disconnect()
+	// Raise A's stored rating (1000 -> 1016) by winning a ranked set against
+	// a helper account.
+	h, recH := liveClient(t)
+	boost := rankedPairOf(t, a, h, recA, recH, game, 1)
+	for _, c := range []*NakamaClient{a, h} {
+		if _, err := claim(c, boost.matchID, 1, a.Session().UserID); err != nil {
+			t.Fatal(err)
+		}
 	}
-	body, _ := a.GetRating(ctx, "g5")
+	h.Disconnect()
+	body, _ := a.GetRating(ctx, game)
 	b, recB := liveClient(t)
-	req := NakamaMatchmakerRequest{Mode: "ranked", Elo: 1000, EloRange: 100, Game: "g5", GameBuild: "1.0.0", Region: "r"}
+	req := NakamaMatchmakerRequest{Mode: "ranked", Elo: 1000, EloRange: 10, Game: game, GameBuild: "1.0.0", Region: "r"}
 	_ = a.Matchmake(req) // A claims 1000; the server uses the stored rating instead
 	_ = b.Matchmake(req)
 	_, matched := recA.waitFor(t, 10*time.Second, func(ev NakamaEvent) bool { return ev.Type == "matchmaker_matched" })
 	_ = recB
-	t.Logf("A stored rating %s; fresh B (1000), range 100: matched=%v", body, matched)
+	t.Logf("A stored rating %s; fresh B (1000), range 10: matched=%v", body, matched)
+	if !strings.Contains(string(body), `"games":1`) {
+		t.Fatalf("the ranked set did not settle: %s", body)
+	}
 	if matched {
 		t.Fatal("players outside the server-side Elo window were matched")
 	}
@@ -286,40 +304,6 @@ func TestNakamaLive_WinnerStaysNoDoubleCount(t *testing.T) {
 	t.Logf("after one game reported by both: winner_streak=%v seq=%v", p["winner_streak"], p["seq"])
 	if p["winner_streak"] != float64(1) {
 		t.Fatalf("streak double counted: %v", p["winner_streak"])
-	}
-}
-
-func TestNakamaLive_EloSettlesOnce(t *testing.T) {
-	fixedEnabled(t)
-	a, _ := liveClient(t)
-	b, _ := liveClient(t)
-	ida, idb := a.Session().UserID, b.Session().UserID
-	mid := "set-" + randID()
-	ctx := context.Background()
-	if _, err := a.SubmitResult(ctx, NakamaResultRequest{MatchID: mid, OpponentID: idb, Game: "g3", Result: 1}); err != nil {
-		t.Fatal(err)
-	}
-	// Retry + simultaneous submissions.
-	var wg sync.WaitGroup
-	for i := 0; i < 4; i++ {
-		wg.Add(2)
-		go func() {
-			defer wg.Done()
-			_, _ = b.SubmitResult(ctx, NakamaResultRequest{MatchID: mid, OpponentID: ida, Game: "g3", Result: 0})
-		}()
-		go func() {
-			defer wg.Done()
-			_, _ = a.SubmitResult(ctx, NakamaResultRequest{MatchID: mid, OpponentID: idb, Game: "g3", Result: 1})
-		}()
-	}
-	wg.Wait()
-	body, err := a.GetRating(ctx, "g3")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Logf("A rating after 1 match + 8 concurrent/retried submissions: %s", body)
-	if !strings.Contains(string(body), `"games":1`) {
-		t.Fatalf("expected exactly one settlement")
 	}
 }
 

@@ -299,6 +299,8 @@ func processCommandLine() {
 -nakama-server <id>      Selects a shipped Nakama client server profile
 -nakama-config <path>    Loads Nakama client server profiles from JSON
 -nakama-connection <type> Reports the connection type as wired, wifi or mobile
+-replay <path>          Plays a match replay (or a ranked set's), then quits
+-replay-stats <path>    With -replay: writes each match's statistics as JSON
 	
 Quick VS Options:
 -p<n> <playername>      Loads player n, eg. -p3 kfm

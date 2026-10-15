@@ -1,6 +1,6 @@
 # IKEMEN GO Nakama Matchmaking Layer
 
-This integration adds an engine-side Nakama client, Lua bindings, ranked/unranked matchmaking, authoritative 8-player lobbies with screenpack-configurable lobby screens, online names chosen in the game and shown on the fight screen, chat access, Elo result reconciliation, NAT-discovery/hole-punching primitives, rollback-resolved replay streaming, which lets lobby members watch the match being played, and match replays, which save online matches (and, optionally, local ones) with their description and the players' accounts.
+This integration adds an engine-side Nakama client, Lua bindings, ranked/unranked matchmaking, authoritative 8-player lobbies with screenpack-configurable lobby screens, online names chosen in the game and shown on the fight screen, chat access, Elo ratings changed once per ranked set when both players' claims of its winner agree (with both players' replays of the set kept on the server for its moderators), NAT-discovery/hole-punching primitives, rollback-resolved replay streaming, which lets lobby members watch the match being played, and match replays, which save online matches (and, optionally, local ones) with their description and the players' accounts.
 
 ## Runtime model
 
@@ -10,7 +10,7 @@ Nakama is the control plane. IKEMEN GGPO remains the gameplay simulation and rol
 Nakama
   ├─ authentication and online names
   ├─ ranked / unranked matchmaking
-  ├─ Elo storage and result reconciliation
+  ├─ Elo storage, ranked sets and their replays (for moderators)
   ├─ authoritative lobbies (up to 8 players)
   ├─ lobby discovery and room IDs
   ├─ chat
@@ -31,7 +31,7 @@ The pinned `github.com/ikemen-engine/ggpo` dependency is bundled under `third_pa
 
 A rollback match played inside a Nakama match (a lobby, or the coordination match of a matchmaker pairing) is published as a replay stream: both players' inputs, taken from the rollback session once they can no longer change, sent through the Nakama match. A client with the same game content replays the match from those inputs; no video and no game state is sent. The lobby screens use this to let members watch the match being played (see [Watching a lobby match](#watching-a-lobby-match)).
 
-The netplay session's host publishes the stream: in a lobby, the pairing's player 1; after matchmaking, the first player of the matchmaker's result. Publishing is on by default; `nakama.setReplayPublish` turns it off, or changes the delay and the match description, for the matches that follow (see [Lua API](#lua-api)).
+The netplay session's host publishes the stream: in a lobby, the pairing's player 1; after matchmaking, the first player of the matchmaker's result. Publishing is on by default; `nakama.setReplayPublish` turns it off, or changes the delay and the match description, for the matches that follow (see [Lua API](#lua-api)). A ranked session is the exception: both players publish their stream, whatever `nakama.setReplayPublish` said, with a delay of 2 seconds (enough to wait out rollbacks), and the server keeps both streams for its moderators instead of relaying them (see [Ranked sets](#ranked-sets)). Their header and end carry more than other streams' do (see the table below), so that the server can make match replay files of them.
 
 Only frames older than the broadcast delay are sent. The delay is `Netplay.Rollback.ReplayBroadcastDelay` (10 seconds by default) or the delay given to `nakama.setReplayPublish`:
 
@@ -45,9 +45,9 @@ A stream consists of four kinds of message:
 
 | Message | Content |
 |---|---|
-| Header | A stream ID; the delay; IKEMEN's sync settings and content fingerprint (the host's settings that the netplay session applied to both players); the random seed and the frame counters at the start of the match; the stage (its definition file, after a random choice is resolved); the rules the match started with (round time, ticks per timer count, rounds each side needs to win, draws allowed); the match context (match number, home side, each side's consecutive wins and score before the match, and the rounds counted so far in a run whose rounds carry over); the game parameters (whether life, rounds and music carry over from the previous match, the Turns member each side starts with, whether characters' dialogues play); the input slot each player reads and each player's AI level; the publisher's match description; and the segment number. |
+| Header | A stream ID; the delay; IKEMEN's sync settings and content fingerprint (the host's settings that the netplay session applied to both players); the random seed and the frame counters at the start of the match; the stage (its definition file, after a random choice is resolved); the rules the match started with (round time, ticks per timer count, rounds each side needs to win, draws allowed); the match context (match number, home side, each side's consecutive wins and score before the match, and the rounds counted so far in a run whose rounds carry over); the game parameters (whether life, rounds and music carry over from the previous match, the Turns member each side starts with, whether characters' dialogues play); the input slot each player reads and each player's AI level; the publisher's match description; the segment number; the version of the game that published it; and, in a ranked session, each player's state at the start (as in a match replay file). |
 | Chunk | 30 frames of input in IKEMEN's replay input representation: 8 controller slots × 8 bytes per controller per frame. A chunk is sent once all of its frames are older than the delay, so a stream sends two chunks per second; the last chunk of a stream can be shorter. |
-| End | The last frame of the stream. |
+| End | The last frame of the stream; in a ranked session, also the files the match depends on, with the start of their SHA-256, as a match replay file lists them. |
 | Reset | The stream is withdrawn, with a reason. |
 
 A rollback that reaches an already-published frame withdraws the stream with a reset message instead of allowing a speculative frame to remain visible to spectators.
@@ -76,7 +76,7 @@ The game saves match replays to `save/replays`:
 
 Each file is named after the match's date and its two sides: the players' online names and tags for players who played online, otherwise the name of the side's first character. For example `2026-09-29_17h25m03s KAI (7841) vs ElPeleador (6321).replay`, `2026-09-30_00h11m50s KAI (7841) & ElPeleador (6321) vs Kung Fu Man.replay` for a co-op match, and `2026-09-30_00h48m50s Kyo vs Iori.replay` for a local match.
 
-A game whose leaderboards want a replay with each score can send the file of the match that set it: `replayLastMatchFile()` returns the last file saved. Nothing on the server checks a replay yet (see [Current implementation boundary](#current-implementation-boundary)).
+A game whose leaderboards want a replay with each score can send the file of the match that set it: `replayLastMatchFile()` returns the last file saved. The server does not check replays: it keeps the replays of ranked sets for its moderators to watch (see [Ranked sets](#ranked-sets) and [Current implementation boundary](#current-implementation-boundary)).
 
 ### What a file holds
 
@@ -90,6 +90,8 @@ A game whose leaderboards want a replay with each score can send the file of the
 An arcade or survival run carries state from match to match: the score, the match number, consecutive wins, life in survival, and characters kept from the previous match with their variables. Each file records the state its match started with, so the replay of a run's third match plays by itself.
 
 The file is gzip-compressed JSON lines, one gzip member per session, so that a file cut short (the game stopped while saving) keeps its complete sessions. The two players' files of an online match hold the same inputs, except the last few frames, which can differ: each game stops saving at its own last frame, which can include inputs it had predicted but not yet received from the other player when the match ended.
+
+A server's replay of a ranked set (see [Watching a ranked set's replay](#watching-a-ranked-sets-replay)) has the same records, written as plain JSON lines without gzip, and holds every match of the set: each match record is followed by that match's sessions. The game reads both forms, and plays the matches of such a file one after another.
 
 ### Recording a local match
 
@@ -114,6 +116,9 @@ The screens after a match (victory, results, continue) are not replayed. Lua cod
 - The players' online names show on the fight screen when they did in the match (an online versus match).
 - Holding a button plays at 4× speed. The Pause key pauses a replay without losing its place, and Scroll Lock then steps it one frame at a time. Esc leaves the replay; the players' own menu button, pressed in the match to pause it, does not.
 - The victory and results screens are skipped.
+- A file that holds several matches (a server's replay of a ranked set) plays them in order, until a match cannot play or the player leaves one with Esc. A match whose inputs stop before its end (a file cut short, or a Turns match whose next session is missing) counts as one that cannot play: the replay stops there and says why.
+
+`Ikemen_GO -replay <file>` plays a match replay without the menus and quits: with exit status 0 when every match of the file played to its end, 1 otherwise (a match that could not play or stopped early, or one left with Esc). It writes its messages to the log instead of the screen, and plays content that differs from the recording without asking. `-replay-stats <file>`, given with it, writes the statistics of each match played (as `getGameStatsJson` returns them: the winning side, counted from 0, each round's winner and each character's life at its end) to that file as a JSON list.
 
 A replay records the players' user IDs. Names and tags are kept as they were at the time, for display: results, ranked sets, lobby records and replays all tell players apart by their user IDs, so two players who share a name and a tag stay distinct.
 
@@ -143,19 +148,23 @@ replaySetMatchInfo({kind = "lobby", selection = ..., players = ...})
 replayRecordLocal("save/replays", {kind = "local", selection = ...})
 -- The file of the last match replay saved, online or local ("" for none).
 local path = replayLastMatchFile()
--- nil for a replay of a whole session. Otherwise info (the description),
--- engine, this_engine, same_engine, date, sessions, frames, stage,
--- ai_levels (by player number) and turns_offset (by side: how many Turns
--- members the fight skipped); or nil and an error for a file that cannot
--- be read.
-local rp, err = replayMatchInfo(path)
--- The files the replay depends on that differ in this game, given this
+-- nil for a replay of a whole session. Otherwise, for match n of the file
+-- (default 1; a server's replay of a ranked set holds several), info (the
+-- description), engine, this_engine, same_engine, date, sessions, frames,
+-- stage, ai_levels (by player number), turns_offset (by side: how many
+-- Turns members the fight skipped), match (n), matches (how many the file
+-- holds) and content_listed (false when the file does not list the files
+-- the match depends on: a server's replay of a match whose end did not
+-- arrive); or nil and an error for a file that cannot be read.
+local rp, err = replayMatchInfo(path, n)
+-- The files match n depends on that differ in this game, given this
 -- game's definition files of its characters and stage: a list of
--- {label, file, status}, status changed, missing or added. Raises an error
--- for a file that cannot be read.
-local diffs = replayMatchContent(path, {p1 = {def1}, p2 = {def2}}, stageDef)
--- Starts playing; the scripts then load the fight it describes (launchFight).
-replayMatchPlay(path)
+-- {label, file, status}, status changed, missing or added (empty when the
+-- file does not list them). Raises an error for a file that cannot be read.
+local diffs = replayMatchContent(path, {p1 = {def1}, p2 = {def2}}, stageDef, n)
+-- Starts playing match n (default 1); the scripts then load the fight it
+-- describes (launchFight).
+replayMatchPlay(path, n)
 -- The user IDs set with the fight screen's names for the players now on
 -- sides 1 and 2 ("" for none).
 local u1, u2 = nakama.matchUsers()
@@ -167,7 +176,7 @@ replay.recordModes.arcade = true
 replay.versusModes = {versus = true, versuscoop = true, challenger = true}
 ```
 
-The messages about a replay that cannot play or differs from this game are `[Warning Info]` texts: `text.replayfailed.text`, `text.replaychars.text`, `text.replaystage.text`, `text.replaycontent.text`, `text.replayengine.text` and the words they list (`text.replaystagefile.text`, `text.replayfightfile.text`, `text.replaychanged.text`, `text.replaymissing.text`, `text.replayadded.text`, `text.replaymore.text`).
+The messages about a replay that cannot play or differs from this game are `[Warning Info]` texts: `text.replayfailed.text`, `text.replaychars.text`, `text.replaystage.text`, `text.replaycontent.text`, `text.replayengine.text`, `text.replayunlisted.text`, `text.replaystopped.text` and the words they list (`text.replaystagefile.text`, `text.replayfightfile.text`, `text.replaychanged.text`, `text.replaymissing.text`, `text.replayadded.text`, `text.replaymore.text`).
 
 ## Lua API
 
@@ -212,6 +221,21 @@ nakama.joinMatch(lobby_id, nil, {code = "K7M2QX"})
 -- Nakama chat channels. Lobby rooms have their own chat (see Lobbies).
 nakama.joinChat(room_name)
 nakama.sendChat(channel_id, "hello")
+
+-- Ranked sets (see Ranked sets). The engine keeps the set's state; the
+-- scripts record each match's winner and claim a decided set's winner with
+-- the server, once per set: submitRankedSet() returns true when it sends
+-- the claim. The answer arrives as "ranked_result" (payload.status: open
+-- until the other player's claim has come, then settled or disputed; or
+-- error). The first version's call, submitResult, is accepted for recorded
+-- ranked sets only, and answers with "result".
+-- rankedSet(): active, best_of, matches, p1_wins, p2_wins, p1_id, p2_id
+-- (the set's players in the matchmaker's order), p1_side, p2_side, winner
+-- (1 or 2, 0 until the set is decided), set (its number in the session)
+-- and match_id (the ranked session's match id), among others.
+local rs = nakama.rankedSet()
+nakama.rankedSetRecordMatch(winner_side)   -- true when the match decides the set
+nakama.submitRankedSet()
 nakama.submitResult(match_id, opponent_user_id, "my_game", 1, replay_hash)
 
 -- Online names (see Online names).
@@ -287,7 +311,7 @@ Play Another Set  both players must choose it -> reset the current set and retur
 Exit              either player chooses it -> both leave the online session
 ```
 
-The set result is tracked separately from GGPO rollback state. Starting another set resets the score and physical side assignment while retaining the same two matched players and negotiated ranked rules. A new set does not carry forward winner-selection locks from the previous set.
+The set result is tracked separately from GGPO rollback state. When a set has been decided, by its last match or by a forfeit, each player's game claims its winner with the server, which changes the two players' ratings once both claims agree (see [Ranked sets](#ranked-sets)). Starting another set resets the score and physical side assignment while retaining the same two matched players and negotiated ranked rules; the server records it as the session's next set. A new set does not carry forward winner-selection locks from the previous set.
 
 The Nakama coordination match is retained between rounds; only the GGPO gameplay session is replaced. The P2P socket is also retained: each GGPO session opens a new channel on it and closes only that channel.
 
@@ -327,7 +351,7 @@ menu.itemname.menunetwork.onlineranked = RANKED MATCH (ONLINE)
 menu.itemname.menunetwork.onlinelobby = ONLINE LOBBIES
 ```
 
-For testing, `-nakama-match unranked` (or `ranked`) with the quick-VS options (`-p1`, `-p2`, `-s`) does the same as `-ip`, with the opponent found by matchmaking. `-nakama-stun host:port,...` overrides the STUN list.
+For testing, `-nakama-match unranked` (or `ranked`) with the quick-VS options (`-p1`, `-p2`, `-s`) does the same as `-ip`, with the opponent found by matchmaking. `-nakama-stun host:port,...` overrides the STUN list. A ranked quick match plays one match, the first of its set: with `Netplay.Ranked.BestOf = 1` that match decides the set, and the game claims the set's winner with the server and waits up to 15 seconds for the answer before it quits. A longer set is not claimed: the player who quits first while the other is still in the session is noted as having left early, and once `IKEMEN_RANKED_CLAIM_MINUTES` have passed the set is disputed (`claim_timeout`), so it shows in the moderators' list (see [Ranked sets](#ranked-sets)).
 
 Lua API used by the flow, also used by the lobby screens:
 
@@ -358,6 +382,118 @@ Connection behaviour:
 | A player quits or crashes during the session | The other side's session ends within about 8 seconds (1 second when the player leaves normally) |
 
 A relay (TURN, or relaying through Nakama) is needed for the failing cases; none is implemented yet.
+
+## Ranked sets
+
+A ranked session is the session the matchmaker makes for two players who queued for a ranked match (`nakama.matchmake("ranked")`, RANKED MATCH in the online menu). Its players play best-of-N sets: `Netplay.Ranked.BestOf` matches (3 by default; an even number becomes the next odd one, and 99 is the most), with the side switching and winner-keeps-selection rules of `Netplay.Ranked.SwitchSides` and `Netplay.Ranked.WinnerKeepsSelection`. Both players' tickets carry these rules, and their queries pair only tickets that agree on them and on the game, its build and the region; the server makes an unranked session of a pair whose tickets differ in game, build or set length (which can meet when the server checks only one ticket's query, Nakama's `matchmaker.rev_precision` being false by default), and the games then play it as an unranked session. Ratings change once per set, never per match: a set is one rated result.
+
+The server does not watch the fight. It learns a set's result from the players' games, and keeps both players' replays of the set so that its moderators can watch the set when the players disagree. It does not replay them itself.
+
+### The set's record
+
+When the matchmaker makes a ranked session (`ikemen_matchmaker.lua`), the server records the session's first set: the game, the build, the set's length (`best_of`), the two players (user ID and username) in the matchmaker's order, which every player receives too (the first player hosts the netplay session and starts on side 1), the time it was created, and the status `open`. When both players choose Play Another Set (see [Online rematch coordination](#online-rematch-coordination)), the session records the next set. A set's ID is the session's match ID for its first set, and `<match ID>#<n>` for its n-th set.
+
+| Status | Meaning |
+|---|---|
+| `open` | The set is being played, or waits for its players' claims. |
+| `settled` | Both claims named the same winner, or a moderator settled the set: the ratings changed, once. |
+| `disputed` | The claims named different winners (`reason`: `claims_disagree`), or a claim did not come in time (`claim_timeout`): only one player claimed, or nobody claimed after a player had left a set whose matches had started. A moderator decides. |
+| `void` | No result: nobody claimed in time, and either nobody left before the set was decided or none of its matches had started (`no_claims`); or a moderator voided it (`moderator`). The ratings do not change. |
+
+The record also notes the claims, a player who left the session before the set was decided (`left_early`: such a set ends disputed when only the other player claims it, and a moderator decides; the session counts a set as decided when a player's choice after a match says it was the set's last, when a player forfeits, when both choose another set, or once both have claimed it, so this is the games' account, not proof), whether a match of the set started (`played`), when the set ended (the end of the session, or for an earlier set, the start of the next one), the replays kept, the winner, who settled it (`players` or `moderator`) and a moderator's note.
+
+### Claims and ratings
+
+When a set has been decided, by its last match or by a forfeit, each player's game claims its winner once (`nakama.submitRankedSet`, called by `external/script/start.lua`), with the `ikemen_submit_result` RPC and the player's session:
+
+```json
+{"match_id": "<the session's match ID>", "set": 1, "winner": "<the winner's user ID>"}
+```
+
+The answer is `{accepted, settled, status, match_id}`, with the caller's `rating` and `opponent_rating` once the set is settled. The game tries the claim up to three times, again only after a connection failure or an answer of code 10, 13 or 14. The server accepts a claim only for a set it recorded, from one of the set's two players, while the set is open, and refuses the others with these Nakama error codes:
+
+| Code | Refused |
+|---|---|
+| 3 `INVALID_ARGUMENT` | A field is missing or does not fit the set: no `match_id`, or a `winner` who is not one of the set's players. |
+| 5 `NOT_FOUND` | The server made no ranked session with this ID, or has no record of the set: the session has no such set, or the server could not record it. |
+| 7 `PERMISSION_DENIED` | The caller was not one of the set's players. |
+| 9 `FAILED_PRECONDITION` | The match is an unranked session or a lobby, the set is settled, disputed or void, or the caller has already claimed the other winner. |
+| 10 `ABORTED` | The set's record kept changing meanwhile; the claim can be sent again. |
+| 16 `UNAUTHENTICATED` | No player's session. |
+
+A claim sent again with the same winner is answered as the first was. When both claims name the same winner, the set settles: one storage transaction writes a settlement marker (`ikemen_settlement/<set ID>`, only if it does not exist yet), both players' new Elo ratings and the set's record, so claims sent at the same time, or a claim and a moderator's settlement at the same time, change the ratings once. When the claims differ, the set is disputed. The second claim is due within `IKEMEN_RANKED_CLAIM_MINUTES` (15 by default) of the set's end; the server checks this when it next reads the set (for a claim or for the moderators' list), and a set whose session never reported its end (the server stopped meanwhile) times out 24 hours after it was created.
+
+The ratings are Elo ratings per game (`ikemen_rating/<game>`, one record per player): 1000 to start with, a K-factor of 32 and a scale of 400 (`GAME_CONFIG` in `ikemen_rating.lua` changes them per game). `games`, `wins` and `losses` count sets. The matchmaker pairs ranked players by the rating stored on the server, not by the one the client sends.
+
+The first version's fields still work: `result` (1: the caller won, 0: the caller lost) in place of `winner`, `opponent_id` and `game` (checked against the set when given) and `replay_hash` (claims whose hashes differ disagree).
+
+Two players who agree on a false result are believed: agreeing claims prove only that both games, or both players, say the same.
+
+### Replays kept for moderators
+
+In a ranked session both players' games publish their replay stream (see [Replay streaming](#replay-streaming)), and the session keeps both streams instead of relaying them: for each player, every stream the player's game published during the set, with their headers, inputs and ends. The session stores a player's replay of a set (`ikemen_ranked_replays/<set ID>:<user ID>`) when the set has been decided and the player's last stream of it has ended, when the player leaves the session, and when the session ends. The set's record lists each stored replay with its size and whether it is complete: the set was decided, every stream ended, the player did not leave before the set was decided, and nothing was left out for the size limit. The two players' replays of a set hold the same inputs; the second one is there for a set whose first replay is incomplete.
+
+The session drops a stream message larger than its limit (a header or an end over 32 KB, a chunk over 8 KB). It keeps a stream only as it continues: each chunk must hold the frames that follow the ones kept (at most 30, each with its inputs), and the end must put the stream's end where those frames end; otherwise the stream ends where it was. It keeps at most `IKEMEN_RANKED_REPLAY_MAX_BYTES` per player and set (16 MiB by default, about 50 minutes of play), and no faster than play makes them: over all the session's sets, at most 256 KiB of a player's streams plus 16 KiB for each second the session has lasted (play publishes about 5.3 KB a second, and about 9 KB more per match). Past either limit, the stream ends at its last frames kept, the rest of the player's replay of the set is left out, and the replay is incomplete. A replay is kept for `IKEMEN_RANKED_REPLAY_DAYS` days (30 by default). Expired replays are removed lazily: up to 20 whenever a replay is stored or the moderators' list is read, and an expired replay that a moderator asks for. The set's record stays.
+
+### Ranked settings
+
+The ranked settings are Nakama runtime environment values (`runtime.env` in Nakama's configuration, or `--runtime.env NAME=value` on its command line). Fractions are allowed.
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `IKEMEN_RANKED_CLAIM_MINUTES` | 15 | Minutes after the set's end within which the second claim must come; later, the set is disputed (or void when nobody claimed). |
+| `IKEMEN_RANKED_REPLAY_DAYS` | 30 | Days a replay is kept. 0 keeps none: the sessions do not keep the streams. |
+| `IKEMEN_RANKED_REPLAY_MAX_BYTES` | 16777216 | The most bytes of stream messages kept per player and set. |
+
+### Storage
+
+Every record of the ranked sets is system-owned, with read and write permission 0: players can neither read nor change them through Nakama's storage API, and the modules read only the system-owned records.
+
+| Collection | Key | Holds |
+|---|---|---|
+| `ikemen_ranked_sets` | The set ID | The set's record. |
+| `ikemen_ranked_set_index` | A 13-digit number that counts down with the time the set was recorded (in milliseconds), `:`, the set ID | The sets, newest first, for the moderators' list. |
+| `ikemen_ranked_replays` | `<set ID>:<user ID>` | A player's replay of the set: the stream messages as they came, the size, whether it is complete, and when it expires. |
+| `ikemen_ranked_replay_expiry` | The expiry time (Unix seconds, 12 digits), `:`, a hash of the replay's key | When each replay expires, oldest first. |
+| `ikemen_settlement` | The set ID | The settlement marker: the set's players, game and winner. |
+| `ikemen_rating` | The game | A player's rating: owned by the player, who can read it but not write it (written by the server). |
+
+### Moderator RPCs
+
+`ikemen_moderation.lua` registers three RPCs for the server's operators. They are called server to server, with Nakama's runtime HTTP key (`runtime.http_key`), and refuse any call made with a player's session (code 7). Over HTTP, with the payload as the request body:
+
+```text
+curl "http://127.0.0.1:7350/v2/rpc/ikemen_ranked_list?http_key=<runtime.http_key>&unwrap" -d '{"status": "disputed"}'
+```
+
+With `unwrap`, the request body is the payload and the answer is the RPC's JSON answer; without it, Nakama expects the payload as a JSON string and returns `{"payload": "<the answer as a string>"}`. An error answers with an HTTP error status and `{"code", "message"}`: 3 `INVALID_ARGUMENT` (a field is wrong), 5 `NOT_FOUND` (no such set, or no replay kept), 7 `PERMISSION_DENIED` (a player's session), 9 `FAILED_PRECONDITION` (the set is settled or void already) or 10 `ABORTED` (the set kept changing; call again).
+
+**`ikemen_ranked_list`** `{status, limit, cursor, match_id}` → `{sets, cursor}`
+
+- `status`: `disputed` (the default), `open`, `settled`, `void` or `all`. `limit`: 1 to 100 sets (20 by default). `cursor`: the `cursor` of the previous answer, for the next page; it is `""` after the last page. A page can hold fewer than `limit` sets before the last page (one call reads at most 50 pages of the index).
+- `match_id`, a set ID: the list holds that set alone (or nothing), whatever its status unless `status` is given.
+- Newest first. Each set: `match_id` (the set ID, which the other RPCs take), `session` (the session's match ID), `set` (its number in the session), `game`, `build`, `best_of`, `status`, `reason`, `players` (`[{user_id, username}]`, in the matchmaker's order), `claims` (`[{user_id, winner, at}]`), `left_early` (user IDs), `replays` (`[{user_id, bytes, complete}]`), `played`, `created`, `ended`, `decided` (when the status last changed), `winner`, `settled_by` and `note`. Times are Unix times in seconds; `ended`, `decided`, `winner` and `settled_by` are left out until they apply.
+
+**`ikemen_ranked_replay`** `{match_id, user_id}` → `{file_name, replay, user_id, complete, matches, bytes}`
+
+- `match_id`: the set ID. `user_id`: whose replay (optional): without it, the first complete replay in the players' order, or else the longest.
+- `replay` is a match replay file (see [Match replays](#match-replays)) encoded in base64, which this game plays (see [Watching a ranked set's replay](#watching-a-ranked-sets-replay)); `file_name` names it as the game names its replays, for example `2026-10-13_00h30m48s KAI vs ElPeleador (ranked a05f6f6b, KAI).replay`. `user_id` and `complete` describe the replay, `matches` is the number of the set's matches it holds, and `bytes` the size of the file.
+
+**`ikemen_ranked_settle`** `{match_id, winner, void, note}` → `{status, match_id, winner}`
+
+- Either `winner`, the user ID of one of the set's players, which settles the set for that player with the same rating change and settlement marker as the players' claims, or `void: true`, which voids it without a rating change. `note` (optional, at most 500 characters) is kept on the record.
+- `status` is `settled` or `void`. A set that is settled or void already is refused (code 9); an open or disputed set can be decided.
+
+### Watching a ranked set's replay
+
+A moderator saves the decoded `replay` in the game's `save/replays` folder under its `file_name`, and plays it from WATCH MODE > REPLAY, or with `Ikemen_GO -replay <file>` (see [Playing a match replay](#playing-a-match-replay)). The file plays the set's matches one after another, each with the players' characters, stage, rules and online names, and the players on the sides they played; each match's description in the file (its `players`, with their sides) tells which side each player played. The moderator's game should be the set's game and build (`game` and `build` on the record), with the set's characters and stage (found by their select.def entry or their definition file). Files that differ from the players' are listed before the replay plays: with them, a match may play differently from the set. With the same content, each match plays as it did in the players' games, so the moderator sees who won it.
+
+For example, with `curl` and `jq`:
+
+```text
+curl -s "http://127.0.0.1:7350/v2/rpc/ikemen_ranked_replay?http_key=<key>&unwrap" -d '{"match_id": "<set ID>"}' > answer.json
+jq -r .replay answer.json | base64 -d > "save/replays/$(jq -r .file_name answer.json)"
+```
 
 ## Online names
 
@@ -611,20 +747,24 @@ Commands (`nakama.lobbySend(kind, fields)`):
 
 ## Server modules
 
-The runtime entrypoint is `nakama/modules/main.lua`. Install all six files into Nakama's runtime module path:
+The runtime entrypoint is `nakama/modules/main.lua`. Install all eight files into Nakama's runtime module path:
 
 - `main.lua` — loads the supporting modules. Lua match handlers are resolved by module name through `nk.match_create("ikemen_session", ...)`; the Lua runtime has no `register_match`.
-- `ikemen_matchmaker.lua` — uses Nakama's own matchmaker. Buckets come from the client's `+properties.*` query clauses; a `MatchmakerAdd` realtime before-hook replaces the ranked ticket's Elo with the stored rating and appends the Elo window to the query. It creates an `ikemen_session` match for each pair.
-- `ikemen_session.lua` — Nakama coordination match for matched players, signaling, and replay chunks; it does not simulate the fight.
+- `ikemen_matchmaker.lua` — uses Nakama's own matchmaker. Buckets come from the client's `+properties.*` query clauses; a `MatchmakerAdd` realtime before-hook replaces the ranked ticket's Elo with the stored rating and appends the Elo window to the query. It creates an `ikemen_session` match for each pair, and records a ranked session's first set (see [Ranked sets](#ranked-sets)).
+- `ikemen_session.lua` — Nakama coordination match for matched players, signaling, and replay chunks; it does not simulate the fight. In a ranked session it records the next sets, notes a player who leaves before a set is decided, and keeps both players' replay streams, which it stores for moderators.
 - `ikemen_lobby.lua` — authoritative lobbies of up to 8 members (see [Lobbies](#lobbies)): membership, settings, ready states, pairing and tournament scheduling, results, chat, room IDs, connection types and direct round trips, and the relay of the match being played to its spectators, with the catch-up for late ones; it delivers P2P signals only to the member they name. Its RPCs are `ikemen_lobby_create` (`{settings, game, build}` → `{match_id, code}`) and `ikemen_lobby_find` (`{code}` → `{match_id, code}`). Room IDs are stored as system-owned objects in the `ikemen_lobby_codes` collection and deleted when the lobby ends.
-- `ikemen_rating.lua` — per-game Elo storage and reciprocal result settlement.
+- `ikemen_rating.lua` — per-game Elo storage, and the `ikemen_submit_result` RPC, which takes the players' claims of a ranked set's winner and settles the set once (see [Claims and ratings](#claims-and-ratings)); `ikemen_get_rating` (`{game}` → `{rating, games, wins, losses}`) reads the caller's rating.
+- `ikemen_ranked.lua` — the ranked sets' records and their replays, shared by the modules above and the next one; it registers nothing itself.
+- `ikemen_moderation.lua` — the moderator RPCs `ikemen_ranked_list`, `ikemen_ranked_replay` and `ikemen_ranked_settle`, called with the runtime HTTP key (see [Moderator RPCs](#moderator-rpcs)).
 - `ikemen_account.lua` — the `ikemen_account_name` RPC (`{name}` → `{display_name}`), which sets the player's online name, a before-hook that applies the same rules to Nakama's account update, and before-hooks that keep a username Nakama would refuse from failing a sign-in (see [Online names](#online-names)).
 
 The individual Lua modules explicitly import Nakama's `nakama` runtime module; they do not rely on an implicit global.
 
 The matchmaker reads Elo from server-side storage. The client-supplied `elo` field is metadata only and is not used as the trusted rating source.
 
-The result settlement code requires reciprocal claims before updating ratings. It is not an anti-cheat system. Settlement writes a system-owned `ikemen_settlement/<match_id>` marker with version `"*"` (insert-if-absent) in the same storage transaction as both rating updates, so retries and simultaneous submissions settle a match once. `match_id` must therefore be unique per rated game.
+Ratings change only when both players of a recorded ranked set claim the same winner, or a moderator settles the set. It is not an anti-cheat system. Settlement writes a system-owned `ikemen_settlement/<set ID>` marker with version `"*"` (insert-if-absent) in the same storage transaction as both rating updates and the set's record, so retries and simultaneous claims settle a set once.
+
+Nakama lets every signed-in player write and delete storage objects of their own, in any collection, through its storage API. The ranked records are system-owned and the modules read only those, so a player's own objects in their collections change nothing. A player's rating, though, is the player's own object (which only the server writes): on a server that does not refuse players' storage writes, a player who has no rating yet for a game could write one. Nakama Matchmaker's community module refuses players' writes and deletes in every `ikemen_` collection; a server that runs these modules without it needs such a before-hook on `WriteStorageObjects` and `DeleteStorageObjects` (Nakama keeps one before-hook per API, so only one module can register each).
 
 ### Required Nakama settings
 
@@ -632,6 +772,9 @@ The result settlement code requires reciprocal claims before updating ratings. I
 |---|---|---|
 | `socket.max_message_size_bytes` | `65536` | The replay stream header is ~6 KB on the wire; Nakama's 4096-byte default disconnects the sender. |
 | `matchmaker.rev_precision` | `true` (recommended) | Enforces both tickets' Elo windows instead of only the searching ticket's. |
+| `runtime.http_key` | A secret of the server's own | The moderator RPCs accept calls made with it (see [Moderator RPCs](#moderator-rpcs)); Nakama's default, `defaulthttpkey`, is public. |
+
+The ranked sets' time limits and replay retention are runtime environment values (see [Ranked settings](#ranked-settings)).
 
 The client refreshes its session token before HTTP calls, so the 60-second default `session.token_expiry_sec` is supported. The session and lobby handlers end when their last member leaves, and after 60 seconds when nobody joins them.
 
@@ -641,7 +784,7 @@ A netplay session runs both games with the host's sync settings: the strict sett
 
 The synchronized replay header carries IKEMEN's sync settings and a SHA-256 content fingerprint. The fingerprint covers the engine version, the active motif and fight-screen definitions, `select.def` (the roster and stage list) and the common FightFX: those the fight screen loads and those the configuration lists (`Common.Fx`), which a client loads with its first match. It hashes file contents rather than absolute filesystem paths, and does not depend on what a client has played before, so a player who has played a match and one who has not agree.
 
-The fingerprint is computed at the first `synchronize()`, before character select, so it does not cover the characters and stages of the match itself. Ranked deployment should treat it as one compatibility layer alongside Nakama game/build identity; a content manifest and authoritative replay verification are still needed.
+The fingerprint is computed at the first `synchronize()`, before character select, so it does not cover the characters and stages of the match itself. Ranked deployment should treat it as one compatibility layer alongside Nakama game/build identity. The files of the match itself are listed in its match replay (see [What a file holds](#what-a-file-holds)), and a ranked set's replays on the server list them too, but nothing compares them before a ranked match, and the server does not verify results by replaying them.
 
 The replay stream header carries the players' fingerprint, and a spectator's game compares it with its own before it plays the stream (see [Watching a lobby match](#watching-a-lobby-match)).
 
@@ -653,7 +796,7 @@ Implemented in this tree:
 - Nakama realtime WebSocket connection and event dispatch.
 - Ranked/unranked matchmaker tickets.
 - Automatic join of the Nakama coordination match after matchmaking.
-- Server-side Elo storage and reciprocal result reconciliation.
+- Ranked sets: the server records each set of a ranked session, accepts one claim of its winner from each of its two players, changes the ratings once per set when the claims agree, and keeps both players' replays of the set for its moderators, who list the sets, export and watch the replays, and settle or void sets (see [Ranked sets](#ranked-sets)).
 - Authoritative lobby creation/listing and up-to-8 lobby state.
 - Lobby ready states, queue and winner-stays rotation, round-robin and bracket tournaments, host settings and actions, room IDs and private lobbies, and lobby chat.
 - Lobby screens (lobby search, lobby settings and the lobby room, with states before, during and between matches) configured by the screenpack's `[Lobby Info]` and `[LobbyBgDef]`, and lobby matches played over the P2P netplay session.
@@ -673,8 +816,8 @@ Implemented in this tree:
 Still requiring completion or validation:
 
 - TURN/relay fallback for networks where direct UDP traversal fails.
-- Watching matchmaker (quick and ranked) matches: their streams reach only the coordination match's members, the two players, and nothing loads the fight for anyone else.
-- Deterministic replay verification of ranked results (settlement itself is atomic).
+- Watching matchmaker (quick and ranked) matches as they are played: a quick match's stream reaches only the coordination match's members, the two players, and a ranked session's streams are kept for moderators; nothing loads the fight for anyone else.
+- Automatic verification of ranked results by replaying a set's replay on the server (moderators watch the replays instead; settlement itself is atomic).
 - Online co-op runs: a co-op fight can fail to start with a netplay "Synchronization error" (the two games' menu lockstep frame counts differ when the fight starts), which ends the session. It has been seen at the fight after a co-op match and at a run's first fight, and predates match replays. The fights played before it keep their match replays.
 - Meaningful `currentContentFingerprint()` coverage for production compatibility gating.
 - Production Nakama deployment configuration and two-peer testing across real internet NATs (tested so far in a Linux network-namespace NAT lab).

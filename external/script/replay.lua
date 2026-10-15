@@ -184,7 +184,15 @@ function replay.f_describe(sel, rules)
 	if not connected() then
 		return
 	end
-	pcall(replaySetMatchInfo, replay.f_info(sel, rules))
+	local info = replay.f_info(sel, rules)
+	pcall(replaySetMatchInfo, info)
+	-- A matchmade session's replay stream carries the same description: the
+	-- server keeps a ranked session's streams, and makes match replays of
+	-- them for its moderators (nakama/README.md, Ranked sets). A lobby
+	-- describes its streams itself (lobby.f_publishSelection).
+	if info.kind == 'match' and nakama ~= nil and nakama.setReplayInfo ~= nil then
+		pcall(nakama.setReplayInfo, info)
+	end
 end
 
 -- The rules of the fight about to start, for replay.f_info.
@@ -324,19 +332,29 @@ local function errorText(err)
 	return (tostring(err or ''):gsub('^[^%s]+%.lua:%d+: ', ''))
 end
 
--- Plays the match replay at path: rp is replayMatchInfo's result, err its
--- error. Messages say what keeps it from playing; content that differs from
--- the recording is listed first, and the player chooses whether to play.
-function replay.f_play(path, rp, err)
+-- Plays match n of the match replay at path (rp is replayMatchInfo's result
+-- for it, err its error). Returns whether the fight ran (to the replay's
+-- end, or until the player left it with Esc), and, when it ran, whether the
+-- player left it. A fight that stopped before the replay's end (its inputs
+-- stopped coming) did not run. interactive false prints the messages
+-- instead of showing them, and plays content that differs from the
+-- recording without asking.
+local function playMatch(path, n, rp, err, interactive)
+	local function fail(message)
+		if interactive then
+			warn(message)
+		else
+			print('Replay: ' .. message)
+		end
+		return false, true
+	end
 	if rp == nil then
-		warn(string.format(text('replayfailed', 'The replay cannot be played:\n%s'), errorText(err)))
-		return false
+		return fail(string.format(text('replayfailed', 'The replay cannot be played:\n%s'), errorText(err)))
 	end
 	local info = type(rp.info) == 'table' and rp.info or {}
 	local sel = info.selection
 	if type(sel) ~= 'table' or type(sel.p1) ~= 'table' or type(sel.p2) ~= 'table' or #sel.p1 == 0 or #sel.p2 == 0 or (rp.stage or '') == '' then
-		warn(string.format(text('replayfailed', 'The replay cannot be played:\n%s'), 'no match description'))
-		return false
+		return fail(string.format(text('replayfailed', 'The replay cannot be played:\n%s'), 'no match description'))
 	end
 	-- The characters and the stage, found in this game.
 	local found = {p1 = {}, p2 = {}}
@@ -354,18 +372,20 @@ function replay.f_play(path, rp, err)
 		end
 	end
 	if #missing > 0 then
-		warn(string.format(text('replaychars', 'This replay needs characters this game does not have:\n%s'), listText(missing)))
-		return false
+		return fail(string.format(text('replaychars', 'This replay needs characters this game does not have:\n%s'), listText(missing)))
 	end
 	if not gameDef(rp.stage) or not main.f_fileExists(rp.stage) then
-		warn(string.format(text('replaystage', 'This replay needs a stage this game does not have:\n%s'), tostring(rp.stage)))
-		return false
+		return fail(string.format(text('replaystage', 'This replay needs a stage this game does not have:\n%s'), tostring(rp.stage)))
 	end
 	-- Content that differs from the recording.
-	local ok, diffs = pcall(replayMatchContent, path, defs, rp.stage)
+	local ok, diffs = pcall(replayMatchContent, path, defs, rp.stage, n)
 	local changed = {}
 	if not rp.same_engine then
 		table.insert(changed, string.format(text('replayengine', 'Engine: %s (this game: %s)'), rp.engine or '?', rp.this_engine or '?'))
+	end
+	if rp.content_listed == false then
+		-- A server's replay of a match whose end did not arrive.
+		table.insert(changed, text('replayunlisted', 'Files: the replay does not list them'))
 	end
 	if ok and type(diffs) == 'table' then
 		-- A character on several slots has its files listed once.
@@ -378,10 +398,14 @@ function replay.f_play(path, rp, err)
 			end
 		end
 	end
-	if #changed > 0 and not main.f_warning(string.format(text('replaycontent',
-		'This game differs from the one that recorded the replay:\n%s\n\nThe replay may play differently.\nPress a key to play it, or Esc to go back.'), listText(changed)),
-		motif[main.group], motif.replaybgdef) then
-		return false
+	if #changed > 0 then
+		local message = string.format(text('replaycontent',
+			'This game differs from the one that recorded the replay:\n%s\n\nThe replay may play differently.\nPress a key to play it, or Esc to go back.'), listText(changed))
+		if not interactive then
+			print('Replay: ' .. message)
+		elseif not main.f_warning(message, motif[main.group], motif.replaybgdef) then
+			return false, true
+		end
 	end
 	-- Characters known by their definition file join the roster now.
 	local chars = {p1 = {}, p2 = {}}
@@ -391,8 +415,7 @@ function replay.f_play(path, rp, err)
 			if ref == nil then
 				local okRef, r = pcall(start.f_getCharRef, where.def)
 				if not okRef or r == nil then
-					warn(string.format(text('replayfailed', 'The replay cannot be played:\n%s'), where.def))
-					return false
+					return fail(string.format(text('replayfailed', 'The replay cannot be played:\n%s'), where.def))
 				end
 				ref = r
 			end
@@ -400,11 +423,10 @@ function replay.f_play(path, rp, err)
 			table.insert(chars[key], {ref = ref, pal = pal and math.floor(pal) or nil})
 		end
 	end
-	local okPlay, errPlay = pcall(replayMatchPlay, path)
+	local okPlay, errPlay = pcall(replayMatchPlay, path, n)
 	if not okPlay then
 		exitReplay()
-		warn(string.format(text('replayfailed', 'The replay cannot be played:\n%s'), errorText(errPlay)))
-		return false
+		return fail(string.format(text('replayfailed', 'The replay cannot be played:\n%s'), errorText(errPlay)))
 	end
 	-- The players' names, when their fight screens showed them (a versus
 	-- fight; files that predate the flag hold versus fights only).
@@ -490,13 +512,53 @@ function replay.f_play(path, rp, err)
 	if not okFight then
 		print('Replay: ' .. tostring(errFight))
 	end
+	-- Whether the viewer left the fight (Esc), or it could not play on to
+	-- the replay's end (the engine says why). The fight's end clears esc().
+	local stopped, why = replayStopped()
 	online.f_clearMatchNames()
 	exitReplay()
 	setMatchNo(-1)
 	main.f_default()
 	esc(false)
 	resetKey()
-	return okFight
+	if stopped == 'failed' then
+		return fail(string.format(text('replaystopped', 'The replay stopped before its end:\n%s'), tostring(why)))
+	end
+	return okFight, stopped == 'left'
+end
+
+-- Plays the match replay at path: rp is replayMatchInfo's result, err its
+-- error. A file that holds several matches (a server's replay of a ranked
+-- set) plays them one after another, until one cannot play or the player
+-- leaves one (Esc). Messages say what keeps a match from playing; content
+-- that differs from the recording is listed first, and the player chooses
+-- whether to play. A match that stops before its end (its inputs stop)
+-- counts as one that cannot play. opts.interactive = false (the -replay
+-- command line) prints the messages and plays anyway. Returns true when
+-- every match played to its end, or the player left one (not for the
+-- command line, where every match must play).
+function replay.f_play(path, rp, err, opts)
+	local interactive = opts == nil or opts.interactive ~= false
+	local matches = type(rp) == 'table' and math.max(1, math.floor(tonumber(rp.matches) or 1)) or 1
+	for n = 1, matches do
+		if n > 1 then
+			rp, err = replayMatchInfo(path, n)
+		end
+		local ok, left = playMatch(path, n, rp, err, interactive)
+		if left and not interactive then
+			ok = false
+		end
+		if type(opts) == 'table' and type(opts.after) == 'function' then
+			opts.after(n, ok)
+		end
+		if not ok then
+			return false
+		end
+		if left then
+			return true
+		end
+	end
+	return true
 end
 
 return replay

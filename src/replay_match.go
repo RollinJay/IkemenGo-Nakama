@@ -51,6 +51,10 @@ import (
 // scripts described (replaySetMatchInfo); the engine does not interpret it
 // beyond the characters' definition files and the players' names, and fills
 // in a player's online name that arrived after the match began.
+//
+// A file can also hold several matches, each match record followed by its
+// sessions: a server's replay of a ranked set (nakama/modules/ikemen_ranked.lua),
+// which it writes as plain JSON lines, without gzip. Both forms are read.
 
 const (
 	matchReplayFormat      = "ikemen-match-replay"
@@ -618,11 +622,11 @@ func applyMatchStartState(states []ReplayPlayerState) {
 }
 
 // recordMatchStartState captures the players' state for the recorders, once
-// runMatch has set the round up: a rollback session's match replay and a
-// local match replay include it.
+// runMatch has set the round up: a rollback session's match replay, a local
+// match replay and a ranked session's replay stream include it.
 func recordMatchStartState() {
 	matchStartState = nil
-	if matchReplay.active() || localReplay.pending {
+	if matchReplay.active() || localReplay.pending || (sys.nakama != nil && sys.nakama.RankedSession()) {
 		matchStartState = captureMatchStartState()
 	}
 	localReplay.begin(matchStartState)
@@ -927,16 +931,21 @@ func compareReplayContent(recorded, local []ReplayContentItem) []ReplayContentDi
 // ---------------------------------------------------------------------------
 // Reading
 
-// matchReplayData is a match replay file as read: its match record and one
-// buffer per rollback session, complete with its inputs.
+// matchReplayData is a match of a match replay file as read: its match
+// record and one buffer per rollback session, complete with its inputs.
 type matchReplayData struct {
 	Match    matchReplayMatch
 	Sessions []*NakamaReplayBuffer
 	Frames   int32
 }
 
-// isMatchReplayFile reports whether path is a match replay (gzip data); the
-// replay files of whole netplay sessions start with "IKRPLCFG".
+// matchReplayMaxMatches is the most matches a file holds: the matches of a
+// ranked set of the longest kind (best of 99).
+const matchReplayMaxMatches = 99
+
+// isMatchReplayFile reports whether path is a match replay: gzip data, or
+// JSON lines (a server's replay of a ranked set). The replay files of whole
+// netplay sessions start with "IKRPLCFG".
 func isMatchReplayFile(path string) bool {
 	f, err := os.Open(path)
 	if err != nil {
@@ -945,26 +954,58 @@ func isMatchReplayFile(path string) bool {
 	defer f.Close()
 	var magic [2]byte
 	_, err = io.ReadFull(f, magic[:])
-	return err == nil && magic[0] == 0x1f && magic[1] == 0x8b
+	return err == nil && ((magic[0] == 0x1f && magic[1] == 0x8b) || magic[0] == '{')
 }
 
-// readMatchReplay reads a match replay file. A session cut short (the game
-// stopped while writing) ends at its last complete frame.
+// readMatchReplay reads the first match of a match replay file.
 func readMatchReplay(path string) (*matchReplayData, error) {
+	matches, err := readMatchReplayFile(path)
+	if err != nil {
+		return nil, err
+	}
+	return matches[0], nil
+}
+
+// readMatchReplayMatch reads the match numbered n (from 1) of a match replay
+// file, and how many matches the file holds.
+func readMatchReplayMatch(path string, n int) (*matchReplayData, int, error) {
+	matches, err := readMatchReplayFile(path)
+	if err != nil {
+		return nil, 0, err
+	}
+	if n < 1 || n > len(matches) {
+		return nil, len(matches), fmt.Errorf("the replay has no match %d (it has %d)", n, len(matches))
+	}
+	return matches[n-1], len(matches), nil
+}
+
+// readMatchReplayFile reads every match of a match replay file, gzip-
+// compressed or not. A session cut short (the game stopped while writing)
+// ends at its last complete frame. The limit on sessions applies to each
+// match, those on matches, frames and data to the whole file.
+func readMatchReplayFile(path string) ([]*matchReplayData, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close()
-	gz, err := gzip.NewReader(bufio.NewReader(f))
-	if err != nil {
-		return nil, fmt.Errorf("not a match replay: %w", err)
+	br := bufio.NewReader(f)
+	var in io.Reader = br
+	if magic, err := br.Peek(2); err == nil && magic[0] == 0x1f && magic[1] == 0x8b {
+		gz, err := gzip.NewReader(br)
+		if err != nil {
+			return nil, fmt.Errorf("not a match replay: %w", err)
+		}
+		defer gz.Close()
+		in = gz
+	} else if err != nil || magic[0] != '{' {
+		return nil, errors.New("not a match replay")
 	}
-	defer gz.Close()
-	sc := bufio.NewScanner(&cappedReader{r: gz, left: matchReplayMaxBytes})
+	sc := bufio.NewScanner(&cappedReader{r: in, left: matchReplayMaxBytes})
 	sc.Buffer(make([]byte, 64<<10), matchReplayMaxLine)
-	data := &matchReplayData{}
-	haveMatch := false
+	var matches []*matchReplayData
+	var data *matchReplayData
+	sessions := 0
 	var current *NakamaReplayBuffer
 	ended := false
 	var frames int64 // in all the frames records
@@ -976,6 +1017,7 @@ func readMatchReplay(path string) (*matchReplayData, error) {
 			final, _ := current.FinalFrame()
 			data.Frames += final
 		}
+		current = nil
 	}
 	for sc.Scan() {
 		line := sc.Bytes()
@@ -987,16 +1029,23 @@ func readMatchReplay(path string) (*matchReplayData, error) {
 		}
 		if err := json.Unmarshal(line, &kind); err != nil {
 			// The last line of a file cut short is incomplete.
-			if !sc.Scan() && sc.Err() != nil && len(data.Sessions) > 0 {
+			if !sc.Scan() && sc.Err() != nil && sessions > 0 {
 				break
 			}
 			return nil, fmt.Errorf("broken record: %w", err)
 		}
 		switch kind.Type {
 		case "match":
-			if haveMatch {
+			// A match record after sessions starts the file's next match; a
+			// repeated one before any session (an older file's) is ignored.
+			if data != nil && len(data.Sessions) == 0 {
 				continue
 			}
+			closeSession()
+			if len(matches) >= matchReplayMaxMatches {
+				return nil, fmt.Errorf("the replay has more than %d matches", matchReplayMaxMatches)
+			}
+			data = &matchReplayData{}
 			if err := json.Unmarshal(line, &data.Match); err != nil {
 				return nil, fmt.Errorf("broken match record: %w", err)
 			}
@@ -1006,9 +1055,9 @@ func readMatchReplay(path string) (*matchReplayData, error) {
 			if data.Match.Version > matchReplayVersion {
 				return nil, fmt.Errorf("the replay was saved by a newer version of the game (format %d)", data.Match.Version)
 			}
-			haveMatch = true
+			matches = append(matches, data)
 		case "session":
-			if !haveMatch {
+			if data == nil {
 				return nil, errors.New("the replay has no match record")
 			}
 			var s matchReplaySession
@@ -1017,8 +1066,9 @@ func readMatchReplay(path string) (*matchReplayData, error) {
 			}
 			closeSession()
 			if len(data.Sessions) >= matchReplayMaxSessions {
-				return nil, fmt.Errorf("the replay has more than %d sessions", matchReplayMaxSessions)
+				return nil, fmt.Errorf("a match of the replay has more than %d sessions", matchReplayMaxSessions)
 			}
+			sessions++
 			current = NewNakamaReplayBuffer()
 			current.ApplyHeader(s.Header)
 			ended = false
@@ -1055,19 +1105,24 @@ func readMatchReplay(path string) (*matchReplayData, error) {
 	// A file cut short (the game stopped while writing it) keeps the
 	// sessions read so far.
 	if err := sc.Err(); err != nil {
-		if len(data.Sessions) == 0 || errors.Is(err, errMatchReplayTooLarge) {
+		if sessions == 0 || errors.Is(err, errMatchReplayTooLarge) {
 			return nil, err
 		}
 		log.Printf("Match replay %s is cut short: %v", path, err)
 	}
-	closeSession()
-	if !haveMatch {
+	if data == nil {
 		return nil, errors.New("the replay has no match record")
 	}
+	closeSession()
+	// A match record without sessions (the last one of a server's replay
+	// whose player left as the match began) holds nothing to play.
 	if len(data.Sessions) == 0 {
+		matches = matches[:len(matches)-1]
+	}
+	if len(matches) == 0 {
 		return nil, errors.New("the replay has no inputs")
 	}
-	return data, nil
+	return matches, nil
 }
 
 var errMatchReplayTooLarge = fmt.Errorf("the replay holds more than %d MB of data", matchReplayMaxBytes>>20)
@@ -1152,26 +1207,34 @@ func matchReplayScriptInit(l *lua.LState) {
 		/*Read a match replay's description without playing it.
 		@function replayMatchInfo
 		@tparam string path The replay file.
+		@tparam[opt] int match Which of the file's matches, from 1 (default 1): a
+		  server's replay of a ranked set holds the set's matches.
 		@treturn table|nil replay `nil` for a replay of a whole netplay session;
 		  otherwise `info` (the scripts' description), `engine` (the version that
 		  recorded it), `this_engine`, `same_engine`, `date`, `sessions`,
 		  `frames` (the match's length), `stage` (its definition file),
-		  `ai_levels` (each player's AI level at the start, by player number)
-		  and `turns_offset` (for each side, how many of its Turns members
-		  the fight skipped); the last two are absent from older files.
+		  `ai_levels` (each player's AI level at the start, by player number),
+		  `turns_offset` (for each side, how many of its Turns members
+		  the fight skipped; the last two are absent from older files),
+		  `match` (the match's number), `matches` (how many the file holds)
+		  and `content_listed` (whether it lists the files the match depends
+		  on, which replayMatchContent compares).
 		@treturn string|nil error Why the file could not be read.*/
 		path := strArg(l, 1)
 		if !isMatchReplayFile(path) {
 			l.Push(lua.LNil)
 			return 1
 		}
-		data, err := readMatchReplay(path)
+		n := optionalLuaInt(l, 2, 1)
+		data, count, err := readMatchReplayMatch(path, n)
 		if err != nil {
 			l.Push(lua.LNil)
 			l.Push(lua.LString(err.Error()))
 			return 2
 		}
 		t := l.NewTable()
+		t.RawSetString("match", lua.LNumber(n))
+		t.RawSetString("matches", lua.LNumber(count))
 		t.RawSetString("info", jsonToLValue(l, data.Match.Info))
 		t.RawSetString("engine", lua.LString(data.Match.Engine))
 		t.RawSetString("this_engine", lua.LString(Version))
@@ -1179,6 +1242,9 @@ func matchReplayScriptInit(l *lua.LState) {
 		t.RawSetString("date", lua.LString(data.Match.Date))
 		t.RawSetString("sessions", lua.LNumber(len(data.Sessions)))
 		t.RawSetString("frames", lua.LNumber(data.Frames))
+		// Whether the replay lists the files the match depends on (a server's
+		// replay of a match whose end did not arrive does not).
+		t.RawSetString("content_listed", lua.LBool(len(data.Match.Content) > 0))
 		if header := data.Sessions[0].Header(); header != nil {
 			t.RawSetString("stage", lua.LString(header.Stage))
 			if len(header.AILevels) > 0 {
@@ -1209,13 +1275,21 @@ func matchReplayScriptInit(l *lua.LState) {
 		@tparam table chars `{p1 = {def, ...}, p2 = {def, ...}}`: this game's
 		  definition files of the replay's characters, in the replay's order.
 		@tparam string stage This game's definition file of the replay's stage.
+		@tparam[opt] int match Which of the file's matches, from 1 (default 1).
 		@treturn table differences A list of `{label, file, status}`: status is
 		  `changed`, `missing` or `added`; label names the file's role, such as
 		  `p1.1 cns`, `stage`, `fight` or `common 2`. Only files inside the
-		  game's folder are read. Raises an error when the replay cannot be read.*/
-		data, err := readMatchReplay(strArg(l, 1))
+		  game's folder are read. A replay that does not list its files (a
+		  server's replay of a match whose end did not arrive) has none to
+		  compare: the list is empty. Raises an error when the replay cannot be
+		  read.*/
+		data, _, err := readMatchReplayMatch(strArg(l, 1), optionalLuaInt(l, 4, 1))
 		if err != nil {
 			l.RaiseError("%s", err.Error())
+		}
+		if len(data.Match.Content) == 0 {
+			l.Push(l.NewTable())
+			return 1
 		}
 		var chars [2][]string
 		if t, ok := l.Get(2).(*lua.LTable); ok {
@@ -1263,14 +1337,15 @@ func matchReplayScriptInit(l *lua.LState) {
 		/*Start playing a match replay. The scripts then load the fight it
 		describes (launchFight); its inputs play it.
 		@function replayMatchPlay
-		@tparam string path The replay file.*/
+		@tparam string path The replay file.
+		@tparam[opt] int match Which of the file's matches, from 1 (default 1).*/
 		if sys.replayFile != nil {
 			l.RaiseError("a replay is already active")
 		}
 		if sys.netConnection != nil || sys.rollback.session != nil {
 			l.RaiseError("cannot play a replay during an online match")
 		}
-		data, err := readMatchReplay(strArg(l, 1))
+		data, _, err := readMatchReplayMatch(strArg(l, 1), optionalLuaInt(l, 2, 1))
 		if err != nil {
 			l.RaiseError("%s", err.Error())
 		}
@@ -1279,6 +1354,29 @@ func matchReplayScriptInit(l *lua.LState) {
 		}
 		l.Push(lua.LTrue)
 		return 1
+	})
+	luaRegister(l, "replayStopped", func(l *lua.LState) int {
+		/*Why the replay's fight stopped before the replay's end, after the
+		fight (before exitReplay).
+		@function replayStopped
+		@treturn string|nil why `"left"` when the viewer left it (Esc),
+		  `"failed"` when it could not play on (its inputs stopped coming, a
+		  Turns match's next session is missing...), `nil` when it played to
+		  its end.
+		@treturn string|nil reason For `"failed"`, why (as the log says).*/
+		rf := sys.replayFile
+		switch {
+		case rf == nil:
+			return 0
+		case rf.failure != "":
+			l.Push(lua.LString("failed"))
+			l.Push(lua.LString(rf.failure))
+			return 2
+		case rf.viewerLeft:
+			l.Push(lua.LString("left"))
+			return 1
+		}
+		return 0
 	})
 }
 

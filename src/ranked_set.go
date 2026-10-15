@@ -21,6 +21,12 @@ type RankedSet struct {
 	winner      int // player index, -1 until set completion
 	lastWinner  int // player index who won the immediately preceding match
 	selection   [2]string
+	// The ranked session's match id, the set's number in the session (1 for
+	// the first, then one more for each "Play Another Set"), and whether this
+	// set's result was claimed with the server (nakama.submitRankedSet).
+	matchID   string
+	number    int
+	submitted bool
 }
 
 func normalizeRankedBestOf(bestOf int) int {
@@ -38,6 +44,9 @@ func normalizeRankedBestOf(bestOf int) int {
 
 func (r *RankedSet) Begin(players [2]string, rules RankedSetRules) {
 	rules.BestOf = normalizeRankedBestOf(rules.BestOf)
+	r.number = 1
+	r.matchID = ""
+	r.submitted = false
 	r.active = true
 	r.rules = rules
 	r.players = players
@@ -143,7 +152,42 @@ func (r *RankedSet) StartNextSet() bool {
 	r.winner = -1
 	r.lastWinner = -1
 	r.selection = [2]string{"", ""}
+	r.number++
+	r.submitted = false
 	return true
+}
+
+// SetMatchID names the ranked session the set is played in.
+func (r *RankedSet) SetMatchID(matchID string) {
+	if r != nil {
+		r.matchID = matchID
+	}
+}
+
+// MatchID is the ranked session's match id ("" when unknown).
+func (r *RankedSet) MatchID() string {
+	if r == nil {
+		return ""
+	}
+	return r.matchID
+}
+
+// Number is the set's number in its session: 1 for the first set.
+func (r *RankedSet) Number() int {
+	if r == nil || r.number < 1 {
+		return 1
+	}
+	return r.number
+}
+
+// Claim returns the winner of a decided set to claim with the server, once:
+// false when the set is not decided or was claimed already.
+func (r *RankedSet) Claim() (winner string, ok bool) {
+	if r == nil || !r.active || r.winner < 0 || r.submitted {
+		return "", false
+	}
+	r.submitted = true
+	return r.players[r.winner], true
 }
 
 func (r *RankedSet) RecordMatch(winnerSide int) bool {

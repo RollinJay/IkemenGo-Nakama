@@ -1,6 +1,6 @@
 # IKEMEN GO Nakama — Complete Implementation Record
 
-This document combines the implementation records from Pass 5 (recovered) through Pass 12 into one chronological reference. The pass documents are preserved in order; this is a consolidation, not a rewrite of their contents.
+This document combines the implementation records from Pass 5 (recovered) through Pass 12 into one chronological reference. The pass documents are preserved in order; this is a consolidation, not a rewrite of their contents. What each pass says about "the current tree" was true when that pass was written; [nakama/README.md](nakama/README.md) describes the integration as it is now (for example, ranked ratings now change once per ranked set the server recorded, and the server keeps ranked sets' replays for moderators).
 
 
 

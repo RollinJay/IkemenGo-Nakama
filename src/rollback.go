@@ -209,13 +209,26 @@ func (rs *RollbackSystem) preMatchSetup() error {
 		// need one copy. The settlement delay is enforced by RollbackReplayStream
 		// rather than by the transport, and a lobby sets it, the match
 		// description, or no publication at all (nakama.setReplayPublish).
-		if sys.nakama != nil && sys.nakama.CurrentMatchID() != "" && rs.session.host == "" {
-			if publish := sys.nakama.ReplayPublish(); !publish.Disabled {
+		// In a ranked session both players publish, whatever
+		// setReplayPublish said, and the server keeps both streams for its
+		// moderators (nakama/modules/ikemen_session.lua): with a short delay,
+		// since nobody watches them, with the players' state at the start of
+		// each session, as a match replay file has it, and with the list of
+		// the match's files at the end.
+		ranked := sys.nakama != nil && sys.nakama.RankedSession()
+		if sys.nakama != nil && sys.nakama.CurrentMatchID() != "" && (rs.session.host == "" || ranked) {
+			if publish := sys.nakama.ReplayPublish(); !publish.Disabled || ranked {
 				stage := ""
 				if sys.stage != nil {
 					stage = sys.stage.def
 				}
-				rs.session.replayStream.SetDelay(publish.DelaySeconds)
+				delay := publish.DelaySeconds
+				var startState []ReplayPlayerState
+				if ranked {
+					delay = rankedReplayDelaySeconds
+					startState = matchStartState
+				}
+				rs.session.replayStream.SetDelay(delay)
 				rs.session.replayStream.SetSink(&nakamaReplaySink{client: sys.nakama})
 				rs.session.replayStream.Begin(ReplayStreamStart{
 					Header:       sys.netConnection.replayHeader,
@@ -229,8 +242,15 @@ func (rs *RollbackSystem) preMatchSetup() error {
 					InputRemap:   currentInputRemap(),
 					AILevels:     currentAILevels(),
 					Context:      currentMatchContext(),
+					StartState:   startState,
 					Params:       currentMatchParams(),
 				})
+				if ranked {
+					spec := matchContentFor(matchInfoCharDefs(publish.Info), stage)
+					content := make(chan []ReplayContentItem, 1)
+					go func() { content <- spec.manifest() }()
+					rs.session.replayStream.SetContent(content)
+				}
 			}
 		}
 

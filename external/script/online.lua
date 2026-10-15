@@ -260,6 +260,61 @@ function online.f_reasonText(reason)
 	return text
 end
 
+-- Ranked sets. A matchmade ranked session plays best-of-N sets; the ranked
+-- set's state is kept by the engine (nakama.rankedSet), and start.f_game
+-- records each match's winner in it. When a set has been decided (by its
+-- last match or a forfeit), each player's game claims the set's winner with
+-- the server, which changes the two players' ratings once both claims agree
+-- (nakama/README.md, Ranked sets). The claim goes once per set, from both
+-- players' games; it does not wait for the answer, which arrives as the
+-- "ranked_result" event.
+function online.f_submitRankedSet()
+	if nakama == nil or nakama.submitRankedSet == nil then
+		return false
+	end
+	local ok, sent = pcall(nakama.submitRankedSet)
+	if not ok then
+		print('Ranked set claim failed: ' .. tostring(sent))
+		return false
+	end
+	return sent == true
+end
+
+-- Waits up to frames frames (60 per second) for the server's answer to the
+-- claim of a ranked set; for the command line, which quits right after its
+-- match. Returns the answer's payload, or nil.
+function online.f_waitRankedResult(frames)
+	local answer = nil
+	nakama.on('ranked_result', function(_, ev)
+		answer = ev
+	end, 'online_wait')
+	for _ = 1, frames do
+		if answer ~= nil then
+			break
+		end
+		refresh()
+	end
+	nakama.on('ranked_result', nil, 'online_wait')
+	if answer == nil then
+		return nil
+	end
+	if answer.error ~= nil then
+		print('Ranked set claim: ' .. tostring(answer.error))
+		return nil
+	end
+	return answer.payload
+end
+
+if nakama ~= nil and nakama.on ~= nil then
+	nakama.on('ranked_result', function(_, ev)
+		if ev.error ~= nil then
+			print('Ranked set claim: ' .. tostring(ev.error))
+		elseif type(ev.payload) == 'table' then
+			print('Ranked set claim: ' .. tostring(ev.payload.status))
+		end
+	end, 'online')
+end
+
 -- The fight screen shows each player's online name in place of the name of
 -- the character they play as (nakama.setMatchNames). The names are read
 -- from the server; the matchmaker pairing's host starts on side 1, and a

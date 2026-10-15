@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"log"
 	"time"
 )
@@ -105,9 +106,17 @@ func (rf *ReplayFile) liveStallLimit() time.Duration {
 	return liveReplayStallLimit + time.Duration(rf.liveDelay)*time.Second/replayStreamFPS
 }
 
-// liveFail ends watching: Esc for the screens, and the replay closes.
+// liveFail ends watching: Esc for the screens, and the replay closes. The
+// replay keeps why (failure), or that the viewer had pressed Esc, so that
+// the scripts can tell the two apart (replayStopped).
 func (rf *ReplayFile) liveFail(format string, args ...any) {
-	log.Printf(format, args...)
+	message := fmt.Sprintf(format, args...)
+	log.Print(message)
+	if sys.esc {
+		rf.viewerLeft = true
+	} else if rf.failure == "" {
+		rf.failure = message
+	}
 	sys.esc = true
 	rf.Close()
 }

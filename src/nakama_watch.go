@@ -9,13 +9,20 @@ import (
 //
 // Publishing: the netplay host of a rollback match publishes the match's
 // replay stream through the joined Nakama match (see rollback.go
-// preMatchSetup). A lobby decides per match whether it is published, with
-// which delay, and what the header tells spectators (NakamaReplayPublish).
+// preMatchSetup); in a ranked session both players do. A lobby decides per
+// match whether it is published, with which delay, and what the header tells
+// spectators (NakamaReplayPublish).
 //
 // Direct round trip: while two players have their P2P path open, pings over
 // it measure their round trip (p2pMux). In a lobby, the client reports it
 // with the "link" command, so members see the direct value instead of the
 // round trip to the server.
+
+// rankedReplayDelaySeconds is the publication delay in a ranked session
+// (setReplayPublish does not change it): the server keeps the stream for
+// moderators and nobody watches it, so it only waits out rollbacks (GGPO goes
+// back 8 frames at most), and a disconnect loses little of the match.
+const rankedReplayDelaySeconds = 2
 
 // NakamaReplayPublish decides how this client publishes the replay stream of
 // its next rollback matches. The zero value publishes with the configured

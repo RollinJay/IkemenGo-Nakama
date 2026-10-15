@@ -3107,6 +3107,10 @@ func systemScriptInit(l *lua.LState) {
 				} else if sys.esc {
 					// Match was quit in netplay or quick vs command line
 					winp = -1
+					// A replay's viewer left it, unless it failed (liveFail).
+					if sys.replayFile != nil && sys.replayFile.failure == "" {
+						sys.replayFile.viewerLeft = true
+					}
 				} else {
 					// Determine winner
 					w1 := sys.wins[0] >= sys.matchWins[0]

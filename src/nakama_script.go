@@ -729,7 +729,44 @@ func nakamaScriptInit(l *lua.LState) {
 		state.RawSetString("winner_keeps_selection", lua.LBool(sys.rankedSet.Rules().WinnerKeepsSelection))
 		state.RawSetString("winner", lua.LNumber(sys.rankedSet.SetWinner()+1))
 		state.RawSetString("last_winner", lua.LNumber(sys.rankedSet.LastWinner()+1))
+		state.RawSetString("set", lua.LNumber(sys.rankedSet.Number()))
+		state.RawSetString("match_id", lua.LString(sys.rankedSet.MatchID()))
 		l.Push(state)
+		return 1
+	}))
+
+	// submitRankedSet() claims the winner of the ranked set just decided
+	// (rankedSet().winner) with the server, once per set: the server rates
+	// the set when both players' claims agree (nakama/README.md, Ranked
+	// sets). Returns true when it sends the claim, false when the set is not
+	// decided or was claimed already. Emits "ranked_result" with the server's
+	// answer (payload.status: open until the other player's claim has come,
+	// then settled or disputed) or with error.
+	api.RawSetString("submitRankedSet", l.NewFunction(func(l *lua.LState) int {
+		if sys.nakama == nil {
+			l.Push(lua.LFalse)
+			return 1
+		}
+		winner, ok := sys.rankedSet.Claim()
+		if !ok {
+			l.Push(lua.LFalse)
+			return 1
+		}
+		n := sys.nakama
+		claim := NakamaRankedClaim{MatchID: sys.rankedSet.MatchID(), Set: sys.rankedSet.Number(), Winner: winner}
+		if claim.MatchID == "" {
+			claim.MatchID = n.CurrentMatchID()
+		}
+		SafeGo(func() {
+			body, err := submitRankedClaim(n, claim)
+			if err != nil {
+				log.Printf("Nakama ranked set %s (set %d): the claim failed: %v", claim.MatchID, claim.Set, err)
+			} else {
+				log.Printf("Nakama ranked set %s (set %d): claimed %s: %s", claim.MatchID, claim.Set, claim.Winner, body)
+			}
+			n.emit(NakamaEvent{Type: "ranked_result", Payload: rpcAnswer(body), Error: err})
+		})
+		l.Push(lua.LTrue)
 		return 1
 	}))
 
@@ -1054,7 +1091,7 @@ func nakamaScriptInit(l *lua.LState) {
 		n := sys.nakama
 		SafeGo(func() {
 			body, err := n.GetRating(context.Background(), game)
-			n.emit(NakamaEvent{Type: "rating", Payload: json.RawMessage(body), Error: err})
+			n.emit(NakamaEvent{Type: "rating", Payload: rpcAnswer(body), Error: err})
 		})
 		return 0
 	}))
@@ -1076,7 +1113,7 @@ func nakamaScriptInit(l *lua.LState) {
 		n := sys.nakama
 		SafeGo(func() {
 			body, err := n.SubmitResult(context.Background(), req)
-			n.emit(NakamaEvent{Type: "result", Payload: json.RawMessage(body), Error: err})
+			n.emit(NakamaEvent{Type: "result", Payload: rpcAnswer(body), Error: err})
 		})
 		return 0
 	}))
@@ -1101,6 +1138,37 @@ func nakamaScriptInit(l *lua.LState) {
 	}))
 
 	l.SetGlobal("nakama", api)
+}
+
+// rpcAnswer is an RPC's JSON answer as an event payload (a Lua table), or
+// nil when there is none.
+func rpcAnswer(body []byte) any {
+	var v any
+	if len(body) == 0 || json.Unmarshal(body, &v) != nil {
+		return nil
+	}
+	return v
+}
+
+// submitRankedClaim sends a ranked set's claim, again after a failure of the
+// connection or of the server (not after a refusal), three times at most.
+func submitRankedClaim(n *NakamaClient, claim NakamaRankedClaim) ([]byte, error) {
+	var body []byte
+	var err error
+	for attempt, wait := 0, 2*time.Second; attempt < 3; attempt, wait = attempt+1, wait*2 {
+		if attempt > 0 {
+			time.Sleep(wait)
+		}
+		body, err = n.SubmitRankedSet(context.Background(), claim)
+		switch nakamaRPCErrorCode(err) {
+		case 0, 10, 13, 14: // no answer, aborted, internal, unavailable
+			if err != nil {
+				continue
+			}
+		}
+		break
+	}
+	return body, err
 }
 
 func optionalLuaString(l *lua.LState, index int, fallback string) string {
@@ -1259,11 +1327,8 @@ func nakamaDispatchLua(l *lua.LState, callbacks *nakamaLuaHandlers, ev NakamaEve
 			players[0] = ev.Matchmaker.Users[0].Presence.UserID
 			players[1] = ev.Matchmaker.Users[1].Presence.UserID
 			props := ev.Matchmaker.Users[0].Properties
-			mode := "unranked"
-			if v, ok := props["mode"].(string); ok && v != "" {
-				mode = v
-			}
-			if mode == "ranked" {
+			// A ranked pair whose tickets differ plays an unranked session.
+			if ev.Matchmaker.SessionMode() == "ranked" {
 				rules := RankedSetRules{BestOf: gameOptionInt("Netplay.Ranked.BestOf"), SwitchSides: gameOptionBool("Netplay.Ranked.SwitchSides"), WinnerKeepsSelection: gameOptionBool("Netplay.Ranked.WinnerKeepsSelection")}
 				if v, ok := props["ranked_best_of"].(float64); ok {
 					rules.BestOf = int(v)
@@ -1279,6 +1344,7 @@ func nakamaDispatchLua(l *lua.LState, callbacks *nakamaLuaHandlers, ev NakamaEve
 					rules.WinnerKeepsSelection = strings.EqualFold(v, "true")
 				}
 				sys.rankedSet.Begin(players, rules)
+				sys.rankedSet.SetMatchID(ev.Matchmaker.MatchID)
 			} else {
 				sys.rankedSet.Reset()
 			}

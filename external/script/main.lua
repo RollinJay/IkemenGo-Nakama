@@ -1209,9 +1209,18 @@ function main.f_commandLine()
 	while loading() do
 		--do nothing
 	end
-	game()
+	local winner = game()
 	if flags['-log'] ~= nil then
 		main.f_printTable(getGameStats().Matches[matchNo()], flags['-log'])
+	end
+	if flags['-nakama-match'] ~= nil and nakama.rankedSet ~= nil and nakama.rankedSet().active then
+		-- A ranked quick match plays the set's first match: a set of more
+		-- matches (Netplay.Ranked.BestOf above 1) is left undecided. A
+		-- decided set is claimed with the server before quitting.
+		if (winner == 1 or winner == 2) and nakama.rankedSetRecordMatch(winner) and online.f_submitRankedSet() then
+			local answer = online.f_waitRankedResult(60 * 15)
+			print('Ranked set: ' .. (type(answer) == 'table' and tostring(answer.status) or 'no answer'))
+		end
 	end
 	if flags['-nakama-match'] ~= nil then
 		-- Close the P2P session so the other player is not left waiting.
@@ -4112,6 +4121,41 @@ options.f_start()
 
 if getCommandLineValue("-p1") ~= nil and getCommandLineValue("-p2") ~= nil and getCommandLineValue("-loadmotif") ~= nil then
 	main.f_commandLine()
+end
+
+-- Ikemen_GO -replay <file>: plays a match replay without the menus, such as
+-- a ranked set's replay that a server exported for its moderators (all the
+-- set's matches, one after another), and quits: with status 0 when every
+-- match played, 1 otherwise. Messages go to the log instead of the screen,
+-- and content that differs from the recording plays anyway. -replay-stats
+-- <file> writes the statistics of each match played (getGameStatsJson), as
+-- a JSON list.
+function main.f_commandLineReplay(path, statsFile)
+	main.f_waitForPreloads(true)
+	local rp, err = replayMatchInfo(path)
+	if rp == nil and err == nil then
+		print('Replay: ' .. path .. ' is not a match replay')
+		os.exit(1)
+	end
+	local stats = {}
+	local ok = replay.f_play(path, rp, err, {interactive = false, after = function(n, played)
+		if played then
+			table.insert(stats, getGameStatsJson())
+		end
+		print(string.format('Replay: match %d %s', n, played and 'played' or 'did not play'))
+	end})
+	if statsFile ~= nil then
+		local f = io.open(statsFile, 'w')
+		if f ~= nil then
+			f:write('[' .. table.concat(stats, ',') .. ']\n')
+			f:close()
+		end
+	end
+	os.exit(ok and 0 or 1)
+end
+
+if getCommandLineValue("-replay") ~= nil then
+	main.f_commandLineReplay(getCommandLineValue("-replay"), getCommandLineValue("-replay-stats"))
 end
 
 main.f_loadingRefresh()

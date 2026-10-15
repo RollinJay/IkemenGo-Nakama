@@ -126,6 +126,44 @@ type NakamaMatchmakerMatched struct {
 	Self    NakamaMatchUser   `json:"self"`
 }
 
+// SessionMode is the mode of the session the matchmaker made: the first
+// ticket's mode, except that two ranked tickets that differ in mode, game,
+// build or set length get an unranked session, as the server decides
+// (nakama/modules/ikemen_matchmaker.lua, matchmaker_matched). Such a pair
+// can meet when the server checks only one ticket's query against the other
+// (Nakama's matchmaker.rev_precision, false by default).
+func (m *NakamaMatchmakerMatched) SessionMode() string {
+	if m == nil || len(m.Users) == 0 {
+		return "unranked"
+	}
+	prop := func(u NakamaMatchUser, key string) string {
+		switch v := u.Properties[key].(type) {
+		case nil:
+			return ""
+		case string:
+			return v
+		default:
+			return fmt.Sprint(v)
+		}
+	}
+	mode := prop(m.Users[0], "mode")
+	if mode == "" {
+		mode = "unranked"
+	}
+	if mode != "ranked" {
+		return mode
+	}
+	if len(m.Users) != 2 {
+		return "unranked"
+	}
+	for _, key := range []string{"mode", "game", "build", "ranked_best_of"} {
+		if prop(m.Users[0], key) != prop(m.Users[1], key) {
+			return "unranked"
+		}
+	}
+	return "ranked"
+}
+
 // NakamaPairing records who this client plays in the current Nakama match and
 // which side hosts the netplay session. Both peers must reach the same answer:
 // matchmaker pairings use the matched users' order, which Nakama sends
@@ -183,6 +221,16 @@ type NakamaResultRequest struct {
 	Game       string `json:"game"`
 	Result     int    `json:"result"`
 	ReplayHash string `json:"replay_hash,omitempty"`
+}
+
+// NakamaRankedClaim is a player's claim of a ranked set's winner
+// (ikemen_submit_result): MatchID is the ranked session's match id, Set the
+// set's number in the session (1 for the first) and Winner the winner's user
+// id. The server rates a set once both players' claims agree.
+type NakamaRankedClaim struct {
+	MatchID string `json:"match_id"`
+	Set     int    `json:"set"`
+	Winner  string `json:"winner"`
 }
 
 // Replay streams kept: the streams of a Turns match (one per character
@@ -246,6 +294,10 @@ type NakamaClient struct {
 	replaySegment int32
 	// The latest replay streams received, oldest first (n.replay is the last).
 	replayHistory []*NakamaReplayBuffer
+	// The session the matchmaker made last: its match id (filled in when
+	// joined, when the matchmaker sent a token) and its mode.
+	matchmadeID   string
+	matchmadeMode string
 	lobbyClientState
 
 	eventMu sync.RWMutex
@@ -1242,6 +1294,19 @@ func (n *NakamaClient) CreateLobby(ctx context.Context, cfg NakamaLobbyConfig) (
 	return result.MatchID, nil
 }
 
+// RankedSession reports whether the joined match is a ranked session that
+// the matchmaker made for this client.
+func (n *NakamaClient) RankedSession() bool {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.matchID != "" && n.matchmadeMode == "ranked" && n.matchmadeID == n.matchID
+}
+
+// SubmitRankedSet claims the winner of a ranked set (see NakamaRankedClaim).
+func (n *NakamaClient) SubmitRankedSet(ctx context.Context, claim NakamaRankedClaim) ([]byte, error) {
+	return n.CallRPC(ctx, "ikemen_submit_result", claim)
+}
+
 func (n *NakamaClient) SubmitResult(ctx context.Context, req NakamaResultRequest) ([]byte, error) {
 	return n.CallRPC(ctx, "ikemen_submit_result", req)
 }
@@ -1421,6 +1486,7 @@ func (n *NakamaClient) handleJSON(data []byte) {
 		n.mu.Lock()
 		n.ticket = ""
 		n.pairing = matchmakerPairing(&matched)
+		n.matchmadeID, n.matchmadeMode = matched.MatchID, matched.SessionMode()
 		n.mu.Unlock()
 		n.emit(NakamaEvent{Type: "matchmaker_matched", Matchmaker: &matched, MatchID: matched.MatchID, MatchToken: matched.Token, Raw: raw})
 		return
@@ -1436,6 +1502,9 @@ func (n *NakamaClient) handleJSON(data []byte) {
 			}
 			if n.matchID != p.MatchID {
 				n.clearReplaysLocked()
+			}
+			if n.matchmadeMode != "" && n.matchmadeID == "" {
+				n.matchmadeID = p.MatchID
 			}
 			n.matchID = p.MatchID
 			n.mu.Unlock()

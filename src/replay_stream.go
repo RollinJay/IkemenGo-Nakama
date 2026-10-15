@@ -65,8 +65,10 @@ type ReplayStreamHeader struct {
 	// can read: the match number, the home side, consecutive wins and the
 	// score before the match. Empty from publishers that predate it.
 	Context *ReplayMatchContext `json:"context,omitempty"`
-	// StartState is each player's state when the session started (match
-	// replay files only; see replay_match.go).
+	// StartState is each player's state when the session started: in match
+	// replay files (see replay_match.go), and in a ranked session's streams,
+	// which the server makes match replay files of. A lobby's streams leave
+	// it out.
 	StartState []ReplayPlayerState `json:"start_state,omitempty"`
 	// Params are the game parameters the fight was loaded with that its
 	// simulation depends on. Empty from recorders that predate them.
@@ -74,6 +76,10 @@ type ReplayStreamHeader struct {
 	// Local is set for a match played offline (replay_local.go), which had no
 	// netplay host (the IsHost trigger).
 	Local bool `json:"local,omitempty"`
+	// Engine is the version of the game that published the stream. Empty
+	// from publishers that predate it, and in match replay files, whose match
+	// record names the engine.
+	Engine string `json:"engine,omitempty"`
 }
 
 // ReplayStreamStart describes the match a stream starts with.
@@ -272,6 +278,11 @@ type ReplayStreamChunk struct {
 type ReplayStreamEnd struct {
 	FinalFrame int32  `json:"final_frame"`
 	Stream     string `json:"stream,omitempty"`
+	// Content lists the files the match's simulation depends on, with their
+	// hashes, as a match replay file's match record does. Only a ranked
+	// session's streams carry it: the server keeps them, and turns them into
+	// match replay files for moderators (nakama/modules/ikemen_ranked.lua).
+	Content []ReplayContentItem `json:"content,omitempty"`
 }
 
 // ReplayStreamReset withdraws a stream: a rollback went past frames that were
@@ -565,6 +576,9 @@ type RollbackReplayStream struct {
 	started          bool
 	invalid          bool
 	header           ReplayStreamHeader
+	// content, when set (SetContent), delivers the match's content list for
+	// the end message.
+	content <-chan []ReplayContentItem
 }
 
 func NewRollbackReplayStream(delaySeconds int, sink ReplayStreamSink) *RollbackReplayStream {
@@ -594,6 +608,16 @@ func (r *RollbackReplayStream) SetDelay(seconds int) {
 	r.delayFrames = int32(seconds * replayStreamFPS)
 }
 
+// SetContent makes the end message of the stream begun last carry the
+// content list that ch delivers (ReplayStreamEnd.Content), when it has
+// arrived by then.
+func (r *RollbackReplayStream) SetContent(ch <-chan []ReplayContentItem) {
+	if r == nil {
+		return
+	}
+	r.content = ch
+}
+
 // Begin starts publishing a match; the header tells spectators about it.
 func (r *RollbackReplayStream) Begin(start ReplayStreamStart) {
 	if r == nil {
@@ -603,6 +627,7 @@ func (r *RollbackReplayStream) Begin(start ReplayStreamStart) {
 	r.sequence = 0
 	r.started = true
 	r.invalid = false
+	r.content = nil
 	r.header = ReplayStreamHeader{
 		Version:      replayStreamVersion,
 		FrameRate:    replayStreamFPS,
@@ -620,7 +645,9 @@ func (r *RollbackReplayStream) Begin(start ReplayStreamStart) {
 		InputRemap:   start.InputRemap,
 		AILevels:     start.AILevels,
 		Context:      start.Context,
+		StartState:   start.StartState,
 		Params:       start.Params,
+		Engine:       Version,
 	}
 	if header := start.Header; header != nil {
 		copyHeader := *header
@@ -725,8 +752,19 @@ func (r *RollbackReplayStream) End(finalFrame int32, rs *RollbackSession) {
 			r.publishedThrough = end
 		}
 	}
+	end := ReplayStreamEnd{FinalFrame: finalFrame, Stream: r.header.Stream}
+	if r.content != nil {
+		// The hashes take milliseconds and started with the match; a list
+		// still missing at its end is left out.
+		select {
+		case end.Content = <-r.content:
+		case <-time.After(time.Second):
+			log.Printf("Rollback replay stream: the content list is not ready; the end goes without it")
+		}
+		r.content = nil
+	}
 	if r.sink != nil {
-		r.sink.PublishReplayEnd(ReplayStreamEnd{FinalFrame: finalFrame, Stream: r.header.Stream})
+		r.sink.PublishReplayEnd(end)
 	}
 	r.started = false
 }

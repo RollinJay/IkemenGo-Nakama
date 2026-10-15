@@ -8,8 +8,11 @@
 local nk = require("nakama")
 
 -- These modules register their own RPC/matchmaker handlers when required.
+-- ikemen_ranked (ranked sets and their replays) is shared by the matchmaker,
+-- the session, the rating and the moderation modules.
 require("ikemen_matchmaker")
 require("ikemen_rating")
+require("ikemen_moderation")
 require("ikemen_lobby")
 require("ikemen_account")
 

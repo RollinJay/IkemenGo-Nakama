@@ -1856,6 +1856,8 @@ function start.f_game(common)
 				rankedAfter = nakama.rankedSet()
 				start.rankedCarry = nil
 				start.rankedSetFinished = true
+				-- The set is decided: claim its winner with the server.
+				online.f_submitRankedSet()
 			else
 				print('Nakama ranked forfeit could not be mapped to a set player: ' .. tostring(forfeitUser))
 			end
@@ -1883,6 +1885,8 @@ function start.f_game(common)
 			if complete then
 				start.rankedCarry = nil
 				start.rankedSetFinished = true
+				-- The set is decided: claim its winner with the server.
+				online.f_submitRankedSet()
 			else
 				start.rankedSetFinished = false
 				if rankedAfter.winner_keeps_selection then

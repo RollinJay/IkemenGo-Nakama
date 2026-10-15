@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"encoding/json"
+	"testing"
+)
 
 func TestRankedSetBestOfAndSideSwitch(t *testing.T) {
 	var r RankedSet
@@ -108,5 +111,39 @@ func TestRankedSetForfeitAndNextSet(t *testing.T) {
 	}
 	if r.SideForPlayer(0) != 1 || r.SideForPlayer(1) != 2 {
 		t.Fatalf("next set did not reset side assignment: p1=%d p2=%d", r.SideForPlayer(0), r.SideForPlayer(1))
+	}
+}
+
+// A ranked pair whose tickets differ in mode, game, build or set length plays
+// an unranked session, as the server makes it (ikemen_matchmaker.lua).
+func TestMatchmakerSessionMode(t *testing.T) {
+	ticket := func(mode, game, build, bestOf string) string {
+		return `{"presence":{"user_id":"u"},"string_properties":{"mode":"` + mode + `","game":"` + game +
+			`","build":"` + build + `","ranked_best_of":"` + bestOf + `","region":"r"}}`
+	}
+	for _, c := range []struct {
+		users string
+		want  string
+	}{
+		{ticket("ranked", "g", "1", "3") + "," + ticket("ranked", "g", "1", "3"), "ranked"},
+		{ticket("ranked", "g", "1", "3") + "," + ticket("ranked", "g", "1", "5"), "unranked"},
+		{ticket("ranked", "g", "1", "3") + "," + ticket("ranked", "g", "2", "3"), "unranked"},
+		{ticket("ranked", "g", "1", "3") + "," + ticket("ranked", "h", "1", "3"), "unranked"},
+		{ticket("ranked", "g", "1", "3") + "," + ticket("unranked", "g", "1", "3"), "unranked"},
+		{ticket("unranked", "g", "1", "3") + "," + ticket("ranked", "g", "1", "3"), "unranked"},
+		{ticket("unranked", "g", "1", "3") + "," + ticket("unranked", "g", "1", "5"), "unranked"},
+		{ticket("ranked", "g", "1", "3"), "unranked"},
+		{`{"presence":{"user_id":"u"}},{"presence":{"user_id":"v"}}`, "unranked"},
+	} {
+		var m NakamaMatchmakerMatched
+		if err := json.Unmarshal([]byte(`{"match_id":"m","users":[`+c.users+`]}`), &m); err != nil {
+			t.Fatal(err)
+		}
+		for i := range m.Users {
+			m.Users[i].mergeProperties()
+		}
+		if got := m.SessionMode(); got != c.want {
+			t.Fatalf("%s: %q, want %q", c.users, got, c.want)
+		}
 	}
 }

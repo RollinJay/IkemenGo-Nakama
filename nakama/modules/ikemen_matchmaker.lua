@@ -1,4 +1,5 @@
 local nk = require("nakama")
+local ranked = require("ikemen_ranked")
 
 -- IKEMEN GO ranked/unranked matchmaking.
 --
@@ -67,13 +68,32 @@ local function before_matchmaker_add(context, envelope)
     return envelope
 end
 
+-- Makes the session match of a matched pair. A ranked session's first set
+-- is recorded here (ikemen_ranked.lua), with the players in the matchmaker's
+-- order, which every player receives too: the first hosts and starts on side
+-- 1. Results are accepted only for recorded sets.
 local function matchmaker_matched(context, matched_users)
     if #matched_users ~= 2 then
         return nil
     end
     local props = matched_users[1].properties or {}
-    return nk.match_create("ikemen_session", {
-        mode = props.mode or "unranked",
+    local mode = props.mode or "unranked"
+    if mode == "ranked" then
+        -- A ranked session needs two ranked tickets for the same game, build
+        -- and set length (each ticket's query asks for that; a client's own
+        -- query is not trusted to).
+        local other = matched_users[2].properties or {}
+        for _, key in ipairs({ "mode", "game", "build", "ranked_best_of" }) do
+            if tostring(other[key] or "") ~= tostring(props[key] or "") then
+                nk.logger_warn(string.format("ikemen matchmaker: tickets differ in %s (%s, %s): the session is unranked",
+                    key, tostring(props[key]), tostring(other[key])))
+                mode = "unranked"
+                break
+            end
+        end
+    end
+    local match_id = nk.match_create("ikemen_session", {
+        mode = mode,
         game = props.game or "",
         build = props.build or "",
         ranked_best_of = props.ranked_best_of or "3",
@@ -81,6 +101,20 @@ local function matchmaker_matched(context, matched_users)
         ranked_winner_keeps_selection = props.ranked_winner_keeps_selection or "false",
         expected_users = matched_users,
     })
+    if mode == "ranked" then
+        local players = {}
+        for i, user in ipairs(matched_users) do
+            local presence = user.presence or {}
+            players[i] = { user_id = presence.user_id or "", username = presence.username or "" }
+        end
+        ranked.create_set(match_id, 1, {
+            game = props.game or "",
+            build = props.build or "",
+            best_of = props.ranked_best_of,
+            players = players,
+        })
+    end
+    return match_id
 end
 
 nk.register_rt_before(before_matchmaker_add, "MatchmakerAdd")

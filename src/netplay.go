@@ -1222,6 +1222,11 @@ type ReplayFile struct {
 	frameUsed bool
 	// local: the current session was played offline (ReplayStreamHeader.Local).
 	local bool
+	// Why the replay stopped before its end, which the fight's end clears
+	// from sys.esc: failure, when it could not play on (liveFail), or
+	// viewerLeft, when the viewer left it (Esc). See replayStopped.
+	failure    string
+	viewerLeft bool
 }
 
 func NewLiveReplayFile(buffer *NakamaReplayBuffer) (*ReplayFile, error) {
