@@ -3,8 +3,10 @@
 -- Nakama only passes connection details. Once two players are paired, both
 -- clients join the pairing's Nakama match, trade UDP candidates through it and
 -- punch a path through their NATs (nakama.startP2P). The netplay session then
--- runs over that path (nakama.enterNetPlay). From connected() on, the flow is
--- the one Host Game / Join Game use: synchronize(), then the netplay menu.
+-- runs over that path (nakama.enterNetPlay), with rollback netcode whatever
+-- the players' Netcode option says (that option is for Host Game / Join
+-- Game). From connected() on, the flow is the one Host Game / Join Game
+-- use: synchronize(), then the netplay menu.
 
 local online = {}
 
@@ -29,19 +31,23 @@ online.text = {
 	match = 'Matchmaking stopped before an opponent was found.',
 	p2p = 'Could not open a connection to the other player.\nOne of the two networks may block direct connections.',
 	session_failed = 'The netplay session with the other player could not start.',
-	-- The screen after a ranked set: who won it and the player's level
-	-- before and after it, or that it is disputed.
+	-- The screen after a ranked set: while it waits for the result, then
+	-- who won it and the player's level before and after it, or another
+	-- final answer about it.
+	ranked_reporting = 'The ranked set is over.\nReporting the result...',
+	ranked_waiting_other = 'The ranked set is over.\nWaiting for the other player\'s result...',
+	ranked_pending = 'The result is still being reported;\nit will show when it arrives.',
 	ranked_won = 'You won the ranked set.',
 	ranked_lost = 'You lost the ranked set.',
 	ranked_level = '{label} {before} -> {after} ({change})',
+	ranked_settled = 'The ranked set is settled.',
 	ranked_disputed = 'Result disputed: a moderator will decide.',
-	ranked_waiting = 'The ranked set is over.\nWaiting for its result...',
+	ranked_void = 'The ranked set has no result (void).',
+	ranked_refused = 'The server refused the result:\n{reason}',
+	ranked_expired = 'The result could not be reported.',
+	-- A result that came later, on the next screen ({result}: its text).
+	ranked_last = 'Last ranked set: {result}',
 }
-
--- How long the screen after a ranked set shows, in frames. In a netplay
--- session both games show it for exactly this long: their menus run in
--- lockstep, so its length cannot depend on when the result arrives.
-online.rankedResultFrames = 60 * 4
 
 -- text with each {name} replaced by values[name] ({name} stays when values
 -- has no such value).
@@ -87,6 +93,9 @@ function online.f_statusText(key)
 	local text = online.text[key] or tostring(key)
 	if key == 'searching' and searchMode == 'ranked' and type(searchRating) == 'table' and searchRating.level_text ~= nil then
 		text = text .. '\n' .. online.f_fill(online.text.searching_level, {label = searchRating.label or '', level = searchRating.level_text})
+	end
+	if key == 'searching' and searchMode == 'ranked' and online.f_lateResultText ~= nil and online.f_lateResultText() ~= nil then
+		text = text .. '\n' .. online.f_lateResultText()
 	end
 	return text
 end
@@ -301,8 +310,9 @@ function online.f_openSession(interactive, host, draw)
 		return false, reasonOf(r, 'session_failed')
 	end
 	-- The session's replays: one per match, and the whole session's for the
-	-- matches those do not cover (replay.lua).
-	replay.f_record()
+	-- matches those do not cover (replay.lua). A Nakama session always uses
+	-- rollback netcode (nakama.enterNetPlay).
+	replay.f_record(true)
 	return true
 end
 
@@ -341,59 +351,46 @@ end
 -- last match or a forfeit), each player's game claims the set's winner with
 -- the server, which changes the two players' ratings once both claims agree
 -- (nakama/README.md, Ranked sets). The claim goes once per set, from both
--- players' games; it does not wait for the answer, which arrives as the
--- "ranked_result" event.
+-- players' games, and the engine sends it again until the server's answer
+-- is final (the claims of the set's id: claims[id]).
+local claims = {}
+
+-- The final answers about ranked sets, by set ID: {kind, content, text}.
+-- kind is settled, disputed, void, refused or expired; content the set's
+-- result for this player (the ikemen_ranked_settled notification's content,
+-- or the result of the server's answer to the claim), when settled.
+local rankedResults = {}
+
+-- Set IDs whose result the screen after the set has shown.
+local shownResults = {}
+
+-- The result of a set that came after the screen after the set had ended
+-- without it (or for a claim of an earlier run of the game): {id, text}.
+-- The next screen the game draws itself shows it as "Last ranked set: ...":
+-- the ranked search screen, the menu with the online items, or the screen
+-- after the next set (which clears it).
+online.lateResult = nil
+
+-- Set IDs whose screen after the set is to come or showing (from the
+-- claim on): a result that comes meanwhile is not late.
+local screenFor = {}
+
 function online.f_submitRankedSet()
 	if nakama == nil or nakama.submitRankedSet == nil then
 		return false
 	end
-	local ok, sent = pcall(nakama.submitRankedSet)
+	local ok, sent, id = pcall(nakama.submitRankedSet)
 	if not ok then
 		print('Ranked set claim failed: ' .. tostring(sent))
 		return false
 	end
+	if sent == true then
+		id = id or online.f_rankedSetId()
+		claims[id] = true
+		screenFor[id] = true
+	end
 	return sent == true
 end
-
--- Waits up to frames frames (60 per second) for the server's answer to the
--- claim of a ranked set; for the command line, which quits right after its
--- match. Returns the answer's payload, or nil.
-function online.f_waitRankedResult(frames)
-	local answer = nil
-	nakama.on('ranked_result', function(_, ev)
-		answer = ev
-	end, 'online_wait')
-	for _ = 1, frames do
-		if answer ~= nil then
-			break
-		end
-		refresh()
-	end
-	nakama.on('ranked_result', nil, 'online_wait')
-	if answer == nil then
-		return nil
-	end
-	if answer.error ~= nil then
-		print('Ranked set claim: ' .. tostring(answer.error))
-		return nil
-	end
-	return answer.payload
-end
-
-if nakama ~= nil and nakama.on ~= nil then
-	nakama.on('ranked_result', function(_, ev)
-		if ev.error ~= nil then
-			print('Ranked set claim: ' .. tostring(ev.error))
-		elseif type(ev.payload) == 'table' then
-			print('Ranked set claim: ' .. tostring(ev.payload.status))
-		end
-	end, 'online')
-end
-
--- The results of ranked sets the server sent (its notifications
--- ikemen_ranked_settled and ikemen_ranked_disputed, nakama/README.md,
--- Levels), by set ID: {subject, content}.
-local rankedResults = {}
 
 -- The ID of the ranked set being played, or just decided: the session's
 -- match ID for its first set, "<match ID>#<n>" for its n-th.
@@ -413,17 +410,13 @@ function online.f_rankedSetId()
 	return id
 end
 
--- The text of a ranked set's result, or nil while it has not come.
-function online.f_rankedResultText(setId)
-	local r = rankedResults[setId or '']
-	if r == nil then
-		return nil
-	end
-	if r.subject == 'ikemen_ranked_disputed' then
-		return online.text.ranked_disputed
-	end
-	local c = r.content
+-- The text of a settled set's result for this player: content has won,
+-- label, level_before_text, level_text and change_text.
+local function settledText(c)
 	local head = c.won == true and online.text.ranked_won or online.text.ranked_lost
+	if c.level_text == nil then
+		return head
+	end
 	return head .. '\n' .. online.f_fill(online.text.ranked_level, {
 		label = c.label or '',
 		before = c.level_before_text or '',
@@ -432,7 +425,66 @@ function online.f_rankedResultText(setId)
 	})
 end
 
+-- The text of a ranked set's result, or nil while it has not come.
+function online.f_rankedResultText(setId)
+	local r = rankedResults[setId or '']
+	if r == nil then
+		return nil
+	end
+	return r.text
+end
+
+-- Records the final answer about a set (from a notification or from the
+-- answer to the claim); a settled result with content is kept over one
+-- without. A result that comes when no screen after the set is showing it
+-- becomes online.lateResult.
+local function recordResult(id, kind, content, text)
+	local had = rankedResults[id]
+	if had ~= nil and (had.content ~= nil or content == nil) then
+		return
+	end
+	rankedResults[id] = {kind = kind, content = content, text = text}
+	print('Ranked set ' .. id .. ': ' .. string.gsub(text, '\n', ' '))
+	if not screenFor[id] and not shownResults[id] and kind ~= 'expired' then
+		online.lateResult = {id = id, text = text}
+	end
+end
+
 if nakama ~= nil and nakama.on ~= nil then
+	-- The answers to the claims (src/nakama_ranked_queue.go): payload
+	-- {set_id, status, final, sends, ...the server's answer}.
+	nakama.on('ranked_result', function(_, ev)
+		local p = type(ev.payload) == 'table' and ev.payload or {}
+		local id = tostring(p.set_id or p.match_id or '')
+		if ev.error ~= nil then
+			print('Ranked set ' .. id .. ' claim: ' .. tostring(p.status) .. ': ' .. tostring(ev.error))
+		else
+			print('Ranked set ' .. id .. ' claim: ' .. tostring(p.status))
+		end
+		if id == '' or p.final ~= true then
+			return
+		end
+		claims[id] = nil
+		if p.status == 'settled' then
+			if type(p.result) == 'table' then
+				recordResult(id, 'settled', p.result, settledText(p.result))
+			else
+				recordResult(id, 'settled', nil, online.text.ranked_settled)
+			end
+		elseif p.status == 'disputed' then
+			recordResult(id, 'disputed', nil, online.text.ranked_disputed)
+		elseif p.status == 'void' then
+			recordResult(id, 'void', nil, online.text.ranked_void)
+		elseif p.status == 'expired' then
+			recordResult(id, 'expired', nil, online.text.ranked_expired)
+		else
+			recordResult(id, 'refused', nil, online.f_fill(online.text.ranked_refused, {reason = tostring(ev.error or '')}))
+		end
+	end, 'online')
+
+	-- The server's notifications about ranked sets (ikemen_ranked_settled
+	-- and ikemen_ranked_disputed, nakama/README.md, Levels) are final
+	-- answers too.
 	nakama.on('notification', function(_, ev)
 		local p = ev.payload
 		if type(p) ~= 'table' or type(p.content) ~= 'table' then
@@ -445,40 +497,148 @@ if nakama ~= nil and nakama.on ~= nil then
 		if id == '' then
 			return
 		end
-		rankedResults[id] = {subject = p.subject, content = p.content}
-		print('Ranked set ' .. id .. ': ' .. string.gsub(online.f_rankedResultText(id), '\n', ' '))
-	end, 'online')
-end
-
--- The screen after a ranked set: its result once the server has sent it,
--- shown for frames frames (on the "connecting" overlay, with a
--- screenpack). With waitFrames, it first waits up to that many frames for
--- the result: only outside a netplay session's menus (the command line),
--- whose games must run the same frames. Returns true when the result came.
-function online.f_showRankedResult(setId, frames, waitFrames)
-	local function text()
-		return online.f_rankedResultText(setId) or online.text.ranked_waiting
-	end
-	for _ = 1, waitFrames or 0 do
-		if rankedResults[setId] ~= nil then
-			break
+		if p.subject == 'ikemen_ranked_disputed' then
+			recordResult(id, 'disputed', nil, online.text.ranked_disputed)
+		else
+			recordResult(id, 'settled', p.content, settledText(p.content))
 		end
-		drawStatus(text())
+	end, 'online')
+
+	-- Claims an earlier run of the game could not deliver go now.
+	if nakama.resumeRankedClaims ~= nil then
+		pcall(nakama.resumeRankedClaims)
 	end
-	for _ = 1, frames do
-		drawStatus(text())
-	end
-	return rankedResults[setId] ~= nil
 end
 
--- After the last match of a ranked set in a netplay session (start.lua):
--- the screen after the set, for online.rankedResultFrames.
+-- online.lateResult as a line ("Last ranked set: ..."), or nil.
+function online.f_lateResultText()
+	if online.lateResult == nil then
+		return nil
+	end
+	return online.f_fill(online.text.ranked_last, {result = online.lateResult.text})
+end
+
+-- How long the screen after a ranked set waits for the result at most: in
+-- frames of the session (60 per second), which both games count the same,
+-- and in seconds in all when this game waits alone (the other player has
+-- left the session). Then how long it shows the result, in frames.
+online.rankedWaitFrames = 60 * 10
+online.rankedWaitSeconds = 10
+online.rankedResultFrames = 60 * 4
+
+-- The screen after a ranked set, in a netplay session's menus (start.lua)
+-- and after a command-line ranked match (main.lua). The two games run these
+-- menus in step, frame by frame on each other's inputs, so the screen ends
+-- on what both games know: each game raises its ready bit
+-- (nakama.setReady) once it has its final answer about the set (the
+-- server's answer to its claim, or the server's notification; at once when
+-- it sent no claim), and the screen waits until the first frame on which
+-- both bits are up (nakama.ready), or rankedWaitFrames frames. Then each
+-- game shows its own result, or that it is still being reported, for
+-- rankedResultFrames frames. If the other player leaves the session
+-- meanwhile, this game waits alone, until its own answer has come or
+-- rankedWaitSeconds have passed since the screen began. A result that comes
+-- later shows as online.lateResult. Returns true when the result came in
+-- time.
 function online.f_rankedSetOver()
 	local id = online.f_rankedSetId()
-	if id ~= '' then
-		online.f_showRankedResult(id, online.rankedResultFrames)
+	if id == '' or nakama == nil or nakama.setReady == nil then
+		return false
 	end
+	screenFor[id] = true
+	local function answered()
+		return claims[id] == nil or rankedResults[id] ~= nil
+	end
+	local function lines(text)
+		local last = online.f_lateResultText()
+		if last ~= nil and online.lateResult.id ~= id then
+			return text .. '\n' .. last
+		end
+		return text
+	end
+	pcall(nakama.setReady, false)
+	local started = os.clock()
+	local frames = 0
+	local alone = false
+	local how = 'timeout'
+	while true do
+		local _, running = nakama.sessionFrame()
+		if not running and not alone then
+			alone = true
+			print('Ranked set ' .. id .. ': the other player left the session; waiting alone')
+		end
+		if alone then
+			if answered() then
+				how = 'answer'
+				break
+			end
+			if os.clock() - started >= online.rankedWaitSeconds then
+				break
+			end
+		else
+			-- Only the bits of the frame both games run on now, and the
+			-- frames counted, decide when the screen ends.
+			if nakama.ready() then
+				how = 'ready'
+				break
+			end
+			if frames >= online.rankedWaitFrames then
+				break
+			end
+			if answered() then
+				pcall(nakama.setReady, true)
+			end
+		end
+		drawStatus(lines(answered() and online.text.ranked_waiting_other or online.text.ranked_reporting))
+		frames = frames + 1
+	end
+	local frame, running = nakama.sessionFrame()
+	print(string.format('Ranked set %s: the wait ended (%s%s) after %d frames, at session frame %d',
+		id, how, alone and ', alone' or '', frames, frame))
+	pcall(nakama.setReady, false)
+	for _ = 1, online.rankedResultFrames do
+		local text = online.f_rankedResultText(id)
+		if text ~= nil then
+			shownResults[id] = true
+		end
+		drawStatus(lines(text or online.text.ranked_pending))
+	end
+	if online.lateResult ~= nil and online.lateResult.id ~= id then
+		-- Shown on this screen.
+		online.lateResult = nil
+	end
+	screenFor[id] = nil
+	if rankedResults[id] == nil then
+		print('Ranked set ' .. id .. ': no result yet; it shows when it arrives')
+	end
+	return rankedResults[id] ~= nil
 end
+
+-- The line of a late result on the menu with the online items.
+local onlineItems = {onlinematch = true, onlineranked = true, onlinelobby = true}
+hook.add('main.f_menuCommonDraw', 'online', function(t)
+	local text = online.f_lateResultText()
+	if text == nil or type(t) ~= 'table' or motif == nil or motif.title_info == nil then
+		return
+	end
+	local found = false
+	for _, item in ipairs(t) do
+		if onlineItems[item.itemname] then
+			found = true
+			break
+		end
+	end
+	if not found then
+		return
+	end
+	local c = motif.title_info.connecting
+	local lc = (motif.info and motif.info.localcoord) or {320, 240}
+	textImgReset(c.TextSpriteData)
+	textImgSetText(c.TextSpriteData, text)
+	textImgSetPos(c.TextSpriteData, c.offset[1], math.floor(lc[2] * 0.86))
+	textImgDraw(c.TextSpriteData)
+	textImgReset(c.TextSpriteData)
+end)
 
 -- The fight screen shows each player's online name in place of the name of
 -- the character they play as (nakama.setMatchNames). The names are read

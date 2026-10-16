@@ -14,8 +14,11 @@ local rating = require("ikemen_rating")
 --   record as ikemen_ranked.lua describes it, with claims ({user_id,
 --   winner, at}), left_early (user ids) and replays ({user_id, bytes,
 --   complete}) as lists in the players' order, each player with their
---   current rating, level and level_text, and the set with its game's
---   label (ikemen_levels.lua). Newest first; cursor is ""
+--   current rating, level and level_text and, once the set has settled,
+--   their result in it (result: won, rating_before, rating, level_before,
+--   level_before_text, level, level_text, change, change_text and label,
+--   as the record kept them; ikemen_rating.lua), and the set with its
+--   game's label (ikemen_levels.lua). Newest first; cursor is ""
 --   after the last page (a page can hold fewer than limit sets: one call
 --   reads at most 50 pages of the index). With match_id (a set id), the list
 --   holds that set alone, whatever its status unless status is given. A set
@@ -76,8 +79,9 @@ local function decode(payload)
     return data
 end
 
--- Adds each player's current rating, level and level_text, and the game's
--- label, to the sets of a list (public_set records). One storage read.
+-- Adds each player's current rating, level and level_text, the texts of
+-- their result in the set, and the game's label, to the sets of a list
+-- (public_set records). One storage read.
 local function add_levels(context, sets)
     local reads = {}
     for _, set in ipairs(sets) do
@@ -102,6 +106,9 @@ local function add_levels(context, sets)
             local level = rating.level_fields(context, set.game, p.rating, {})
             p.level, p.level_text = level.level, level.level_text
             set.label = level.label
+            if p.result ~= nil then
+                p.result = rating.result_fields(context, set.game, p.result)
+            end
         end
         if set.label == nil then
             set.label = rating.level_fields(context, set.game, initial, {}).label

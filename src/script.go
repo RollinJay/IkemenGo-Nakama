@@ -2454,16 +2454,19 @@ func systemScriptInit(l *lua.LState) {
 		sys.sessionWarning = ""
 		sys.chars = [len(sys.chars)][]*Char{}
 		sys.netConnection = NewNetConnection()
+		// Host Game / Join Game follow the Netcode option (Nakama sessions
+		// always use rollback: nakama.enterNetPlay).
+		sys.netConnection.rollback = sys.cfg.Netplay.RollbackNetcode
 
 		//Rollback only
-		if sys.cfg.Netplay.RollbackNetcode {
+		if sys.netConnection.rollback {
 			rs := NewRollbackSession(sys.cfg.Netplay.Rollback)
 			sys.rollback.session = &rs
 		}
 
 		if host := strArg(l, 1); host != "" {
 			//Rollback only
-			if sys.cfg.Netplay.RollbackNetcode {
+			if sys.rollback.session != nil {
 				sys.rollback.session.host = host
 			}
 
@@ -2518,11 +2521,11 @@ func systemScriptInit(l *lua.LState) {
 		if err := sys.endSyncSessionOverride(); err != nil {
 			l.RaiseError(err.Error())
 		}
-		if sys.cfg.Netplay.RollbackNetcode {
-			if sys.rollback.session != nil {
-				sys.rollback.session.Close()
-				sys.rollback.session = nil
-			}
+		// A rollback session, whichever option made it one (a Nakama session
+		// always is).
+		if sys.rollback.session != nil {
+			sys.rollback.session.Close()
+			sys.rollback.session = nil
 		}
 		if sys.netConnection != nil {
 			sys.netConnection.end()
@@ -5750,11 +5753,9 @@ func systemScriptInit(l *lua.LState) {
 	luaRegister(l, "replayStop", func(*lua.LState) int {
 		/*Stop input replay recording.
 		@function replayStop*/
-		if sys.cfg.Netplay.RollbackNetcode {
-			if sys.rollback.session != nil && sys.rollback.session.recording != nil {
-				sys.rollback.session.recording.Close()
-				sys.rollback.session.recording = nil
-			}
+		if sys.rollback.session != nil && sys.rollback.session.recording != nil {
+			sys.rollback.session.recording.Close()
+			sys.rollback.session.recording = nil
 		}
 		if sys.netConnection != nil && sys.netConnection.recording != nil {
 			sys.netConnection.recording.Close()

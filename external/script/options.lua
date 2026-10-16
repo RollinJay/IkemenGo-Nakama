@@ -1366,7 +1366,12 @@ options.t_itemname = {
 		end
 		return true
 	end,
-	--Rollback Netcode
+	--Online play (Nakama sessions) always uses rollback netcode: nothing to
+	--change here.
+	['onlinenetcode'] = function(t, item, cursorPosY, moveTxt)
+		return true
+	end,
+	--Rollback Netcode (Host Game / Join Game)
 	['netcode'] = function(t, item, cursorPosY, moveTxt)
 		if getInput(-1, motif.option_info.menu.add.key, motif.option_info.menu.subtract.key, motif.option_info.menu.done.key) then
 			sndPlay(motif.Snd, motif.option_info.cursor.move.snd[1], motif.option_info.cursor.move.snd[2])
@@ -1805,6 +1810,9 @@ options.t_vardisplay = {
 	end,
 	['netcode'] = function()
 		return options.f_boolDisplay(gameOption('Netplay.RollbackNetcode'), motif.option_info.menu.valuename.rollbacknetcode, motif.option_info.menu.valuename.delaynetcode)
+	end,
+	['onlinenetcode'] = function()
+		return motif.option_info.menu.valuename.onlinenetcode or 'Always Rollback'
 	end,
 	['framedelay'] = function()
 		return gameOption('Netplay.Rollback.FrameDelay')

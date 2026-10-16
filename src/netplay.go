@@ -149,13 +149,25 @@ func (nb *NetBuffer) reset(time int32) {
 	nb.InputReader.Reset()
 }
 
-// Convert local player's key inputs into input bits for sending
-func (nb *NetBuffer) writeNetBuffer(in int) {
+// Convert local player's key inputs into input bits for sending, with the
+// bits of extra that are not keys (IB_READY).
+func (nb *NetBuffer) writeNetBuffer(in int, extra InputBits) {
 	if nb.inpT-nb.curT < NETBUF_NUM_FRAMES {
-		nb.buf[nb.inpT&(NETBUF_NUM_FRAMES-1)].KeysToBits(nb.InputReader.LocalInput(in))
-		nb.axisBuf[nb.inpT&(NETBUF_NUM_FRAMES-1)] = nb.InputReader.LocalAnalogInput(in)
+		idx := nb.inpT & (NETBUF_NUM_FRAMES - 1)
+		nb.buf[idx].KeysToBits(nb.InputReader.LocalInput(in))
+		nb.buf[idx] |= extra &^ IB_keys
+		nb.axisBuf[idx] = nb.InputReader.LocalAnalogInput(in)
 		nb.inpT++
 	}
+}
+
+// current returns the bits of the frame the menus run on now, and whether
+// there is one.
+func (nb *NetBuffer) current() (InputBits, bool) {
+	if nb.curT < nb.inpT {
+		return nb.buf[nb.curT&(NETBUF_NUM_FRAMES-1)], true
+	}
+	return 0, false
 }
 
 // Read input bits from the net buffer
@@ -206,6 +218,25 @@ type NetConnection struct {
 	rollbackRemotePort int
 	syncSeed           int32
 	replayHeader       *ReplayHeader
+	// ready: IB_READY in the frames this game sends from now on
+	// (nakama.setReady).
+	ready bool
+	// rollback: the session's fights run with rollback netcode. online: a
+	// session that Nakama paired (nakama.enterNetPlay), which always runs
+	// with rollback netcode, whatever each player's Netplay.RollbackNetcode
+	// says: that option is not compared between the two players for it.
+	rollback bool
+	online   bool
+	// stopLogged: Running logged that the session stopped running.
+	stopLogged bool
+	// matchEnded: the scripts ended the rollback match that just ran
+	// (endMatch, as the online rematch choice does once a match is over;
+	// not a match that ended because GGPO lost the other player, see
+	// RollbackSystem.noteMatchEnded). The rollback loop reports such a
+	// match as quit (sys.esc), but the session goes on: the
+	// synchronization after the match is not a cancellation. The next
+	// Synchronize clears it.
+	matchEnded bool
 }
 
 func NewNetConnection() *NetConnection {
@@ -280,6 +311,12 @@ func (nc *NetConnection) Close() {
 	nc.rollbackRemotePort = 0
 }
 
+// cancelled reports whether Esc (sys.esc) ends the session: not when it
+// only reports a match the scripts ended (matchEnded).
+func (nc *NetConnection) cancelled() bool {
+	return sys.esc && !nc.matchEnded
+}
+
 func (nc *NetConnection) end() {
 	if nc.st != NS_Error {
 		nc.st = NS_End
@@ -307,7 +344,7 @@ func (nc *NetConnection) Stop() (err error) {
 			nc.fail(err)
 		}
 	}()
-	if sys.esc {
+	if nc.cancelled() {
 		nc.end()
 	} else {
 		if nc.conn == nil {
@@ -387,7 +424,7 @@ func (nc *NetConnection) Accept(port int) error {
 		// Don't allow the handshake to block forever (important when shutting down).
 		_ = tempConn.SetDeadline(time.Now().Add(2 * time.Second))
 
-		if sys.cfg.Netplay.RollbackNetcode {
+		if nc.rollback && sys.rollback.session != nil {
 			sys.rollback.session.remoteIp = tempConn.RemoteAddr().(*net.TCPAddr).IP.String()
 		}
 
@@ -659,6 +696,64 @@ func (nc *NetConnection) readNetInputAnalog(i int) [6]int8 {
 	return [6]int8{}
 }
 
+// SetReady sets whether the frames this game sends from now on carry
+// IB_READY (nakama.setReady).
+func (nc *NetConnection) SetReady(ready bool) {
+	if nc != nil {
+		nc.ready = ready
+	}
+}
+
+func (nc *NetConnection) readyBits() InputBits {
+	if nc.ready {
+		return IB_READY
+	}
+	return 0
+}
+
+// slotReady reports whether IB_READY is up for input slot slot in the frame
+// the menus run on now.
+func (nc *NetConnection) slotReady(slot int) bool {
+	if slot < 0 || slot >= len(nc.buf) {
+		return false
+	}
+	bits, ok := nc.buf[slot].current()
+	return ok && bits&IB_READY != 0
+}
+
+// Ready reports whether IB_READY is up in the frame the menus run on now
+// for the inputs read as player's (1 or more, as readNetInput's player
+// index plus one), or with player 0, for both games of the session.
+func (nc *NetConnection) Ready(player int) bool {
+	if nc == nil {
+		return false
+	}
+	if player <= 0 {
+		return nc.slotReady(nc.locIn) && nc.slotReady(nc.remIn)
+	}
+	if player > len(sys.inputRemap) {
+		return false
+	}
+	return nc.slotReady(sys.inputRemap[player-1])
+}
+
+// Running reports whether the session's menus advance in step with the
+// other game: the input streams run and nothing ended them.
+func (nc *NetConnection) Running() bool {
+	if nc == nil {
+		return false
+	}
+	running := nc.st == NS_Playing && !nc.isClosing() && nc.hasConn()
+	if !running && !nc.stopLogged {
+		nc.stopLogged = true
+		log.Printf("Netplay session: the menus no longer run in step (state %d, closing %t, connected %t, esc %t)",
+			nc.st, nc.isClosing(), nc.hasConn(), sys.esc)
+	} else if running {
+		nc.stopLogged = false
+	}
+	return running
+}
+
 func (nc *NetConnection) AnyButton() bool {
 	for _, nb := range nc.buf {
 		if nb.buf[nb.curT&(NETBUF_NUM_FRAMES-1)]&IB_anybutton != 0 {
@@ -670,11 +765,17 @@ func (nc *NetConnection) AnyButton() bool {
 
 func (nc *NetConnection) Synchronize() (err error) {
 	// Deferred resynchronization also runs after the user cancels a match.
-	if sys.esc {
+	if nc.cancelled() {
+		log.Printf("Netplay synchronization: the session was cancelled")
 		nc.end()
 		return Error("Netplay session cancelled")
 	}
 	defer func() {
+		// The match the scripts ended has been synchronized after.
+		nc.matchEnded = false
+		if err != nil {
+			log.Printf("Netplay synchronization failed: %v", err)
+		}
 		// Cancellation during update already closes the session without a warning.
 		if err != nil && !nc.isClosing() {
 			nc.fail(err)
@@ -685,6 +786,8 @@ func (nc *NetConnection) Synchronize() (err error) {
 	}
 	// Reset any pending loading rendezvous so it can't interfere with gameplay sync.
 	nc.ResetLoadingPhase()
+	// A screen that waited for both games' ready bits has ended.
+	nc.ready = false
 	if err = nc.Stop(); err != nil {
 		return err
 	}
@@ -741,7 +844,7 @@ func (nc *NetConnection) Synchronize() (err error) {
 	if nc.recording != nil {
 		if off, err := nc.recording.Seek(0, io.SeekCurrent); err == nil {
 			log.Printf("Replay sync write: offset=%d seed=%d pmTime=%d gameRunning=%t rollback=%t",
-				off, seed, pmTime, sys.gameRunning, sys.cfg.Netplay.RollbackNetcode)
+				off, seed, pmTime, sys.gameRunning, nc.rollback)
 		}
 		if err := writeReplaySync(nc.recording, seed, pmTime); err != nil {
 			return err
@@ -853,7 +956,7 @@ func (nc *NetConnection) Synchronize() (err error) {
 	}
 	// update pumps window events and can cancel/close TCP while waiting for input.
 	// Do not let runMatch proceed to rollback setup with a closed connection.
-	if sys.esc || sys.gameEnd || nc.isClosing() {
+	if nc.cancelled() || sys.gameEnd || nc.isClosing() {
 		nc.end()
 		return Error("Netplay session cancelled")
 	}
@@ -1051,7 +1154,7 @@ func (nc *NetConnection) update(recordReplay bool) bool {
 				// Adjust local buffer to synchronize with remote
 				if tmp >= 0 {
 					// Local buffer is behind. Advance it
-					nc.buf[nc.locIn].writeNetBuffer(0)
+					nc.buf[nc.locIn].writeNetBuffer(0, nc.readyBits())
 					if nc.delay > 0 {
 						nc.delay--
 					}
@@ -1062,7 +1165,7 @@ func (nc *NetConnection) update(recordReplay bool) bool {
 
 				// Break loop if we have reached the frame that both buffers have sent
 				if nc.time >= foo {
-					if sys.esc || !sys.await(sys.gameRenderSpeed()) || nc.st != NS_Playing {
+					if nc.cancelled() || !sys.await(sys.gameRenderSpeed()) || nc.st != NS_Playing {
 						break
 					}
 					// TCP can remain established while packets stop arriving.
@@ -1093,17 +1196,18 @@ func (nc *NetConnection) update(recordReplay bool) bool {
 
 				// Ensure local buffer writes any remaining frames
 				if nc.time >= foo {
-					nc.buf[nc.locIn].writeNetBuffer(0)
+					nc.buf[nc.locIn].writeNetBuffer(0, nc.readyBits())
 				}
 
 				break
 			}
 		case NS_End, NS_Error:
 			sys.esc = true
+			nc.matchEnded = false
 		}
 	}
 
-	if sys.esc {
+	if nc.cancelled() {
 		nc.end()
 	}
 
@@ -1307,6 +1411,29 @@ func (rf *ReplayFile) readReplayInputAnalog(i int) [6]int8 {
 		}
 	}
 	return [6]int8{}
+}
+
+// Ready is NetConnection.Ready for the session being replayed: player's
+// inputs, or with player 0, both games' (the two input slots of a session
+// are the only ones that carry IB_READY).
+func (rf *ReplayFile) Ready(player int) bool {
+	if rf == nil {
+		return false
+	}
+	if player <= 0 {
+		n := 0
+		for _, b := range rf.ibit {
+			if b&IB_READY != 0 {
+				n++
+			}
+		}
+		return n >= 2
+	}
+	if player > len(sys.inputRemap) {
+		return false
+	}
+	slot := sys.inputRemap[player-1]
+	return slot >= 0 && slot < len(rf.ibit) && rf.ibit[slot]&IB_READY != 0
 }
 
 func (rf *ReplayFile) AnyButton() bool {
@@ -1577,6 +1704,18 @@ func collectSyncSettings(cfg *Config, scope SyncScope) ([]SyncSetting, error) {
 
 	sort.Slice(out, func(i, j int) bool { return out[i].Path < out[j].Path })
 	return out, nil
+}
+
+// withSyncValue returns settings with the value of path replaced by value
+// (settings itself is left as it is).
+func withSyncValue(settings []SyncSetting, path, value string) []SyncSetting {
+	out := cloneSyncSettings(settings)
+	for i := range out {
+		if out[i].Path == path {
+			out[i].Value = value
+		}
+	}
+	return out
 }
 
 func settingsToMap(in []SyncSetting) map[string]string {
@@ -2001,6 +2140,11 @@ func (s *System) synchronizeNetplayConfig(nc *NetConnection) (*ReplayHeader, err
 	if err != nil {
 		return nil, err
 	}
+	if nc.online {
+		// Both games of a Nakama session use rollback netcode, whatever
+		// their options say; the session (and its replays) record that.
+		localStrict = withSyncValue(localStrict, "Netplay.RollbackNetcode", "1")
+	}
 	localHost, err := collectSyncSettings(&s.cfg, syncHost)
 	if err != nil {
 		return nil, err
@@ -2045,7 +2189,7 @@ func (s *System) synchronizeNetplayConfig(nc *NetConnection) (*ReplayHeader, err
 		if err := validateContentFingerprint(localFingerprint, guestPayload.ContentFingerprint); err != nil {
 			return nil, err
 		}
-		if s.cfg.Netplay.RollbackNetcode {
+		if nc.rollback {
 			if localRollbackPort < 1 || localRollbackPort > 65535 {
 				return nil, fmt.Errorf("invalid local rollback UDP port %d", localRollbackPort)
 			}
@@ -2056,7 +2200,7 @@ func (s *System) synchronizeNetplayConfig(nc *NetConnection) (*ReplayHeader, err
 		if err := s.beginSessionOverride("netplay", localStrict, localHost, localFingerprint); err != nil {
 			return nil, err
 		}
-		if s.cfg.Netplay.RollbackNetcode {
+		if nc.rollback {
 			nc.rollbackRemotePort = guestPayload.RollbackPort
 		}
 		return s.currentReplayHeader(), nil
@@ -2112,7 +2256,7 @@ func (s *System) synchronizeNetplayConfig(nc *NetConnection) (*ReplayHeader, err
 		}
 		return nil, err
 	}
-	if s.cfg.Netplay.RollbackNetcode {
+	if nc.rollback {
 		if localRollbackPort < 1 || localRollbackPort > 65535 {
 			if werr := sendGuestPayload(); werr != nil {
 				return nil, werr
@@ -2133,7 +2277,7 @@ func (s *System) synchronizeNetplayConfig(nc *NetConnection) (*ReplayHeader, err
 	if err := sendGuestPayload(); err != nil {
 		return nil, err
 	}
-	if s.cfg.Netplay.RollbackNetcode {
+	if nc.rollback {
 		nc.rollbackRemotePort = hostPayload.RollbackPort
 	}
 

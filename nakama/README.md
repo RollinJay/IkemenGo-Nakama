@@ -71,7 +71,7 @@ A match replay is a file that holds one match: a description of the fight, the f
 
 The game saves match replays to `save/replays`:
 
-- **Online matches**, with rollback netcode: every match of a netplay session, versus or co-op (two players on side 1 against the CPU). Both players' games save it; lobby matches, matchmade matches and direct Host/Join matches are saved alike.
+- **Online matches**, with rollback netcode: every match of a netplay session, versus or co-op (two players on side 1 against the CPU). Both players' games save it; lobby matches, matchmade matches and direct Host/Join matches are saved alike. Online play through Nakama always uses rollback netcode (see [Netcode](#netcode)); Host/Join matches use it when the Netcode option is Rollback.
 - **Local versus matches**, when the Local Versus Replays option is on (`Config.LocalVersusReplays`, Options > Engine Settings; off by default): matches with players on both sides, in VS Mode, Team Versus, Versus Co-op, and a challenger's match in arcade (the modes in `replay.versusModes`).
 - **Matches against the CPU**, only in the game modes a game lists in `replay.recordModes` (none by default), for example the modes of its score or challenge leaderboards. Training is never saved: its settings change the match outside its inputs.
 
@@ -125,7 +125,7 @@ A replay records the players' user IDs. Names and tags are kept as they were at 
 
 ### Session replays
 
-The game also records the replay of a whole netplay session, from its first menu, as it did before match replays; delay-based netplay saves only that. When the session ends (`replayStop`), the file is removed if each of the session's matches has a match replay. A match has none when the scripts did not describe it (`replaySetMatchInfo`) or its file could not be written. A quick match from the command line (`-nakama-match`) is described when each side has one player, with no AI, input remapping or life and power flags; otherwise it is kept in the session replay only. Its players' names are filled in when the match is saved, since the server's answer can arrive after the fight began. The replay menu plays a session replay by replaying the netplay session from its first menu.
+The game also records the replay of a whole netplay session, from its first menu, as it did before match replays; delay-based netplay (Host Game / Join Game with the Netcode option on Delay-based) saves only that. When the session ends (`replayStop`), the file is removed if each of the session's matches has a match replay. A match has none when the scripts did not describe it (`replaySetMatchInfo`) or its file could not be written. A quick match from the command line (`-nakama-match`) is described when each side has one player, with no AI, input remapping or life and power flags; otherwise it is kept in the session replay only. Its players' names are filled in when the match is saved, since the server's answer can arrive after the fight began. The replay menu plays a session replay by replaying the netplay session from its first menu. What came from the server is not in it: the online rematch choices and the ranked set (see [Online rematch coordination](#online-rematch-coordination)). A match that a choice ended plays on to its own end, and the screen after a ranked set does not show; the replay picks up again at the next match.
 
 A replay file can come from anyone, so playing one reads only files inside the game's folder and runs only this game's code: a character or stage is a definition file with a relative path, the files compared are regular files of at most 64 MB, and the common files and code are this game's. A file holds at most 64 sessions and three hours of frames; a longer online match is kept only in the session replay, and a longer local match is saved up to that length.
 
@@ -229,19 +229,50 @@ nakama.sendChat(channel_id, "hello")
 
 -- Ranked sets (see Ranked sets). The engine keeps the set's state; the
 -- scripts record each match's winner and claim a decided set's winner with
--- the server, once per set: submitRankedSet() returns true when it sends
--- the claim. The answer arrives as "ranked_result" (payload.status: open
--- until the other player's claim has come, then settled or disputed; or
--- error). The first version's call, submitResult, is accepted for recorded
--- ranked sets only, and answers with "result".
+-- the server, once per set: submitRankedSet() returns true and the set's ID
+-- when it sends the claim (false when the set is not decided, was claimed
+-- already, or the game is not signed in). The engine sends the claim again
+-- until the server's answer is final (see Claims sent again). Each answer
+-- arrives as "ranked_result": data.payload has set_id, status, final (no
+-- more sends), sends (how many so far) and the server's answer (with
+-- result, see Claims and ratings); status is settled, disputed, void,
+-- refused (the server refused the claim: data.error says why), open (the
+-- other player's claim has not come), error (no answer: data.error) or
+-- expired (a day old, no longer sent). A set that takes no more claims
+-- refuses one that did not count with its status (settled, disputed or
+-- void, with data.error and without the server's answer). The first version's call,
+-- submitResult, is accepted for recorded ranked sets only, and answers
+-- with "result".
 -- rankedSet(): active, best_of, matches, p1_wins, p2_wins, p1_id, p2_id
 -- (the set's players in the matchmaker's order), p1_side, p2_side, winner
 -- (1 or 2, 0 until the set is decided), set (its number in the session)
 -- and match_id (the ranked session's match id), among others.
 local rs = nakama.rankedSet()
 nakama.rankedSetRecordMatch(winner_side)   -- true when the match decides the set
-nakama.submitRankedSet()
+local sent, set_id = nakama.submitRankedSet()
+-- The claims that wait for a final answer: set_id, match_id, set, created
+-- (Unix time), sends and next (seconds until the next send).
+local waiting = nakama.rankedClaims()
+-- Reads the claims an earlier run left in save/ranked_pending.json (the
+-- first time) and sends every claim now; online.lua calls it at the start.
+nakama.resumeRankedClaims()
 nakama.submitResult(match_id, opponent_user_id, "my_game", 1, replay_hash)
+
+-- The ready bit of a netplay session's menus (see The screen after a
+-- ranked set). setReady raises or lowers this game's bit in the frames it
+-- sends from now on (synchronize() lowers it); ready() is whether both
+-- games' bits are up in the frame the menus run on now (ready(1) or
+-- ready(2): the inputs read as player 1's or 2's), in a session or the
+-- replay of one; sessionFrame() returns the session's frame number (-1
+-- without one, or in a replay) and whether the menus still run in step with
+-- the other game (false once it has left the session).
+nakama.setReady(true)
+local both = nakama.ready()
+local frame, in_step = nakama.sessionFrame()
+-- Ends the netplay session as Esc in its menus does (its screens close, and
+-- the script that opened it calls exitNetPlay()); start.lua calls it for
+-- Exit and Forfeit after a match.
+nakama.endNetPlay()
 -- The player's rating and level for a game (the profile's game by
 -- default): emits "rating" with ikemen_get_rating's answer (see Levels).
 nakama.getRating()
@@ -319,7 +350,7 @@ Play Another Set  both players must choose it -> reset the current set and retur
 Exit              either player chooses it -> both leave the online session
 ```
 
-The set result is tracked separately from GGPO rollback state. The choices end the match once it is over; a rollback session reports a match ended that way as quit, so the game takes the match's winner when the choice is applied (`external/mods/ik_rematch.lua`) and records it in the set. When a set has been decided, by its last match or by a forfeit, each player's game claims its winner with the server, which changes the two players' ratings once both claims agree (see [Ranked sets](#ranked-sets)), and both games show the screen after the set (see [Online sessions](#online-sessions)) before they go on. Starting another set resets the score and physical side assignment while retaining the same two matched players and negotiated ranked rules; the server records it as the session's next set. A new set does not carry forward winner-selection locks from the previous set.
+The set result is tracked separately from GGPO rollback state. The choices end the match once it is over; a rollback session reports a match ended that way as quit, so the game takes the match's winner when the choice is applied (`external/mods/ik_rematch.lua`) and records it in the set. The netplay session goes on after such a match, with its menus in step (the screen after a ranked set, character select, a rematch), until Exit or Forfeit ends it (`nakama.endNetPlay`, in both games on the same frame). Each match starts without the previous match's choices. When a set has been decided, by its last match or by a forfeit, each player's game claims its winner with the server, which changes the two players' ratings once both claims agree (see [Ranked sets](#ranked-sets)), and both games show the screen after the set, which waits for the result (see [The screen after a ranked set](#the-screen-after-a-ranked-set)), before they go on. Starting another set resets the score and physical side assignment while retaining the same two matched players and negotiated ranked rules; the server records it as the session's next set. A new set does not carry forward winner-selection locks from the previous set.
 
 The Nakama coordination match is retained between rounds; only the GGPO gameplay session is replaced. The P2P socket is also retained: each GGPO session opens a new channel on it and closes only that channel.
 
@@ -351,7 +382,21 @@ This starts IPv4 host/server-reflexive candidate gathering and UDP hole punching
 3. `nakama.enterNetPlay()` starts the netplay session over the P2P socket. The first user in the matchmaker's result hosts; Nakama sends the same order to both players.
 4. From `connected()` on, the flow is the one Host Game and Join Game use: `synchronize()`, then the netplay menu. When the session ends, the player leaves the match and the P2P socket closes.
 
-In a ranked search, the searching screen also shows the player's level (`Power level 9,001`, see [Levels](#levels)), which the game asks the server for when the player queues. After the last match of each ranked set, a screen shows the set's result for four seconds: who won it and the player's level before and after it (`Power level 9,001 -> 10,840 (+1,839)`), or that the result is disputed. Both games show that screen for the same number of frames, whenever the result arrives, since their menus run in lockstep; a result that arrives later is printed only. The texts are `online.text` entries of `external/script/online.lua`, which a screenpack or module can replace; the engine's default font for these screens (`f-6x9`) draws ASCII only, hence `->` for the arrow.
+### Netcode
+
+IKEMEN GO has two netcodes. With delay-based netcode, each game waits for the other's input before it runs a frame, so a slow connection delays every frame. With rollback netcode (GGPO), each game runs on at once with a guess of the other's input and corrects the frames it guessed wrong when the input arrives. The Netcode option (Options > Netplay Settings, `Netplay.RollbackNetcode`) chooses between them for Host Game and Join Game, and both players must have chosen the same one.
+
+Online play through Nakama (quick match, ranked match and lobby matches) always uses rollback netcode, whatever each player's Netcode option says, and the two players' options are not compared. Its fights are always saved as match replays (see [Match replays](#match-replays)). The Options screen says so (Netcode (Online): Always Rollback). Host Game and Join Game are unchanged.
+
+### The screen after a ranked set
+
+In a ranked search, the searching screen also shows the player's level (`Power level 9,001`, see [Levels](#levels)), which the game asks the server for when the player queues.
+
+After the last match of each ranked set, each game claims the set's winner with the server (see [Claims and ratings](#claims-and-ratings)), and a screen waits for the set's result. Between fights, the two games run a netplay session's menus in step: each frame runs on both players' input bits, which the games send each other, so both run the same frames on the same inputs. A screen that waits for something one game learns from the network cannot end when that one game learns it: the other game would go on alone, out of step. Each game has one more bit in what it sends, the *ready* bit, which is not a key and never acts as one. A game raises it once it has its final answer about the set: the server's answer to its claim, or the server's notification of the result (or at once, when it sent no claim). The screen ends on the first frame on which both games' bits are up, which both games see on the same frame, or after 600 frames (10 seconds), which both count alike. Until its own answer has come, it shows "Reporting the result..."; then "Waiting for the other player's result...".
+
+Then each game shows its own result for 240 frames (4 seconds): who won the set and the player's level before and after it (`Power level 9,001 -> 10,840 (+1,839)`), that the result is disputed (or void, or refused), or, without an answer yet, "The result is still being reported; it will show when it arrives". If the other player leaves the session during the wait (the session ends), the game waits alone for its own answer, until 10 seconds have passed since the screen began. A result that comes later is printed to the log, and shows on the next screen the game draws itself, as "Last ranked set: ..." under the screen's own text: the ranked search screen, the menu with the online items, or the screen after the next set. It is not drawn over fights.
+
+The texts are `online.text` entries of `external/script/online.lua` (`ranked_reporting`, `ranked_waiting_other`, `ranked_pending`, `ranked_won`, `ranked_lost`, `ranked_level`, `ranked_disputed`, `ranked_void`, `ranked_refused`, `ranked_last` and others), which a screenpack or module can replace; the engine's default font for these screens (`f-6x9`) draws ASCII only, hence `->` for the arrow. `online.rankedWaitFrames`, `online.rankedWaitSeconds` and `online.rankedResultFrames` hold the lengths. A session's replay (see [Session replays](#session-replays)) records the ready bits with the inputs, and they do not act as keys when it plays either; its playback does not show this screen, since a replay has no ranked set (nor the online rematch choices, which come from the server).
 
 A screenpack adds the entry points as title menu items (the third one opens the lobby screens, see [Lobbies](#lobbies)):
 
@@ -361,7 +406,7 @@ menu.itemname.menunetwork.onlineranked = RANKED MATCH (ONLINE)
 menu.itemname.menunetwork.onlinelobby = ONLINE LOBBIES
 ```
 
-For testing, `-nakama-match unranked` (or `ranked`) with the quick-VS options (`-p1`, `-p2`, `-s`) does the same as `-ip`, with the opponent found by matchmaking. `-nakama-stun host:port,...` overrides the STUN list. A ranked quick match plays one match, the first of its set: with `Netplay.Ranked.BestOf = 1` that match decides the set, and the game claims the set's winner with the server, waits up to 15 seconds for the answer, then up to 15 seconds more for the set's result (the notification of [Levels](#levels)), which it prints (`Ranked set <set ID>: You won the ranked set. Power level 9,001 -> 10,840 (+1,839)`) and, with `-loadmotif`, shows on the screen for four seconds, before it quits. A longer set is not claimed: the player who quits first while the other is still in the session is noted as having left early, and once `IKEMEN_RANKED_CLAIM_MINUTES` have passed the set is disputed (`claim_timeout`), so it shows in the moderators' list (see [Ranked sets](#ranked-sets)).
+For testing, `-nakama-match unranked` (or `ranked`) with the quick-VS options (`-p1`, `-p2`, `-s`) does the same as `-ip`, with the opponent found by matchmaking. `-nakama-stun host:port,...` overrides the STUN list. A ranked quick match plays one match, the first of its set: with `Netplay.Ranked.BestOf = 1` that match decides the set, and the game claims the set's winner with the server and shows the screen after the set (with `-loadmotif`; without it the window stays blank), which waits up to 10 seconds as in the menus and then shows the result for 4 seconds (`online.rankedResultFrames`), so the game quits up to about 14 seconds after the match; it prints the set's result (`Ranked set <set ID>: You won the ranked set. Power level 9,001 -> 10,840 (+1,839)`) when it has come. A claim still without a final answer goes again at the game's next start. A longer set is not claimed: the player who quits first while the other is still in the session is noted as having left early, and once `IKEMEN_RANKED_CLAIM_MINUTES` have passed the set is disputed (`claim_timeout`), so it shows in the moderators' list (see [Ranked sets](#ranked-sets)).
 
 Lua API used by the flow, also used by the lobby screens:
 
@@ -390,6 +435,7 @@ Connection behaviour:
 | One player behind a symmetric NAT (random port per destination), the other behind a port-restricted NAT | Fails after about 20 seconds with "Could not open a connection to the other player" |
 | Both players behind conntrack NATs without a WAN firewall | Fails the same way: the first player's packets reach the other NAT before that player has sent anything, and the NAT then moves the other player's mapping to a new port |
 | A player quits or crashes during the session | The other side's session ends within about 8 seconds (1 second when the player leaves normally) |
+| The server stops, or the connection to it fails, during the session | The session goes on over the P2P path, which the game keeps with the session's match, so that both games take the same steps whether one or both lost their connection (the next fight runs over the P2P path too). The online rematch choices go through the server: a game without the connection cannot send its choice after a match, and the decision does not reach it. Claims of ranked sets are sent again (see [Claims sent again](#claims-sent-again)). The session's end leaves the match. |
 
 A relay (TURN, or relaying through Nakama) is needed for the failing cases; none is implemented yet.
 
@@ -410,17 +456,17 @@ When the matchmaker makes a ranked session (`ikemen_matchmaker.lua`), the server
 | `disputed` | The claims named different winners (`reason`: `claims_disagree`), or a claim did not come in time (`claim_timeout`): only one player claimed, or nobody claimed after a player had left a set whose matches had started. A moderator decides. |
 | `void` | No result: nobody claimed in time, and either nobody left before the set was decided or none of its matches had started (`no_claims`); or a moderator voided it (`moderator`). The ratings do not change. |
 
-The record also notes the claims, a player who left the session before the set was decided (`left_early`: such a set ends disputed when only the other player claims it, and a moderator decides; the session counts a set as decided when a player's choice after a match says it was the set's last, when a player forfeits, when both choose another set, or once both have claimed it, so this is the games' account, not proof), whether a match of the set started (`played`), when the set ended (the end of the session, or for an earlier set, the start of the next one), the replays kept, the winner, who settled it (`players` or `moderator`) and a moderator's note.
+The record also notes the claims, the players' results once the set has settled (`results`, by user ID: `won`, `label`, `rating_before`, `rating`, `level_before` and `level`, the Elo ratings and levels before and after the set, the levels and their label as the server's level settings made them then), a player who left the session before the set was decided (`left_early`: such a set ends disputed when only the other player claims it, and a moderator decides; the session counts a set as decided when a player's choice after a match says it was the set's last, when a player forfeits, when both choose another set, or once both have claimed it, so this is the games' account, not proof), whether a match of the set started (`played`), when the set ended (the end of the session, or for an earlier set, the start of the next one), the replays kept, the winner, who settled it (`players` or `moderator`) and a moderator's note.
 
 ### Claims and ratings
 
-When a set has been decided, by its last match or by a forfeit, each player's game claims its winner once (`nakama.submitRankedSet`, called by `external/script/start.lua`), with the `ikemen_submit_result` RPC and the player's session:
+When a set has been decided, by its last match or by a forfeit, each player's game claims its winner (`nakama.submitRankedSet`, called by `external/script/start.lua`; it sends the claim again until the answer is final, see [Claims sent again](#claims-sent-again)), with the `ikemen_submit_result` RPC and the player's session:
 
 ```json
 {"match_id": "<the session's match ID>", "set": 1, "winner": "<the winner's user ID>"}
 ```
 
-The answer is `{accepted, settled, status, match_id}`, with the caller's `rating`, `level`, `level_text` and the game's `label`, and the opponent's `opponent_rating`, `opponent_level` and `opponent_level_text`, once the set is settled (see [Levels](#levels); a claim sent again after the set was settled gets the caller's alone). The game tries the claim up to three times, again only after a connection failure or an answer of code 10, 13 or 14. The server accepts a claim only for a set it recorded, from one of the set's two players, while the set is open, and refuses the others with these Nakama error codes:
+The answer is `{accepted, settled, status, match_id}`, with, once the set is settled, the caller's `rating`, `level`, `level_text` and the game's `label`, the opponent's `opponent_rating`, `opponent_level` and `opponent_level_text` (see [Levels](#levels)), and `result`: what the set changed for the caller, `{won, label, rating_before, rating, level_before, level_before_text, level, level_text, change, change_text}`, the fields of the `ikemen_ranked_settled` notification. A claim sent again after the set was settled gets the caller's rating and level as they are now, without the opponent's, and the same `result`, which the set's record keeps (with the label its levels had, should the level settings change later); a claim sent again after the set was disputed gets its `reason`. So a game whose first answer was `open`, or that had no answer, learns the set's result from a claim it sends again, without the notification. A set settled before the server kept results has no `result`. The server accepts a claim only for a set it recorded, from one of the set's two players, while the set is open, and refuses the others with these Nakama error codes:
 
 | Code | Refused |
 |---|---|
@@ -438,6 +484,21 @@ The ratings are Elo ratings per game (`ikemen_rating/<game>`, one record per pla
 The first version's fields still work: `result` (1: the caller won, 0: the caller lost) in place of `winner`, `opponent_id` and `game` (checked against the set when given) and `replay_hash` (claims whose hashes differ disagree).
 
 Two players who agree on a false result are believed: agreeing claims prove only that both games, or both players, say the same.
+
+### Claims sent again
+
+An answer is final when it says what became of the set: `settled`, `disputed`, or a refusal (codes 3, 5, 7 and 9). A code 9 for a set that is no longer open (`ranked set <set ID> is <status>: it takes no more claims`, the answer to a claim that did not count) means its status: `void`, `disputed` or `settled`, without the set's result; the game then shows the line of that status (for a settled set, that it is settled), unless the server's notification brought the result. `open` is not final (the other player's claim has not come), and neither is a claim the server did not answer: no connection, the server stopped, or codes 10, 13, 14 and 16. A claim without a final answer is kept by the game (`src/nakama_ranked_queue.go`), in memory and in `save/ranked_pending.json`, and sent again: 5 seconds after the first send, 15 seconds after the second, then every 60 seconds; at once whenever the game connects to the server again (`nakama.connect`); and when the game next starts. It is sent until its answer is final, or until it is a day old; once the server's claim window (`IKEMEN_RANKED_CLAIM_MINUTES`) has passed, the server's answer is final (the set is disputed or void by then). A claim is sent only as the account that played the set: after a restart, the game signs in to the set's server with the account's device ID on its own, over the server's HTTP API, without the realtime connection (the player is not shown online).
+
+The file:
+
+```json
+{"version": 1, "claims": [{"set_id": "<set ID>", "match_id": "<the session's match ID>", "set": 1,
+  "winner": "<the winner's user ID>", "user_id": "<the claiming player's user ID>",
+  "server": {"host": "127.0.0.1", "port": 7350, "server_key": "defaultkey", "device_id": "..."},
+  "created": 1792112236, "sends": 3}]}
+```
+
+`created` is the time of the first send (Unix seconds) and `sends` the number of sends so far. `"ssl": true` is there only for a server reached over TLS, and `device_id` only when the account's device ID came from the server profile (`device_id`), not from `save/nakama_device_id`. The file is removed when no claim waits. A file that cannot be read is ignored, and replaced at the next change.
 
 ### Replays kept for moderators
 
@@ -485,7 +546,7 @@ With `unwrap`, the request body is the payload and the answer is the RPC's JSON 
 - `status`: `disputed` (the default), `open`, `settled`, `void` or `all`. `limit`: 1 to 100 sets (20 by default). `cursor`: the `cursor` of the previous answer, for the next page; it is `""` after the last page. A page can hold fewer than `limit` sets before the last page (one call reads at most 50 pages of the index).
 - `match_id`, a set ID: the list holds that set alone (or nothing), whatever its status unless `status` is given.
 - A set whose second claim is overdue is marked disputed (`claim_timeout`) or void when the list reads it (see [Claims and ratings](#claims-and-ratings)); its players are told of a dispute then (see [Levels](#levels)).
-- Newest first. Each set: `match_id` (the set ID, which the other RPCs take), `session` (the session's match ID), `set` (its number in the session), `game`, `build`, `best_of`, `status`, `reason`, `players` (`[{user_id, username, rating, level, level_text}]`, in the matchmaker's order, with each player's current rating and level), `label` (the name of the game's level), `claims` (`[{user_id, winner, at}]`), `left_early` (user IDs), `replays` (`[{user_id, bytes, complete}]`), `played`, `created`, `ended`, `decided` (when the status last changed), `winner`, `settled_by` and `note`. Times are Unix times in seconds; `ended`, `decided`, `winner` and `settled_by` are left out until they apply.
+- Newest first. Each set: `match_id` (the set ID, which the other RPCs take), `session` (the session's match ID), `set` (its number in the session), `game`, `build`, `best_of`, `status`, `reason`, `players` (`[{user_id, username, rating, level, level_text, result}]`, in the matchmaker's order, with each player's current rating and level, and, once the set has settled, `result`: the player's result in the set as the record kept it, `{won, label, rating_before, rating, level_before, level_before_text, level, level_text, change, change_text}`, see [Claims and ratings](#claims-and-ratings)), `label` (the name of the game's level), `claims` (`[{user_id, winner, at}]`), `left_early` (user IDs), `replays` (`[{user_id, bytes, complete}]`), `played`, `created`, `ended`, `decided` (when the status last changed), `winner`, `settled_by` and `note`. Times are Unix times in seconds; `ended`, `decided`, `winner` and `settled_by` are left out until they apply.
 
 **`ikemen_ranked_replay`** `{match_id, user_id}` → `{file_name, replay, user_id, complete, matches, bytes}`
 
@@ -579,13 +640,13 @@ ikemen levels: IKEMEN_LEVELS is not valid (default: top must be more than start)
 
 ### Where players see them
 
-The server writes each level as text too (`level_text`), with thousands separators (`9,001`), so that every client shows the same text; levels reach billions and more, past what a 32-bit integer holds, and a client that reads them as numbers needs 64-bit ones. IKEMEN GO shows the player's level while it searches for a ranked match, and the set's result after each ranked set (see [Online sessions](#online-sessions)). Each game's leaderboard lists the players by rating, with their levels, for a launcher to show (Nakama Matchmaker's does).
+The server writes each level as text too (`level_text`), with thousands separators (`9,001`), so that every client shows the same text; levels reach billions and more, past what a 32-bit integer holds, and a client that reads them as numbers needs 64-bit ones. IKEMEN GO shows the player's level while it searches for a ranked match, and the set's result after each ranked set (see [The screen after a ranked set](#the-screen-after-a-ranked-set)). Each game's leaderboard lists the players by rating, with their levels, for a launcher to show (Nakama Matchmaker's does).
 
 These answers carry the levels:
 
 - **`ikemen_get_rating`** `{game}` → `{rating, games, wins, losses, level, level_text, label}`: the caller's Elo `rating`, the ranked sets they played, won and lost, their `level` as a number and as text, and the `label` of the game's number. A player without a rating has the rating new players start with. When the caller has played a ranked set and their leaderboard entry is missing or older than their rating (a rating from before the leaderboards, or a write that failed), it writes the entry. A payload without `game` is refused with code 3.
-- The answer to a claim, once the set is settled (see [Claims and ratings](#claims-and-ratings)).
-- The moderators' list of sets, with each player's current level (see [Moderator RPCs](#moderator-rpcs)).
+- The answer to a claim, once the set is settled, with the caller's level before and after the set (see [Claims and ratings](#claims-and-ratings)).
+- The moderators' list of sets, with each player's current level, and their levels before and after a settled set (see [Moderator RPCs](#moderator-rpcs)).
 
 ### Leaderboards
 
@@ -916,7 +977,7 @@ The client refreshes its session token before HTTP calls, so the 60-second defau
 
 ## Game compatibility
 
-A netplay session runs both games with the host's sync settings: the strict settings must already be the same in both games, and the host's other settings apply to the other player for the session. The common files and code are the exception: the `[Common]` section of the configuration (common states, commands, animations, constants and FightFX, Lua modules, and the Lua code the game runs every frame) is never taken from another game or from a replay file. Both games must list the same ones, or the session does not start; a replay whose common files and code differ does not play.
+A netplay session runs both games with the host's sync settings: the strict settings must already be the same in both games (except the Netcode option in a session through Nakama, which always uses rollback netcode, see [Netcode](#netcode)), and the host's other settings apply to the other player for the session. The common files and code are the exception: the `[Common]` section of the configuration (common states, commands, animations, constants and FightFX, Lua modules, and the Lua code the game runs every frame) is never taken from another game or from a replay file. Both games must list the same ones, or the session does not start; a replay whose common files and code differ does not play.
 
 The synchronized replay header carries IKEMEN's sync settings and a SHA-256 content fingerprint. The fingerprint covers the engine version, the active motif and fight-screen definitions, `select.def` (the roster and stage list) and the common FightFX: those the fight screen loads and those the configuration lists (`Common.Fx`), which a client loads with its first match. It hashes file contents rather than absolute filesystem paths, and does not depend on what a client has played before, so a player who has played a match and one who has not agree.
 
@@ -934,6 +995,8 @@ Implemented in this tree:
 - Automatic join of the Nakama coordination match after matchmaking.
 - Ranked sets: the server records each set of a ranked session, accepts one claim of its winner from each of its two players, changes the ratings once per set when the claims agree, and keeps both players' replays of the set for its moderators, who list the sets, export and watch the replays, and settle or void sets (see [Ranked sets](#ranked-sets)).
 - Levels for the ratings, set per server and per game (`IKEMEN_LEVELS`), a leaderboard per game, and a notification of each ranked set's result, which the game shows while it searches for a ranked match and after each set (see [Levels](#levels)).
+- The screen after a ranked set, which waits for the set's result in both games and ends on the same frame in both (the ready bit), and claims sent again until their answer is final, kept in `save/ranked_pending.json` across restarts (see [The screen after a ranked set](#the-screen-after-a-ranked-set) and [Claims sent again](#claims-sent-again)).
+- Online play through Nakama with rollback netcode always (see [Netcode](#netcode)).
 - Authoritative lobby creation/listing and up-to-8 lobby state.
 - Lobby ready states, queue and winner-stays rotation, round-robin and bracket tournaments, host settings and actions, room IDs and private lobbies, and lobby chat.
 - Lobby screens (lobby search, lobby settings and the lobby room, with states before, during and between matches) configured by the screenpack's `[Lobby Info]` and `[LobbyBgDef]`, and lobby matches played over the P2P netplay session.

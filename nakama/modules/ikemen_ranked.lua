@@ -29,7 +29,9 @@ local nk = require("nakama")
 -- reason, claims (by user id: user_id, winner, at), left_early (user ids),
 -- played (true once a match of the set has started), replays (by user id:
 -- user_id, bytes, complete), winner, settled_by ("players" or
--- "moderator"), decided (when the status last changed) and note.
+-- "moderator"), decided (when the status last changed), note and, once the
+-- set has settled, results (by user id: won, label, rating_before, rating,
+-- level_before, level; ikemen_rating.lua).
 --
 -- Status:
 --   open      the set is being played, or waits for its players' claims
@@ -192,6 +194,7 @@ function M.normalize(value)
     value.left_early = type(value.left_early) == "table" and value.left_early or {}
     value.replays = type(value.replays) == "table" and value.replays or {}
     value.players = type(value.players) == "table" and value.players or {}
+    value.results = type(value.results) == "table" and value.results or {}
     value.note = tostring(value.note or "")
     value.reason = tostring(value.reason or "")
     return value
@@ -286,11 +289,23 @@ function M.timed_out(context, value, now)
 end
 
 -- The record as the moderator RPCs return it: claims, left_early and
--- replays as lists, in the players' order.
+-- replays as lists, in the players' order, and each player's result (a
+-- settled set) with the player.
 function M.public_set(value)
     local players, claims, replays, left = {}, {}, {}, {}
     for _, p in ipairs(value.players) do
         players[#players + 1] = { user_id = p.user_id, username = p.username or "" }
+        local kept = value.results[p.user_id]
+        if type(kept) == "table" then
+            players[#players].result = {
+                won = kept.won == true,
+                label = type(kept.label) == "string" and kept.label or nil,
+                rating_before = tonumber(kept.rating_before),
+                rating = tonumber(kept.rating),
+                level_before = tonumber(kept.level_before),
+                level = tonumber(kept.level),
+            }
+        end
         local c = value.claims[p.user_id]
         if type(c) == "table" then
             claims[#claims + 1] = { user_id = p.user_id, winner = c.winner, at = c.at }

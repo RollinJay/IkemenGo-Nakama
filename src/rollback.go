@@ -114,9 +114,22 @@ func (rs *RollbackSystem) hijackRunMatch() bool {
 		}
 	}
 
+	rs.noteMatchEnded()
 	rs.postMatchSetup()
 
 	return false
+}
+
+// noteMatchEnded tells the netplay session that the scripts ended the match
+// that just ran (endMatch: the online rematch choice). Such a match ends the
+// rollback loop as quit (sys.esc, see simulateFrame), and game() reports it
+// so, but the netplay session goes on to the menus after it. A match that
+// ended because GGPO lost the other player (OnEvent sets sys.endMatch too)
+// is not one: the session is cancelled, as it was before.
+func (rs *RollbackSystem) noteMatchEnded() {
+	if sys.endMatch && rs.netConnection != nil && (rs.session == nil || !rs.session.peerDisconnected) {
+		rs.netConnection.matchEnded = true
+	}
 }
 
 func (rs *RollbackSystem) preMatchSetup() error {
@@ -214,9 +227,10 @@ func (rs *RollbackSystem) preMatchSetup() error {
 		// moderators (nakama/modules/ikemen_session.lua): with a short delay,
 		// since nobody watches them, with the players' state at the start of
 		// each session, as a match replay file has it, and with the list of
-		// the match's files at the end.
+		// the match's files at the end. A session that lost the server's
+		// connection (and goes on over the P2P path) publishes nothing.
 		ranked := sys.nakama != nil && sys.nakama.RankedSession()
-		if sys.nakama != nil && sys.nakama.CurrentMatchID() != "" && (rs.session.host == "" || ranked) {
+		if sys.nakama != nil && sys.nakama.CurrentMatchID() != "" && sys.nakama.IsConnected() && (rs.session.host == "" || ranked) {
 			if publish := sys.nakama.ReplayPublish(); !publish.Disabled || ranked {
 				stage := ""
 				if sys.stage != nil {
@@ -685,6 +699,9 @@ type RollbackSession struct {
 	inRollback          bool
 	replaySaved         bool
 	replayStream        *RollbackReplayStream
+	// peerDisconnected: GGPO lost the other player during this match
+	// (EventCodeDisconnectedFromPeer); each match has a new session.
+	peerDisconnected bool
 }
 
 func (rs *RollbackSession) SetInput(time int32, player int, input InputBits, axes [6]int8) {
@@ -984,6 +1001,9 @@ func (r *RollbackSession) OnEvent(info *ggpo.Event) {
 		}
 		fmt.Println("EventCodeDisconnectedFromPeer")
 		sys.endMatch = true
+		// The match ends because the other player is gone, not because
+		// the scripts ended it (noteMatchEnded).
+		r.peerDisconnected = true
 		r.SaveReplay()
 		if sys.sessionWarning == "" {
 			sys.sessionWarning = fmt.Sprintf(sys.motif.WarningInfo.Text.Text["disconnect"], int(info.Player))

@@ -1216,14 +1216,15 @@ function main.f_commandLine()
 	if flags['-nakama-match'] ~= nil and nakama.rankedSet ~= nil and nakama.rankedSet().active then
 		-- A ranked quick match plays the set's first match: a set of more
 		-- matches (Netplay.Ranked.BestOf above 1) is left undecided. A
-		-- decided set is claimed with the server before quitting, and its
-		-- result (the player's level before and after it, or a dispute)
-		-- shown and printed when the server sends it, within 15 seconds.
-		if (winner == 1 or winner == 2) and nakama.rankedSetRecordMatch(winner) and online.f_submitRankedSet() then
+		-- decided set is claimed with the server before quitting, and the
+		-- screen after the set waits for its result (the player's level
+		-- before and after it, or a dispute) as in the menus, 10 seconds at
+		-- most (online.f_rankedSetOver). A claim still without a final
+		-- answer is sent again at the game's next start.
+		if (winner == 1 or winner == 2) and nakama.rankedSetRecordMatch(winner) then
+			online.f_submitRankedSet()
 			local setId = online.f_rankedSetId()
-			local answer = online.f_waitRankedResult(60 * 15)
-			print('Ranked set: ' .. (type(answer) == 'table' and tostring(answer.status) or 'no answer'))
-			if type(answer) == 'table' and not online.f_showRankedResult(setId, online.rankedResultFrames, 60 * 15) then
+			if not online.f_rankedSetOver() then
 				print('Ranked set ' .. setId .. ': no result from the server yet')
 			end
 		end
@@ -4005,6 +4006,9 @@ function main.f_menuCommonDraw(t, item, cursorPosY, moveTxt, sec, bg, skipClear,
 		textImgSetText(motif.attract_mode.credits.TextSpriteData, string.format(motif.attract_mode.credits.text, getCredits()))
 		textImgDraw(motif.attract_mode.credits.TextSpriteData)
 	end
+	-- Scripts that add to the menu (online.lua: the result of a ranked set
+	-- that came late, on the menu with the online items).
+	hook.run("main.f_menuCommonDraw", t, sec)
 	--draw layerno = 1 backgrounds
 	if not opts.skipBG1 then
 		bgDraw(bg.BGDef, 1)

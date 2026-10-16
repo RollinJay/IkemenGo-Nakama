@@ -8,7 +8,9 @@
 -- change what it loads.
 --
 -- Which matches are saved:
---   - online, with rollback netcode: every match of the session, versus or
+--   - online, with rollback netcode (always in a Nakama session: quick
+--     match, ranked match or lobby; with Host Game / Join Game, when the
+--     Netcode option is Rollback): every match of the session, versus or
 --     co-op. The replay of the whole session, recorded as before, is removed
 --     when every match of the session has a match replay;
 --   - local versus (players on both sides: VS Mode, Team Versus, Versus
@@ -46,9 +48,15 @@ replay.playing = false
 replay.listMax = 6
 
 -- Starts saving the session: the replay of the whole session and, with
--- rollback netcode, one match replay per match.
-function replay.f_record()
-	if gameOption('Netplay.RollbackNetcode') then
+-- rollback netcode, one match replay per match. rollback: whether the
+-- session's fights use rollback netcode; Nakama sessions always do
+-- (online.lua passes true), Host Game / Join Game follow the Netcode option
+-- (Netplay.RollbackNetcode, the default).
+function replay.f_record(rollback)
+	if rollback == nil then
+		rollback = gameOption('Netplay.RollbackNetcode')
+	end
+	if rollback then
 		-- A folder that cannot be written leaves the session unrecorded, as a
 		-- session replay that cannot be created does.
 		local ok, err = pcall(replaySaveMatches, replay.dir)

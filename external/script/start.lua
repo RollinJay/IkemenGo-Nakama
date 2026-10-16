@@ -1943,6 +1943,12 @@ function start.f_selectMode()
 		-- session gets a fresh P2P socket.
 		if start.onlineNextAction == 'exit' or start.onlineNextAction == 'forfeit' then
 			start.f_clearOnlineRematchState()
+			-- Both players leave the online session: a Nakama session's
+			-- netplay session ends here, in both games on the same frame
+			-- (the menus after a match run in step).
+			if online ~= nil and online.f_sessionActive() and nakama ~= nil and nakama.endNetPlay ~= nil then
+				nakama.endNetPlay()
+			end
 			start.f_leaveOnlineSession()
 			start.exit = false
 			bgReset(motif[main.background].BGDef)
@@ -2656,8 +2662,9 @@ function launchFight(data)
 		end
 		start.f_game(common)
 		if start.rankedSetFinished and online ~= nil and online.f_rankedSetOver ~= nil then
-			-- The ranked set is over: its result and the player's new level
-			-- (online.lua), for the same number of frames in both games.
+			-- The ranked set is over: the screen that waits for its result
+			-- and shows it with the player's new level (online.lua). Both
+			-- games leave it on the same frame.
 			online.f_rankedSetOver()
 		end
 		clearColor(motif.selectbgdef.bgclearcolor[1], motif.selectbgdef.bgclearcolor[2], motif.selectbgdef.bgclearcolor[3])

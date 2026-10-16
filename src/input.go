@@ -372,6 +372,17 @@ const (
 	IB_W
 	IB_M
 	IB_anybutton = IB_A | IB_B | IB_C | IB_X | IB_Y | IB_Z | IB_S | IB_D | IB_W | IB_M
+	// IB_keys: the 14 bits that are keys (directions and buttons).
+	IB_keys = IB_PU | IB_PD | IB_PL | IB_PR | IB_anybutton
+	// IB_READY is not a key: a netplay session's game raises it in the bits
+	// it sends during the menus between fights, to tell the other game it is
+	// ready to leave a screen that waits for both (nakama.setReady, the
+	// screen after a ranked set). Both games see both games' bits on the same
+	// frames, so they leave such a screen on the same frame. It never becomes
+	// a key press (BitsToKeys and IB_anybutton leave it out), and a session's
+	// replay records it with the keys. Bit 15 is left free: a negative value
+	// ends a netplay input stream.
+	IB_READY InputBits = 1 << 14
 )
 
 // Save local inputs as input bits to send or record
@@ -392,9 +403,11 @@ func (ibit *InputBits) KeysToBits(buttons [14]bool) {
 		Btoi(buttons[13])<<13)
 }
 
-// Convert received input bits back into keys
+// Convert received input bits back into keys. Bits that are not keys
+// (IB_READY) are left out.
 func (ibit InputBits) BitsToKeys() [14]bool {
 	var U, D, L, R, a, b, c, x, y, z, s, d, w, m bool
+	ibit &= IB_keys
 
 	// Convert bits to logical symbols
 	U = ibit&IB_PU != 0

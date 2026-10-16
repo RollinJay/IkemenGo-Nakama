@@ -361,6 +361,20 @@ if nakama ~= nil and nakama.on ~= nil then
 	nakama.on('rematch_decision', ik_rematch.nakamaDecision)
 end
 
+-- Each online match starts without the choices and the decision of the
+-- match before it (whose decision ended that match): left set, the decision
+-- would end the next match on its first frame. The decision rounds go on
+-- counting (online.lastRound).
+function ik_rematch.onlineMatchStart()
+	online.prompt = false
+	online.sent = {false, false}
+	online.choice = {1, 1}
+	online.navHeld = {false, false}
+	online.decision = nil
+	online.applied = false
+end
+hook.add("start.f_game", "ik_rematch_online", ik_rematch.onlineMatchStart)
+
 function ik_rematch.runOnline()
 	if ik_rematch.sd.rematchonline == nil then return end
 	if not isOnlineRematchMode() then

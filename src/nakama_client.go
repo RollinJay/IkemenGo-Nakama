@@ -359,6 +359,10 @@ type NakamaClient struct {
 	matchmadeID   string
 	matchmadeMode string
 	lobbyClientState
+	// p2pStream: a netplay session's stream was opened on the P2P path
+	// (OpenP2PStream); losing the server's connection then keeps the path
+	// and the match (connectionLost).
+	p2pStream bool
 
 	eventMu sync.RWMutex
 	eventFn func(NakamaEvent)
@@ -596,20 +600,45 @@ func websocketAccept(key string) string {
 	return base64.StdEncoding.EncodeToString(h.Sum(nil))
 }
 
+// Disconnect closes the realtime connection, the P2P path and the match.
 func (n *NakamaClient) Disconnect() {
-	n.StopP2P()
+	n.disconnect(false)
+}
+
+// disconnect closes the realtime connection. With keepSession, a P2P path
+// that a netplay session runs on is kept (connectionLost), and so is the
+// match: the two games of the session decide on the match id in step
+// (start.f_startOnlineP2P, the transport of a rollback match), so a game
+// that alone lost its connection must see the one the other game sees. The
+// session's end leaves the match (LeaveMatch).
+func (n *NakamaClient) disconnect(keepSession bool) {
 	n.mu.Lock()
+	keep := keepSession && n.p2p != nil && n.p2pStream
+	var p *NakamaP2P
+	if !keep {
+		p = n.p2p
+		n.p2p = nil
+		n.p2pStream = false
+	}
 	conn := n.conn
 	closed := n.closed
 	n.conn = nil
 	n.reader = nil
 	n.ticket = ""
-	n.matchID = ""
+	if !keep {
+		n.matchID = ""
+	}
 	replays := append([]*NakamaReplayBuffer(nil), n.replayHistory...)
 	if n.replay != nil && len(replays) == 0 {
 		replays = append(replays, n.replay)
 	}
 	n.mu.Unlock()
+	if p != nil {
+		p.Close()
+	}
+	if keep {
+		log.Printf("Nakama: the connection to the server ended; the netplay session's P2P path and match are kept")
+	}
 	for _, replay := range replays {
 		replay.Reset("client_disconnected")
 	}
@@ -686,6 +715,7 @@ func (n *NakamaClient) StopP2P() {
 	n.mu.Lock()
 	p := n.p2p
 	n.p2p = nil
+	n.p2pStream = false
 	n.mu.Unlock()
 	if p != nil {
 		p.Close()
@@ -721,7 +751,15 @@ func (n *NakamaClient) OpenP2PStream() (net.Conn, error) {
 	if p == nil {
 		return nil, errors.New("nakama p2p connection is not started")
 	}
-	return p.OpenStream()
+	stream, err := p.OpenStream()
+	if err == nil {
+		n.mu.Lock()
+		if n.p2p == p {
+			n.p2pStream = true
+		}
+		n.mu.Unlock()
+	}
+	return stream, err
 }
 
 // P2PGameplayConn returns a new GGPO channel on the P2P socket and the peer
@@ -990,8 +1028,13 @@ func (n *NakamaClient) LeaveMatch() error {
 	if matchID == "" {
 		return nil
 	}
-	if err := n.sendEnvelope("match_leave", map[string]any{"match_id": matchID}); err != nil {
-		return err
+	// Without a connection (it was lost while a netplay session kept the
+	// match, connectionLost), the server has already taken the player out
+	// of the match: only this client's state is left.
+	if n.IsConnected() {
+		if err := n.sendEnvelope("match_leave", map[string]any{"match_id": matchID}); err != nil {
+			return err
+		}
 	}
 	n.mu.Lock()
 	n.matchID = ""
@@ -1470,7 +1513,7 @@ func (n *NakamaClient) readLoop(conn net.Conn, reader *bufio.Reader, closed <-ch
 			}
 			log.Printf("Nakama websocket read failed: %v", err)
 			n.emit(NakamaEvent{Type: "error", Error: err})
-			n.disconnectConn(conn)
+			n.connectionLost(conn)
 			return
 		}
 		if !n.isCurrentConn(conn) {
@@ -1482,7 +1525,7 @@ func (n *NakamaClient) readLoop(conn net.Conn, reader *bufio.Reader, closed <-ch
 				n.handleJSON(frame)
 			}
 		case 0x8:
-			n.disconnectConn(conn)
+			n.connectionLost(conn)
 			return
 		case 0x9:
 			n.mu.Lock()
@@ -1508,11 +1551,17 @@ func (n *NakamaClient) isCurrentConn(conn net.Conn) bool {
 	return n.conn != nil && n.conn == conn
 }
 
-// disconnectConn disconnects the client if conn is still its connection.
-func (n *NakamaClient) disconnectConn(conn net.Conn) {
-	if n.isCurrentConn(conn) {
-		n.Disconnect()
+// connectionLost handles the end of the realtime connection that the client
+// did not ask for (the server stopped, or the network failed): as
+// Disconnect, except that a P2P path that a netplay session runs on is kept,
+// with the match, so that the two games go on with their session without the
+// server (the online scripts close the path and leave the match when the
+// session ends, nakama.stopP2P and nakama.leaveMatch).
+func (n *NakamaClient) connectionLost(conn net.Conn) {
+	if !n.isCurrentConn(conn) {
+		return
 	}
+	n.disconnect(true)
 }
 
 func (n *NakamaClient) handleJSON(data []byte) {

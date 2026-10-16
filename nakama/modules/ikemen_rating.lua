@@ -29,14 +29,26 @@ local levels = require("ikemen_levels")
 --
 -- ikemen_submit_result: {match_id, set, winner} -> {accepted, settled, status,
 -- match_id, rating, level, level_text, label, opponent_rating,
--- opponent_level, opponent_level_text}. match_id is the ranked session's
--- match id, set the set's number in the session (1 by default), and winner
--- the user id of the set's winner. The ratings and levels come once the set
--- is settled (the caller's alone in the answer to a claim sent again). The
--- first version's fields still work: result (1: the caller won, 0: the
--- caller lost) in place of winner, opponent_id (checked when given), game
--- (checked when given) and replay_hash (claims whose hashes differ
--- disagree).
+-- opponent_level, opponent_level_text, result}. match_id is the ranked
+-- session's match id, set the set's number in the session (1 by default),
+-- and winner the user id of the set's winner. The ratings and levels come
+-- once the set is settled (the caller's alone in the answer to a claim sent
+-- again: their rating now). result is what the set changed for the caller,
+-- kept with the set when it settled (below): {won, label, rating_before,
+-- rating, level_before, level_before_text, level, level_text, change,
+-- change_text}, the fields of the ikemen_ranked_settled notification. The
+-- answer to a claim sent again has it too, so that a game that sends its
+-- claim again later (it had no answer) can show the set's result; a set
+-- settled before the server kept results has none. The first version's
+-- fields still work: result (1: the caller won, 0: the caller lost) in place
+-- of winner, opponent_id (checked when given), game (checked when given)
+-- and replay_hash (claims whose hashes differ disagree).
+--
+-- The record of a settled set keeps each player's result: results, by user
+-- id, {won, label, rating_before, rating, level_before, level} (the Elo
+-- ratings and levels before and after the set; the levels and their label
+-- as the server's level settings made them then). The moderators' list
+-- (ikemen_moderation.lua) shows them.
 --
 -- ikemen_get_rating: {game} -> {rating, games, wins, losses, level,
 -- level_text, label}: the caller's rating. It also writes the caller's
@@ -299,6 +311,41 @@ local function after_settlement(context, value, results)
     end
 end
 
+-- What a settled set changed for a player, as the set's record keeps it.
+local function kept_result(context, game, before, after, won)
+    return {
+        won = won,
+        label = levels.label(context, game),
+        rating_before = before.rating,
+        rating = after.rating,
+        level_before = level_of(context, game, before.rating),
+        level = level_of(context, game, after.rating),
+    }
+end
+
+-- A kept result (results[user_id] of a set's record) with its texts and
+-- label: the fields of the ikemen_ranked_settled notification. The label is
+-- the one kept with the levels (the game's label now for a result kept
+-- without one). nil when r is not a kept result.
+local function result_fields(context, game, r)
+    if type(r) ~= "table" or tonumber(r.level) == nil or tonumber(r.level_before) == nil then
+        return nil
+    end
+    local before, after = tonumber(r.level_before), tonumber(r.level)
+    return {
+        won = r.won == true,
+        label = (type(r.label) == "string" and r.label ~= "") and r.label or levels.label(context, game),
+        rating_before = tonumber(r.rating_before),
+        rating = tonumber(r.rating),
+        level_before = before,
+        level_before_text = levels.format(before),
+        level = after,
+        level_text = levels.format(after),
+        change = after - before,
+        change_text = levels.change_text(after - before),
+    }
+end
+
 local function username_in(value, user_id)
     for _, p in ipairs(value.players or {}) do
         if type(p) == "table" and p.user_id == user_id then
@@ -311,7 +358,8 @@ end
 -- Settles a set read at version: winner_id wins it. One storage transaction
 -- inserts the system-owned ikemen_settlement/<set id> marker (version "*":
 -- only if absent), writes both players' new ratings over the versions read,
--- and writes the set's record (status settled) over version. Then both
+-- and writes the set's record (status settled, with both players' results)
+-- over version. Then both
 -- players' leaderboard entries are written and their notifications sent.
 -- Returns true and the winner's and the loser's new ratings; "settled" when
 -- the set was settled meanwhile; "changed" when its record changed meanwhile
@@ -345,6 +393,10 @@ local function settle_set(context, value, version, winner_id, by)
         value.winner = winner_id
         value.settled_by = by
         value.decided = ranked.now()
+        value.results = {
+            [winner_id] = kept_result(context, game, w_before, w, true),
+            [loser_id] = kept_result(context, game, l_before, l, false),
+        }
         local ok = pcall(nk.storage_write, {
             {
                 collection = "ikemen_settlement",
@@ -453,11 +505,19 @@ local function submit_result(context, payload)
                 notify_disputed(context, value)
             end
             if type(mine) == "table" and mine.winner == winner then
-                -- A retry of a claim that counted.
+                -- A retry of a claim that counted: the caller's rating now,
+                -- and what the set changed for them (a settled set).
                 local game = value.game or ""
                 local r = read_rating(user_id, game)
-                return nk.json_encode(level_fields(context, game, r.rating, { accepted = true, settled = value.status == "settled",
-                    status = value.status, match_id = id, rating = r.rating }))
+                local answer = level_fields(context, game, r.rating, { accepted = true, settled = value.status == "settled",
+                    status = value.status, match_id = id, rating = r.rating })
+                if value.status == "settled" and type(value.results) == "table" then
+                    answer.result = result_fields(context, game, value.results[user_id])
+                end
+                if value.status == "disputed" then
+                    answer.reason = value.reason
+                end
+                return nk.json_encode(answer)
             end
             error({ string.format("ranked set %s is %s: it takes no more claims", id, value.status), 9 })
         end
@@ -500,6 +560,7 @@ local function submit_result(context, payload)
                     status = "settled", match_id = id, rating = mine_rating.rating, opponent_rating = their_rating.rating })
                 answer.opponent_level = level_of(context, game, their_rating.rating)
                 answer.opponent_level_text = levels.format(answer.opponent_level)
+                answer.result = result_fields(context, game, value.results[user_id])
                 return nk.json_encode(answer)
             end
             -- "settled" or "changed": read the set again.
@@ -665,4 +726,5 @@ return {
     level_fields = level_fields,
     settle_set = settle_set,
     notify_disputed = notify_disputed,
+    result_fields = result_fields,
 }

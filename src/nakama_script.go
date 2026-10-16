@@ -96,6 +96,16 @@ func (h *nakamaLuaHandlers) forEvent(event string) []*lua.LFunction {
 func nakamaScriptInit(l *lua.LState) {
 	api := l.NewTable()
 	callbacks := newNakamaLuaHandlers()
+	// The answers to ranked claims (nakama_ranked_queue.go) reach Lua as
+	// "ranked_result", connected or not.
+	rankedClaims.setListener(func(a rankedAnswer) {
+		ev := NakamaEvent{Type: "ranked_result", Payload: a.luaPayload(), Error: a.Err}
+		select {
+		case sys.mainThreadTask <- func() { nakamaDispatchLuaEvent(l, callbacks, ev) }:
+		default:
+			log.Printf("Nakama main-thread event queue is full; dropping %q", ev.Type)
+		}
+	})
 
 	api.RawSetString("connect", l.NewFunction(func(l *lua.LState) int {
 		cfg := NakamaConfig{
@@ -181,6 +191,8 @@ func nakamaScriptInit(l *lua.LState) {
 				return
 			}
 			n.emit(NakamaEvent{Type: "connected"})
+			// Claims that wait for an answer go again at once.
+			rankedClaims.reconnected()
 		})
 		return 0
 	}))
@@ -404,17 +416,20 @@ func nakamaScriptInit(l *lua.LState) {
 		if err != nil {
 			l.RaiseError("%s", err.Error())
 		}
-		// Mirrors enterNetPlay in script.go.
+		// Mirrors enterNetPlay in script.go, except that a Nakama session
+		// always uses rollback netcode: the Netcode option (delay-based or
+		// rollback) is for Host Game / Join Game, and is not compared
+		// between the two players here.
 		sys.sessionWarning = ""
 		sys.chars = [len(sys.chars)][]*Char{}
 		sys.netConnection = NewNetConnection()
-		if sys.cfg.Netplay.RollbackNetcode {
-			rs := NewRollbackSession(sys.cfg.Netplay.Rollback)
-			sys.rollback.session = &rs
-			if !host {
-				// A non-empty host marks the guest side (see preMatchSetup).
-				sys.rollback.session.host = nakamaP2PHostLabel
-			}
+		sys.netConnection.online = true
+		sys.netConnection.rollback = true
+		rs := NewRollbackSession(sys.cfg.Netplay.Rollback)
+		sys.rollback.session = &rs
+		if !host {
+			// A non-empty host marks the guest side (see preMatchSetup).
+			sys.rollback.session.host = nakamaP2PHostLabel
 		}
 		sys.netConnection.AttachStream(stream, host)
 		return 0
@@ -738,12 +753,22 @@ func nakamaScriptInit(l *lua.LState) {
 	// submitRankedSet() claims the winner of the ranked set just decided
 	// (rankedSet().winner) with the server, once per set: the server rates
 	// the set when both players' claims agree (nakama/README.md, Ranked
-	// sets). Returns true when it sends the claim, false when the set is not
-	// decided or was claimed already. Emits "ranked_result" with the server's
-	// answer (payload.status: open until the other player's claim has come,
-	// then settled or disputed) or with error.
+	// sets). Returns true and the set's id when it sends the claim, false
+	// when the set is not decided or was claimed already, or the game is
+	// not signed in. The claim goes at once, and again until the server's
+	// answer is final (nakama_ranked_queue.go). Each answer emits
+	// "ranked_result": payload {set_id, status, final, sends, and the
+	// server's answer}, status settled, disputed, void, refused, open (the
+	// other player's claim has not come), error (no answer: error says why)
+	// or expired (a day old, no longer sent).
 	api.RawSetString("submitRankedSet", l.NewFunction(func(l *lua.LState) int {
 		if sys.nakama == nil {
+			l.Push(lua.LFalse)
+			return 1
+		}
+		n := sys.nakama
+		session := n.Session()
+		if session == nil || session.UserID == "" {
 			l.Push(lua.LFalse)
 			return 1
 		}
@@ -752,22 +777,58 @@ func nakamaScriptInit(l *lua.LState) {
 			l.Push(lua.LFalse)
 			return 1
 		}
-		n := sys.nakama
 		claim := NakamaRankedClaim{MatchID: sys.rankedSet.MatchID(), Set: sys.rankedSet.Number(), Winner: winner}
 		if claim.MatchID == "" {
 			claim.MatchID = n.CurrentMatchID()
 		}
-		SafeGo(func() {
-			body, err := submitRankedClaim(n, claim)
-			if err != nil {
-				log.Printf("Nakama ranked set %s (set %d): the claim failed: %v", claim.MatchID, claim.Set, err)
-			} else {
-				log.Printf("Nakama ranked set %s (set %d): claimed %s: %s", claim.MatchID, claim.Set, claim.Winner, body)
-			}
-			n.emit(NakamaEvent{Type: "ranked_result", Payload: rpcAnswer(body), Error: err})
-		})
+		if claim.Set < 1 {
+			claim.Set = 1
+		}
+		setID := rankedSetID(claim.MatchID, claim.Set)
+		log.Printf("Nakama ranked set %s: claiming %s", setID, claim.Winner)
+		rankedClaims.add(rankedPendingClaim{
+			SetID:   setID,
+			MatchID: claim.MatchID,
+			Set:     claim.Set,
+			Winner:  claim.Winner,
+			UserID:  session.UserID,
+			Server:  pendingServerOf(n),
+		}, n)
 		l.Push(lua.LTrue)
+		l.Push(lua.LString(setID))
+		return 2
+	}))
+
+	// rankedClaims() lists the claims that wait for a final answer: {set_id,
+	// match_id, set, created (Unix time), sends, next (seconds until sent
+	// again)}.
+	api.RawSetString("rankedClaims", l.NewFunction(func(l *lua.LState) int {
+		t := l.NewTable()
+		now := time.Now()
+		for _, c := range rankedClaims.pending() {
+			e := l.NewTable()
+			e.RawSetString("set_id", lua.LString(c.SetID))
+			e.RawSetString("match_id", lua.LString(c.MatchID))
+			e.RawSetString("set", lua.LNumber(c.Set))
+			e.RawSetString("created", lua.LNumber(c.Created))
+			e.RawSetString("sends", lua.LNumber(c.Sends))
+			next := c.next.Sub(now).Seconds()
+			if next < 0 {
+				next = 0
+			}
+			e.RawSetString("next", lua.LNumber(next))
+			t.Append(e)
+		}
+		l.Push(t)
 		return 1
+	}))
+
+	// resumeRankedClaims() reads the claims an earlier run of the game left
+	// in save/ranked_pending.json (the first time) and sends every claim now.
+	// online.lua calls it when the game starts.
+	api.RawSetString("resumeRankedClaims", l.NewFunction(func(l *lua.LState) int {
+		rankedClaims.resume()
+		return 0
 	}))
 
 	api.RawSetString("rankedSetRecordMatch", l.NewFunction(func(l *lua.LState) int {
@@ -865,6 +926,74 @@ func nakamaScriptInit(l *lua.LState) {
 	api.RawSetString("inRollback", l.NewFunction(func(l *lua.LState) int {
 		l.Push(lua.LBool(sys.inRollback()))
 		return 1
+	}))
+
+	// The ready bit (IB_READY, src/input.go): between fights, a netplay
+	// session's menus run in step on the input bits both games send each
+	// frame, and a screen that waits for both games (the screen after a
+	// ranked set, online.lua) cannot end on what one game alone knows. Each
+	// game raises its ready bit instead, and both leave the screen on the
+	// first frame both bits are up: both games read the same bits for the
+	// same frames.
+	//
+	// setReady(ready) raises (true) or lowers (false) this game's ready bit
+	// in the frames it sends from now on. synchronize() lowers it.
+	api.RawSetString("setReady", l.NewFunction(func(l *lua.LState) int {
+		if sys.netConnection != nil {
+			sys.netConnection.SetReady(boolArg(l, 1))
+		}
+		return 0
+	}))
+
+	// ready([player]) is whether the ready bit is up in the frame the menus
+	// run on now: for both games of the session without player, or for the
+	// inputs read as player's (1, 2, as getInput numbers them). It reads the
+	// bits of the session, or of the session's replay being played (which
+	// recorded them). false outside a session.
+	api.RawSetString("ready", l.NewFunction(func(l *lua.LState) int {
+		player := optionalLuaInt(l, 1, 0)
+		switch {
+		case sys.replayFile != nil:
+			l.Push(lua.LBool(sys.replayFile.Ready(player)))
+		case sys.netConnection != nil:
+			l.Push(lua.LBool(sys.netConnection.Ready(player)))
+		default:
+			l.Push(lua.LFalse)
+		}
+		return 1
+	}))
+
+	// endNetPlay() ends the netplay session as Esc in its menus does: its
+	// screens close (esc() turns true) and the script that opened it calls
+	// exitNetPlay() as after any session; the other game sees it end.
+	// start.lua calls it when the players chose Exit or Forfeit after a
+	// match, on the same frame in both games.
+	api.RawSetString("endNetPlay", l.NewFunction(func(l *lua.LState) int {
+		if sys.netConnection != nil {
+			sys.netConnection.end()
+		}
+		return 0
+	}))
+
+	// sessionFrame() returns the number of the session's frame the menus run
+	// on now (-1 without a running session, or while a replay plays) and
+	// whether the menus advance in step with the other game: true while the
+	// session runs (or its replay plays), false once the other player has
+	// left it, or it has ended. Each refresh() of a running session is one
+	// frame of both games.
+	api.RawSetString("sessionFrame", l.NewFunction(func(l *lua.LState) int {
+		switch {
+		case sys.replayFile != nil:
+			l.Push(lua.LNumber(-1))
+			l.Push(lua.LTrue)
+		case sys.netConnection != nil && sys.netConnection.Running():
+			l.Push(lua.LNumber(sys.netConnection.time))
+			l.Push(lua.LTrue)
+		default:
+			l.Push(lua.LNumber(-1))
+			l.Push(lua.LFalse)
+		}
+		return 2
 	}))
 
 	api.RawSetString("rematchChoice", l.NewFunction(func(l *lua.LState) int {
@@ -1150,25 +1279,14 @@ func rpcAnswer(body []byte) any {
 	return v
 }
 
-// submitRankedClaim sends a ranked set's claim, again after a failure of the
-// connection or of the server (not after a refusal), three times at most.
-func submitRankedClaim(n *NakamaClient, claim NakamaRankedClaim) ([]byte, error) {
-	var body []byte
-	var err error
-	for attempt, wait := 0, 2*time.Second; attempt < 3; attempt, wait = attempt+1, wait*2 {
-		if attempt > 0 {
-			time.Sleep(wait)
-		}
-		body, err = n.SubmitRankedSet(context.Background(), claim)
-		switch nakamaRPCErrorCode(err) {
-		case 0, 10, 13, 14: // no answer, aborted, internal, unavailable
-			if err != nil {
-				continue
-			}
-		}
-		break
+// rankedSetID is the id of a ranked session's set (as ikemen_ranked.lua's
+// set_id): the session's match id for its first set, "<match id>#<n>" for
+// its n-th.
+func rankedSetID(matchID string, set int) string {
+	if strings.Contains(matchID, "#") || set <= 1 {
+		return matchID
 	}
-	return body, err
+	return matchID + "#" + strconv.Itoa(set)
 }
 
 func optionalLuaString(l *lua.LState, index int, fallback string) string {
