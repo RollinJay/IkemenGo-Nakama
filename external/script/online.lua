@@ -13,17 +13,47 @@ online.connectFrames = 60 * 15
 online.p2pFrames = 60 * 25
 online.sessionFrames = 60 * 15
 
--- Status and failure texts. A screenpack or module can replace them.
+-- Status and failure texts. A screenpack or module can replace them. In
+-- the texts of ranked levels, {name} stands for a value the server sends
+-- (nakama/README.md, Levels): the server writes the numbers, with thousands
+-- separators. The engine's default font for these screens (f-6x9) draws
+-- ASCII only, hence "->" for an arrow.
 online.text = {
 	connecting = 'Connecting to the online service...',
 	searching = 'Searching for an opponent...',
+	-- Under searching, in a ranked search: the player's level.
+	searching_level = '{label} {level}',
 	found = 'Opponent found. Opening a connection...',
 	session = 'Starting the netplay session...',
 	service = 'Could not reach the online service.',
 	match = 'Matchmaking stopped before an opponent was found.',
 	p2p = 'Could not open a connection to the other player.\nOne of the two networks may block direct connections.',
 	session_failed = 'The netplay session with the other player could not start.',
+	-- The screen after a ranked set: who won it and the player's level
+	-- before and after it, or that it is disputed.
+	ranked_won = 'You won the ranked set.',
+	ranked_lost = 'You lost the ranked set.',
+	ranked_level = '{label} {before} -> {after} ({change})',
+	ranked_disputed = 'Result disputed: a moderator will decide.',
+	ranked_waiting = 'The ranked set is over.\nWaiting for its result...',
 }
+
+-- How long the screen after a ranked set shows, in frames. In a netplay
+-- session both games show it for exactly this long: their menus run in
+-- lockstep, so its length cannot depend on when the result arrives.
+online.rankedResultFrames = 60 * 4
+
+-- text with each {name} replaced by values[name] ({name} stays when values
+-- has no such value).
+function online.f_fill(text, values)
+	return (string.gsub(text or '', '{([%w_]+)}', function(name)
+		local v = values[name]
+		if v == nil then
+			return nil
+		end
+		return tostring(v)
+	end))
+end
 
 -- True while a Nakama netplay session owns the P2P socket and the match.
 -- start.f_leaveOnlineSession leaves both alone until online.f_leave runs.
@@ -43,6 +73,47 @@ end
 -- nakama.status(), or a disconnected status when Nakama is unavailable.
 function online.f_status()
 	return status()
+end
+
+-- The player's rating for a ranked search (the answer of ikemen_get_rating:
+-- rating, level, level_text, label), asked for when the player queues.
+local searchMode = nil
+local searchRating = nil
+local ratingRequest = 0
+
+-- The text of a status key, with the player's level under "searching" in a
+-- ranked search once the server has sent it.
+function online.f_statusText(key)
+	local text = online.text[key] or tostring(key)
+	if key == 'searching' and searchMode == 'ranked' and type(searchRating) == 'table' and searchRating.level_text ~= nil then
+		text = text .. '\n' .. online.f_fill(online.text.searching_level, {label = searchRating.label or '', level = searchRating.level_text})
+	end
+	return text
+end
+
+-- Asks the server for the player's rating and level, for the ranked search
+-- screen (the "rating" event brings it).
+local function requestRating()
+	searchRating = nil
+	if nakama == nil or nakama.getRating == nil then
+		return
+	end
+	ratingRequest = ratingRequest + 1
+	local request = ratingRequest
+	nakama.on('rating', function(_, ev)
+		if request ~= ratingRequest then
+			return
+		end
+		if ev.error ~= nil or type(ev.payload) ~= 'table' then
+			print('Ranked rating: ' .. tostring(ev.error))
+			return
+		end
+		searchRating = ev.payload
+		if searchRating.level_text ~= nil then
+			print('Ranked search: ' .. online.f_fill(online.text.searching_level, {label = searchRating.label or '', level = searchRating.level_text}))
+		end
+	end, 'online')
+	pcall(nakama.getRating)
 end
 
 -- Draws the "connecting" overlay used by Host Game / Join Game when a
@@ -94,7 +165,7 @@ local function wait(key, frames, interactive, step, draw)
 				return stop
 			end
 		else
-			drawStatus(online.text[key])
+			drawStatus(online.f_statusText(key))
 		end
 		n = n + 1
 	end
@@ -152,6 +223,10 @@ end
 function online.f_findMatch(mode, interactive)
 	online.f_leave()
 	nakama.clearError()
+	searchMode = mode or 'unranked'
+	if searchMode == 'ranked' then
+		requestRating()
+	end
 	local ok = pcall(nakama.matchmake, mode or 'unranked')
 	if not ok then
 		return false
@@ -313,6 +388,96 @@ if nakama ~= nil and nakama.on ~= nil then
 			print('Ranked set claim: ' .. tostring(ev.payload.status))
 		end
 	end, 'online')
+end
+
+-- The results of ranked sets the server sent (its notifications
+-- ikemen_ranked_settled and ikemen_ranked_disputed, nakama/README.md,
+-- Levels), by set ID: {subject, content}.
+local rankedResults = {}
+
+-- The ID of the ranked set being played, or just decided: the session's
+-- match ID for its first set, "<match ID>#<n>" for its n-th.
+function online.f_rankedSetId()
+	if nakama == nil or nakama.rankedSet == nil then
+		return ''
+	end
+	local rs = nakama.rankedSet()
+	local id = tostring(rs.match_id or '')
+	if id == '' and nakama.currentMatch ~= nil then
+		id = nakama.currentMatch()
+	end
+	local n = tonumber(rs.set) or 1
+	if id ~= '' and n > 1 and not string.find(id, '#', 1, true) then
+		id = id .. '#' .. n
+	end
+	return id
+end
+
+-- The text of a ranked set's result, or nil while it has not come.
+function online.f_rankedResultText(setId)
+	local r = rankedResults[setId or '']
+	if r == nil then
+		return nil
+	end
+	if r.subject == 'ikemen_ranked_disputed' then
+		return online.text.ranked_disputed
+	end
+	local c = r.content
+	local head = c.won == true and online.text.ranked_won or online.text.ranked_lost
+	return head .. '\n' .. online.f_fill(online.text.ranked_level, {
+		label = c.label or '',
+		before = c.level_before_text or '',
+		after = c.level_text or '',
+		change = c.change_text or '',
+	})
+end
+
+if nakama ~= nil and nakama.on ~= nil then
+	nakama.on('notification', function(_, ev)
+		local p = ev.payload
+		if type(p) ~= 'table' or type(p.content) ~= 'table' then
+			return
+		end
+		if p.subject ~= 'ikemen_ranked_settled' and p.subject ~= 'ikemen_ranked_disputed' then
+			return
+		end
+		local id = tostring(p.content.match_id or '')
+		if id == '' then
+			return
+		end
+		rankedResults[id] = {subject = p.subject, content = p.content}
+		print('Ranked set ' .. id .. ': ' .. string.gsub(online.f_rankedResultText(id), '\n', ' '))
+	end, 'online')
+end
+
+-- The screen after a ranked set: its result once the server has sent it,
+-- shown for frames frames (on the "connecting" overlay, with a
+-- screenpack). With waitFrames, it first waits up to that many frames for
+-- the result: only outside a netplay session's menus (the command line),
+-- whose games must run the same frames. Returns true when the result came.
+function online.f_showRankedResult(setId, frames, waitFrames)
+	local function text()
+		return online.f_rankedResultText(setId) or online.text.ranked_waiting
+	end
+	for _ = 1, waitFrames or 0 do
+		if rankedResults[setId] ~= nil then
+			break
+		end
+		drawStatus(text())
+	end
+	for _ = 1, frames do
+		drawStatus(text())
+	end
+	return rankedResults[setId] ~= nil
+end
+
+-- After the last match of a ranked set in a netplay session (start.lua):
+-- the screen after the set, for online.rankedResultFrames.
+function online.f_rankedSetOver()
+	local id = online.f_rankedSetId()
+	if id ~= '' then
+		online.f_showRankedResult(id, online.rankedResultFrames)
+	end
 end
 
 -- The fight screen shows each player's online name in place of the name of

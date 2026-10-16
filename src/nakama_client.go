@@ -233,6 +233,66 @@ type NakamaRankedClaim struct {
 	Winner  string `json:"winner"`
 }
 
+// NakamaNotification is a notification the server sent (Nakama's realtime
+// "notifications" message). Content is its content decoded (Nakama sends it
+// as JSON text), with numbers as json.Number so that large ones stay exact;
+// nil when the text is not a JSON object, which ContentText then holds. The
+// ranked notifications are ikemen_ranked_settled and ikemen_ranked_disputed
+// (nakama/README.md, Levels).
+type NakamaNotification struct {
+	ID          string         `json:"id"`
+	Subject     string         `json:"subject"`
+	ContentText string         `json:"content"`
+	Content     map[string]any `json:"-"`
+	Code        nakamaInt64    `json:"code"`
+	SenderID    string         `json:"sender_id"`
+	CreateTime  string         `json:"create_time"`
+	Persistent  bool           `json:"persistent"`
+}
+
+// parseNakamaNotifications reads the body of a realtime "notifications"
+// message: {"notifications": [...]}.
+func parseNakamaNotifications(body json.RawMessage) ([]NakamaNotification, error) {
+	var p struct {
+		Notifications []NakamaNotification `json:"notifications"`
+	}
+	if err := json.Unmarshal(body, &p); err != nil {
+		return nil, fmt.Errorf("decode nakama notifications: %w", err)
+	}
+	for i := range p.Notifications {
+		nt := &p.Notifications[i]
+		if nt.ContentText == "" {
+			continue
+		}
+		dec := json.NewDecoder(strings.NewReader(nt.ContentText))
+		dec.UseNumber()
+		var content map[string]any
+		if dec.Decode(&content) == nil {
+			nt.Content = content
+		}
+	}
+	return p.Notifications, nil
+}
+
+// luaPayload is the notification as the "notification" event's payload:
+// id, subject, code, content (the decoded table, or the text when it is not
+// a JSON object), sender_id, create_time and persistent.
+func (nt NakamaNotification) luaPayload() map[string]any {
+	var content any = nt.ContentText
+	if nt.Content != nil {
+		content = nt.Content
+	}
+	return map[string]any{
+		"id":          nt.ID,
+		"subject":     nt.Subject,
+		"code":        int64(nt.Code),
+		"content":     content,
+		"sender_id":   nt.SenderID,
+		"create_time": nt.CreateTime,
+		"persistent":  nt.Persistent,
+	}
+}
+
 // Replay streams kept: the streams of a Turns match (one per character
 // change) that a spectator plays one after another, and those before them.
 const nakamaReplayHistory = 16
@@ -1643,6 +1703,20 @@ func (n *NakamaClient) handleJSON(data []byte) {
 		var msg map[string]any
 		if json.Unmarshal(v, &msg) == nil {
 			n.emit(NakamaEvent{Type: "chat_message", ChannelMessage: msg, Raw: raw})
+		}
+		return
+	}
+	if v, ok := raw["notifications"]; ok {
+		// One "notification" event per notification, in the order sent.
+		// A notification the client cannot read is logged, not reported
+		// as the client's error: it says nothing about the connection.
+		list, err := parseNakamaNotifications(v)
+		if err != nil {
+			log.Printf("Nakama: %v", err)
+			return
+		}
+		for _, nt := range list {
+			n.emit(NakamaEvent{Type: "notification", Payload: nt.luaPayload(), Raw: raw})
 		}
 		return
 	}

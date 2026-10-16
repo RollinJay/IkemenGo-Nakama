@@ -16,6 +16,9 @@ start.onlineRematchSnapshot = nil
 start.onlineLastFightSnapshot = nil
 start.onlineP2PRequested = false
 start.onlineForfeitUserId = nil
+-- The winner (1 or 2, 0 for a draw) of a match that the online rematch
+-- choice ended once it was over (external/mods/ik_rematch.lua), or nil.
+start.onlineMatchWinner = nil
 
 local function onlineStunServers()
 	local stun = getCommandLineValue('-nakama-stun')
@@ -1841,6 +1844,14 @@ function start.f_game(common)
 	winner, start.challenger = game()
 	local forfeitUser = start.onlineForfeitUserId
 	start.onlineForfeitUserId = nil
+	-- The winner the ranked set records: a match that the online rematch
+	-- choice ended once it was over is over, though a rollback session
+	-- reports it as quit (-1).
+	local setWinner = winner
+	if setWinner == -1 and start.onlineMatchWinner ~= nil then
+		setWinner = start.onlineMatchWinner
+	end
+	start.onlineMatchWinner = nil
 	-- Ranked sets are maintained outside rollback state. A server-resolved forfeit
 	-- supersedes the gameplay winner and ends the current set immediately.
 	if forfeitUser ~= nil and forfeitUser ~= '' and nakama ~= nil and nakama.rankedSet ~= nil then
@@ -1867,7 +1878,7 @@ function start.f_game(common)
 	-- confirmed team before launchFight clears selection state, then record the
 	-- physical winner side. The saved selections follow player identity when the
 	-- next match swaps sides.
-	if not start.rankedSetFinished and winner >= 1 and winner <= 2 and nakama ~= nil and nakama.rankedSet ~= nil then
+	if not start.rankedSetFinished and setWinner >= 1 and setWinner <= 2 and nakama ~= nil and nakama.rankedSet ~= nil then
 		local rsBefore = nakama.rankedSet()
 		if rsBefore.active then
 			local carry = {}
@@ -1880,7 +1891,7 @@ function start.f_game(common)
 					numChars = ps.numChars,
 				}
 			end
-			local complete = nakama.rankedSetRecordMatch(winner)
+			local complete = nakama.rankedSetRecordMatch(setWinner)
 			rankedAfter = nakama.rankedSet()
 			if complete then
 				start.rankedCarry = nil
@@ -2644,6 +2655,11 @@ function launchFight(data)
 			break
 		end
 		start.f_game(common)
+		if start.rankedSetFinished and online ~= nil and online.f_rankedSetOver ~= nil then
+			-- The ranked set is over: its result and the player's new level
+			-- (online.lua), for the same number of frames in both games.
+			online.f_rankedSetOver()
+		end
 		clearColor(motif.selectbgdef.bgclearcolor[1], motif.selectbgdef.bgclearcolor[2], motif.selectbgdef.bgclearcolor[3])
 		if start.rankedSetFinished and start.onlineNextAction == nil then
 			start.rankedSetFinished = false

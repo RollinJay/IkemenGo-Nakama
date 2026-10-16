@@ -1216,10 +1216,16 @@ function main.f_commandLine()
 	if flags['-nakama-match'] ~= nil and nakama.rankedSet ~= nil and nakama.rankedSet().active then
 		-- A ranked quick match plays the set's first match: a set of more
 		-- matches (Netplay.Ranked.BestOf above 1) is left undecided. A
-		-- decided set is claimed with the server before quitting.
+		-- decided set is claimed with the server before quitting, and its
+		-- result (the player's level before and after it, or a dispute)
+		-- shown and printed when the server sends it, within 15 seconds.
 		if (winner == 1 or winner == 2) and nakama.rankedSetRecordMatch(winner) and online.f_submitRankedSet() then
+			local setId = online.f_rankedSetId()
 			local answer = online.f_waitRankedResult(60 * 15)
 			print('Ranked set: ' .. (type(answer) == 'table' and tostring(answer.status) or 'no answer'))
+			if type(answer) == 'table' and not online.f_showRankedResult(setId, online.rankedResultFrames, 60 * 15) then
+				print('Ranked set ' .. setId .. ': no result from the server yet')
+			end
 		end
 	end
 	if flags['-nakama-match'] ~= nil then

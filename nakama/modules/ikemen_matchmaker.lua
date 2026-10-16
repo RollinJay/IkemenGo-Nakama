@@ -1,5 +1,6 @@
 local nk = require("nakama")
 local ranked = require("ikemen_ranked")
+local rating = require("ikemen_rating")
 
 -- IKEMEN GO ranked/unranked matchmaking.
 --
@@ -7,39 +8,24 @@ local ranked = require("ikemen_ranked")
 -- processor/override hook; those are Go-runtime only). Compatibility buckets
 -- come from the client's "+properties.<key>:<value>" query clauses. For ranked
 -- tickets a realtime before-hook replaces the client-supplied Elo with the
--- stored rating and appends the allowed Elo window to the ticket query, so
--- the rating is never trusted from the client.
+-- stored rating (ikemen_rating.lua, which also sets the rating of a player
+-- who has none yet) and appends the allowed Elo window to the ticket query,
+-- so the rating is never trusted from the client.
 
+-- The Elo window of ranked tickets. The ratings themselves, and the rating
+-- a new player starts with, are ikemen_rating.lua's.
 local DEFAULTS = {
-    initial_rating = 1000,
     elo_range = 100,
     max_elo_range = 1000,
 }
 
 local GAME_CONFIG = {
     -- Example:
-    -- ["my_game"] = { initial_rating = 1000, elo_range = 100, max_elo_range = 400 },
+    -- ["my_game"] = { elo_range = 100, max_elo_range = 400 },
 }
 
 local function config_for(game)
     return GAME_CONFIG[game] or DEFAULTS
-end
-
-local function get_rating(user_id, game)
-    local cfg = config_for(game)
-    local records = nk.storage_read({{
-        collection = "ikemen_rating",
-        key = game,
-        user_id = user_id,
-    }})
-    if #records == 0 then
-        return cfg.initial_rating
-    end
-    local value = records[1].value
-    if type(value) == "table" and value.rating ~= nil then
-        return tonumber(value.rating) or cfg.initial_rating
-    end
-    return cfg.initial_rating
 end
 
 local function before_matchmaker_add(context, envelope)
@@ -55,16 +41,16 @@ local function before_matchmaker_add(context, envelope)
 
     local game = tostring(add.string_properties.game or "")
     local cfg = config_for(game)
-    local rating = math.floor(get_rating(context.user_id, game) + 0.5)
+    local elo = math.floor(rating.read_rating(context.user_id, game).rating + 0.5)
     local range = math.floor(tonumber(add.numeric_properties.elo_range) or cfg.elo_range)
     if range < 0 then range = 0 end
     if range > cfg.max_elo_range then range = cfg.max_elo_range end
 
     -- Server-authoritative values; the client's copies are overwritten.
-    add.numeric_properties.elo = rating
+    add.numeric_properties.elo = elo
     add.numeric_properties.elo_range = range
     add.query = string.format("%s +properties.elo:>=%d +properties.elo:<=%d",
-        tostring(add.query or ""), rating - range, rating + range)
+        tostring(add.query or ""), elo - range, elo + range)
     return envelope
 end
 

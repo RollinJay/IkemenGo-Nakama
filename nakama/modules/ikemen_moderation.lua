@@ -13,10 +13,14 @@ local rating = require("ikemen_rating")
 --   (default 20); cursor: the cursor of the previous page. Each set is the
 --   record as ikemen_ranked.lua describes it, with claims ({user_id,
 --   winner, at}), left_early (user ids) and replays ({user_id, bytes,
---   complete}) as lists in the players' order. Newest first; cursor is ""
+--   complete}) as lists in the players' order, each player with their
+--   current rating, level and level_text, and the set with its game's
+--   label (ikemen_levels.lua). Newest first; cursor is ""
 --   after the last page (a page can hold fewer than limit sets: one call
 --   reads at most 50 pages of the index). With match_id (a set id), the list
---   holds that set alone, whatever its status unless status is given.
+--   holds that set alone, whatever its status unless status is given. A set
+--   the list finds overdue (ikemen_ranked.timed_out) is written so, and when
+--   it becomes disputed, its players are told (ikemen_rating.lua).
 --
 -- ikemen_ranked_replay {match_id, user_id} -> {file_name, replay, user_id,
 --   complete, matches, bytes}
@@ -28,8 +32,9 @@ local rating = require("ikemen_rating")
 --
 -- ikemen_ranked_settle {match_id, winner | void = true, note} -> {status}
 --   Settles the set for winner (a player's user id), with the one rating
---   change and the settlement marker of a settlement by its players, or
---   voids it (no rating change). note is kept on the record (at most 500
+--   change, the settlement marker, the leaderboard entries and the
+--   notifications of a settlement by its players, or voids it (no rating
+--   change, no notification). note is kept on the record (at most 500
 --   characters). A set that is settled or void already is refused.
 --
 -- Errors: 3 INVALID_ARGUMENT, 5 NOT_FOUND (no such set, or no replay kept),
@@ -71,6 +76,40 @@ local function decode(payload)
     return data
 end
 
+-- Adds each player's current rating, level and level_text, and the game's
+-- label, to the sets of a list (public_set records). One storage read.
+local function add_levels(context, sets)
+    local reads = {}
+    for _, set in ipairs(sets) do
+        for _, p in ipairs(set.players) do
+            if p.user_id ~= nil and p.user_id ~= "" and set.game ~= "" then
+                reads[#reads + 1] = { collection = "ikemen_rating", key = set.game, user_id = p.user_id }
+            end
+        end
+    end
+    local found = {}
+    if #reads > 0 then
+        for _, o in ipairs(nk.storage_read(reads)) do
+            if type(o.value) == "table" and tonumber(o.value.rating) ~= nil then
+                found[o.key .. "\n" .. o.user_id] = tonumber(o.value.rating)
+            end
+        end
+    end
+    for _, set in ipairs(sets) do
+        local initial = rating.config_for(set.game).initial_rating
+        for _, p in ipairs(set.players) do
+            p.rating = found[tostring(set.game) .. "\n" .. tostring(p.user_id)] or initial
+            local level = rating.level_fields(context, set.game, p.rating, {})
+            p.level, p.level_text = level.level, level.level_text
+            set.label = level.label
+        end
+        if set.label == nil then
+            set.label = rating.level_fields(context, set.game, initial, {}).label
+        end
+    end
+    return sets
+end
+
 local function ranked_list(context, payload)
     server_only(context)
     local data = decode(payload)
@@ -88,11 +127,18 @@ local function ranked_list(context, payload)
     local now = ranked.now()
     if data.match_id ~= nil then
         local id = tostring(data.match_id)
-        local value = ranked.update_set(id, function(v) return ranked.timed_out(context, v, now) end)
+        local wrote = false
+        local value = ranked.update_set(id, function(v)
+            wrote = ranked.timed_out(context, v, now)
+            return wrote
+        end)
+        if value ~= nil and wrote and value.status == "disputed" then
+            rating.notify_disputed(context, value)
+        end
         if value ~= nil and (data.status == nil or status == "all" or value.status == status) then
             sets[1] = ranked.public_set(value)
         end
-        return ranked.encode({ sets = sets, cursor = "" })
+        return ranked.encode({ sets = add_levels(context, sets), cursor = "" })
     end
     -- The index lists the sets newest first; a page of it names the sets
     -- to read.
@@ -122,8 +168,9 @@ local function ranked_list(context, payload)
             local o = by_key[r.key]
             if o ~= nil and type(o.value) == "table" then
                 local value = ranked.normalize(o.value)
-                if ranked.timed_out(context, value, now) then
-                    pcall(nk.storage_write, { ranked.set_object(value, o.version) })
+                if ranked.timed_out(context, value, now) and pcall(nk.storage_write, { ranked.set_object(value, o.version) })
+                    and value.status == "disputed" then
+                    rating.notify_disputed(context, value)
                 end
                 if status == "all" or value.status == status then
                     sets[#sets + 1] = ranked.public_set(value)
@@ -133,7 +180,7 @@ local function ranked_list(context, payload)
         cursor = next_cursor or ""
         pages = pages + 1
     until #sets >= limit or cursor == "" or pages >= LIST_PAGES
-    return ranked.encode({ sets = sets, cursor = cursor })
+    return ranked.encode({ sets = add_levels(context, sets), cursor = cursor })
 end
 
 local function ranked_replay(context, payload)
@@ -230,7 +277,7 @@ local function ranked_settle(context, payload)
             if ranked.player_index(value, winner) == nil then
                 error({ "winner must be the user id of one of the set's players", 3 })
             end
-            local result = rating.settle_set(value, version, winner, "moderator")
+            local result = rating.settle_set(context, value, version, winner, "moderator")
             if result == true then
                 return nk.json_encode({ status = "settled", match_id = id, winner = winner })
             end

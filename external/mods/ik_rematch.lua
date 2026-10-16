@@ -412,6 +412,10 @@ function ik_rematch.runOnline()
 	if online.decision ~= nil then
 		onlineApplyDecision()
 		if online.applied then
+			-- endMatch() below makes a rollback session report the match as
+			-- quit (game() returns -1), so start.f_game takes the winner of a
+			-- match that is over from here (0 for a draw).
+			start.onlineMatchWinner = matchOver() and tonumber(getWinnerTeam()) or nil
 			for i = 1, 2 do
 				player(i)
 				mapSet('ik_rematch_on', 0, 'set')

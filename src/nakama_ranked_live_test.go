@@ -1005,6 +1005,21 @@ func TestNakamaLive_RankedTimeouts(t *testing.T) {
 	if s := rankedSet(t, left.matchID); s["status"] != "disputed" || s["reason"] != "claim_timeout" || len(s["left_early"].([]any)) != 1 {
 		t.Fatalf("set without claims, left during its match: %v", s)
 	}
+	// The players of the sets that became disputed are told (when the late
+	// claim, or the moderators' list, found them overdue); those of the void
+	// set are not.
+	for _, p := range []*rankedPairing{one, left} {
+		for _, rec := range []*evRecorder{p.recA, p.recB} {
+			if c := waitNotification(t, rec, "ikemen_ranked_disputed", p.matchID); c["reason"] != "claim_timeout" {
+				t.Fatalf("dispute notice %v", c)
+			}
+		}
+	}
+	for _, rec := range []*evRecorder{none.recA, none.recB} {
+		if n := rankedNotifications(rec, none.matchID); len(n) != 0 {
+			t.Fatalf("a void set sent %v", n)
+		}
+	}
 	// Replays are kept for 0.0001 days (8.6 seconds).
 	time.Sleep(6 * time.Second)
 	_, err = serverRPC(t, "ikemen_ranked_replay", map[string]any{"match_id": one.matchID})

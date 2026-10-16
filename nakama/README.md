@@ -1,6 +1,6 @@
 # IKEMEN GO Nakama Matchmaking Layer
 
-This integration adds an engine-side Nakama client, Lua bindings, ranked/unranked matchmaking, authoritative 8-player lobbies with screenpack-configurable lobby screens, online names chosen in the game and shown on the fight screen, chat access, Elo ratings changed once per ranked set when both players' claims of its winner agree (with both players' replays of the set kept on the server for its moderators), NAT-discovery/hole-punching primitives, rollback-resolved replay streaming, which lets lobby members watch the match being played, and match replays, which save online matches (and, optionally, local ones) with their description and the players' accounts.
+This integration adds an engine-side Nakama client, Lua bindings, ranked/unranked matchmaking, authoritative 8-player lobbies with screenpack-configurable lobby screens, online names chosen in the game and shown on the fight screen, chat access, Elo ratings changed once per ranked set when both players' claims of its winner agree (with both players' replays of the set kept on the server for its moderators) and shown as levels that each server sets, with a leaderboard per game, NAT-discovery/hole-punching primitives, rollback-resolved replay streaming, which lets lobby members watch the match being played, and match replays, which save online matches (and, optionally, local ones) with their description and the players' accounts.
 
 ## Runtime model
 
@@ -11,6 +11,7 @@ Nakama
   ├─ authentication and online names
   ├─ ranked / unranked matchmaking
   ├─ Elo storage, ranked sets and their replays (for moderators)
+  ├─ levels, leaderboards and ranked notifications
   ├─ authoritative lobbies (up to 8 players)
   ├─ lobby discovery and room IDs
   ├─ chat
@@ -201,6 +202,10 @@ nakama.on("match_joined", function(event, data) end)
 nakama.on("chat_message", function(event, data) end)
 nakama.on("replay_chunk", function(event, data) end)
 nakama.on("p2p_connected", function(event, data) end)
+-- A notification from the server: data.payload has id, subject, code,
+-- content (decoded: a table, or the text when it is not JSON), sender_id,
+-- create_time and persistent. The ranked ones are described under Levels.
+nakama.on("notification", function(event, data) end)
 
 nakama.matchmake("ranked", 1000, 100)
 nakama.matchmake("unranked")
@@ -237,6 +242,9 @@ local rs = nakama.rankedSet()
 nakama.rankedSetRecordMatch(winner_side)   -- true when the match decides the set
 nakama.submitRankedSet()
 nakama.submitResult(match_id, opponent_user_id, "my_game", 1, replay_hash)
+-- The player's rating and level for a game (the profile's game by
+-- default): emits "rating" with ikemen_get_rating's answer (see Levels).
+nakama.getRating()
 
 -- Online names (see Online names).
 nakama.getAccount()
@@ -311,7 +319,7 @@ Play Another Set  both players must choose it -> reset the current set and retur
 Exit              either player chooses it -> both leave the online session
 ```
 
-The set result is tracked separately from GGPO rollback state. When a set has been decided, by its last match or by a forfeit, each player's game claims its winner with the server, which changes the two players' ratings once both claims agree (see [Ranked sets](#ranked-sets)). Starting another set resets the score and physical side assignment while retaining the same two matched players and negotiated ranked rules; the server records it as the session's next set. A new set does not carry forward winner-selection locks from the previous set.
+The set result is tracked separately from GGPO rollback state. The choices end the match once it is over; a rollback session reports a match ended that way as quit, so the game takes the match's winner when the choice is applied (`external/mods/ik_rematch.lua`) and records it in the set. When a set has been decided, by its last match or by a forfeit, each player's game claims its winner with the server, which changes the two players' ratings once both claims agree (see [Ranked sets](#ranked-sets)), and both games show the screen after the set (see [Online sessions](#online-sessions)) before they go on. Starting another set resets the score and physical side assignment while retaining the same two matched players and negotiated ranked rules; the server records it as the session's next set. A new set does not carry forward winner-selection locks from the previous set.
 
 The Nakama coordination match is retained between rounds; only the GGPO gameplay session is replaced. The P2P socket is also retained: each GGPO session opens a new channel on it and closes only that channel.
 
@@ -343,6 +351,8 @@ This starts IPv4 host/server-reflexive candidate gathering and UDP hole punching
 3. `nakama.enterNetPlay()` starts the netplay session over the P2P socket. The first user in the matchmaker's result hosts; Nakama sends the same order to both players.
 4. From `connected()` on, the flow is the one Host Game and Join Game use: `synchronize()`, then the netplay menu. When the session ends, the player leaves the match and the P2P socket closes.
 
+In a ranked search, the searching screen also shows the player's level (`Power level 9,001`, see [Levels](#levels)), which the game asks the server for when the player queues. After the last match of each ranked set, a screen shows the set's result for four seconds: who won it and the player's level before and after it (`Power level 9,001 -> 10,840 (+1,839)`), or that the result is disputed. Both games show that screen for the same number of frames, whenever the result arrives, since their menus run in lockstep; a result that arrives later is printed only. The texts are `online.text` entries of `external/script/online.lua`, which a screenpack or module can replace; the engine's default font for these screens (`f-6x9`) draws ASCII only, hence `->` for the arrow.
+
 A screenpack adds the entry points as title menu items (the third one opens the lobby screens, see [Lobbies](#lobbies)):
 
 ```ini
@@ -351,7 +361,7 @@ menu.itemname.menunetwork.onlineranked = RANKED MATCH (ONLINE)
 menu.itemname.menunetwork.onlinelobby = ONLINE LOBBIES
 ```
 
-For testing, `-nakama-match unranked` (or `ranked`) with the quick-VS options (`-p1`, `-p2`, `-s`) does the same as `-ip`, with the opponent found by matchmaking. `-nakama-stun host:port,...` overrides the STUN list. A ranked quick match plays one match, the first of its set: with `Netplay.Ranked.BestOf = 1` that match decides the set, and the game claims the set's winner with the server and waits up to 15 seconds for the answer before it quits. A longer set is not claimed: the player who quits first while the other is still in the session is noted as having left early, and once `IKEMEN_RANKED_CLAIM_MINUTES` have passed the set is disputed (`claim_timeout`), so it shows in the moderators' list (see [Ranked sets](#ranked-sets)).
+For testing, `-nakama-match unranked` (or `ranked`) with the quick-VS options (`-p1`, `-p2`, `-s`) does the same as `-ip`, with the opponent found by matchmaking. `-nakama-stun host:port,...` overrides the STUN list. A ranked quick match plays one match, the first of its set: with `Netplay.Ranked.BestOf = 1` that match decides the set, and the game claims the set's winner with the server, waits up to 15 seconds for the answer, then up to 15 seconds more for the set's result (the notification of [Levels](#levels)), which it prints (`Ranked set <set ID>: You won the ranked set. Power level 9,001 -> 10,840 (+1,839)`) and, with `-loadmotif`, shows on the screen for four seconds, before it quits. A longer set is not claimed: the player who quits first while the other is still in the session is noted as having left early, and once `IKEMEN_RANKED_CLAIM_MINUTES` have passed the set is disputed (`claim_timeout`), so it shows in the moderators' list (see [Ranked sets](#ranked-sets)).
 
 Lua API used by the flow, also used by the lobby screens:
 
@@ -410,7 +420,7 @@ When a set has been decided, by its last match or by a forfeit, each player's ga
 {"match_id": "<the session's match ID>", "set": 1, "winner": "<the winner's user ID>"}
 ```
 
-The answer is `{accepted, settled, status, match_id}`, with the caller's `rating` and `opponent_rating` once the set is settled. The game tries the claim up to three times, again only after a connection failure or an answer of code 10, 13 or 14. The server accepts a claim only for a set it recorded, from one of the set's two players, while the set is open, and refuses the others with these Nakama error codes:
+The answer is `{accepted, settled, status, match_id}`, with the caller's `rating`, `level`, `level_text` and the game's `label`, and the opponent's `opponent_rating`, `opponent_level` and `opponent_level_text`, once the set is settled (see [Levels](#levels); a claim sent again after the set was settled gets the caller's alone). The game tries the claim up to three times, again only after a connection failure or an answer of code 10, 13 or 14. The server accepts a claim only for a set it recorded, from one of the set's two players, while the set is open, and refuses the others with these Nakama error codes:
 
 | Code | Refused |
 |---|---|
@@ -421,9 +431,9 @@ The answer is `{accepted, settled, status, match_id}`, with the caller's `rating
 | 10 `ABORTED` | The set's record kept changing meanwhile; the claim can be sent again. |
 | 16 `UNAUTHENTICATED` | No player's session. |
 
-A claim sent again with the same winner is answered as the first was. When both claims name the same winner, the set settles: one storage transaction writes a settlement marker (`ikemen_settlement/<set ID>`, only if it does not exist yet), both players' new Elo ratings and the set's record, so claims sent at the same time, or a claim and a moderator's settlement at the same time, change the ratings once. When the claims differ, the set is disputed. The second claim is due within `IKEMEN_RANKED_CLAIM_MINUTES` (15 by default) of the set's end; the server checks this when it next reads the set (for a claim or for the moderators' list), and a set whose session never reported its end (the server stopped meanwhile) times out 24 hours after it was created.
+A claim sent again with the same winner is answered as the first was. When both claims name the same winner, the set settles: one storage transaction writes a settlement marker (`ikemen_settlement/<set ID>`, only if it does not exist yet), both players' new Elo ratings and the set's record, so claims sent at the same time, or a claim and a moderator's settlement at the same time, change the ratings once. Then the server writes both players' entries on the game's leaderboard and sends each player a notification with their level before and after the set (see [Levels](#levels)); neither can undo the settlement, and their failures are logged. When the claims differ, the set is disputed, and both players are told so. The second claim is due within `IKEMEN_RANKED_CLAIM_MINUTES` (15 by default) of the set's end; the server checks this when it next reads the set (for a claim or for the moderators' list), and a set whose session never reported its end (the server stopped meanwhile) times out 24 hours after it was created.
 
-The ratings are Elo ratings per game (`ikemen_rating/<game>`, one record per player): 1000 to start with, a K-factor of 32 and a scale of 400 (`GAME_CONFIG` in `ikemen_rating.lua` changes them per game). `games`, `wins` and `losses` count sets. The matchmaker pairs ranked players by the rating stored on the server, not by the one the client sends.
+The ratings are Elo ratings per game (`ikemen_rating/<game>`, one record per player): 1000 to start with, a K-factor of 32 and a scale of 400 (`GAME_CONFIG` in `ikemen_rating.lua` changes them per game; the matchmaker reads the ratings with the same settings). `games`, `wins` and `losses` count sets. The matchmaker pairs ranked players by the rating stored on the server, not by the one the client sends. Players see a level computed from their rating, which each server sets (see [Levels](#levels)).
 
 The first version's fields still work: `result` (1: the caller won, 0: the caller lost) in place of `winner`, `opponent_id` and `game` (checked against the set when given) and `replay_hash` (claims whose hashes differ disagree).
 
@@ -444,6 +454,8 @@ The ranked settings are Nakama runtime environment values (`runtime.env` in Naka
 | `IKEMEN_RANKED_CLAIM_MINUTES` | 15 | Minutes after the set's end within which the second claim must come; later, the set is disputed (or void when nobody claimed). |
 | `IKEMEN_RANKED_REPLAY_DAYS` | 30 | Days a replay is kept. 0 keeps none: the sessions do not keep the streams. |
 | `IKEMEN_RANKED_REPLAY_MAX_BYTES` | 16777216 | The most bytes of stream messages kept per player and set. |
+
+The levels that players see for their ratings are another runtime environment value, `IKEMEN_LEVELS` (see [Level settings](#level-settings)).
 
 ### Storage
 
@@ -472,7 +484,8 @@ With `unwrap`, the request body is the payload and the answer is the RPC's JSON 
 
 - `status`: `disputed` (the default), `open`, `settled`, `void` or `all`. `limit`: 1 to 100 sets (20 by default). `cursor`: the `cursor` of the previous answer, for the next page; it is `""` after the last page. A page can hold fewer than `limit` sets before the last page (one call reads at most 50 pages of the index).
 - `match_id`, a set ID: the list holds that set alone (or nothing), whatever its status unless `status` is given.
-- Newest first. Each set: `match_id` (the set ID, which the other RPCs take), `session` (the session's match ID), `set` (its number in the session), `game`, `build`, `best_of`, `status`, `reason`, `players` (`[{user_id, username}]`, in the matchmaker's order), `claims` (`[{user_id, winner, at}]`), `left_early` (user IDs), `replays` (`[{user_id, bytes, complete}]`), `played`, `created`, `ended`, `decided` (when the status last changed), `winner`, `settled_by` and `note`. Times are Unix times in seconds; `ended`, `decided`, `winner` and `settled_by` are left out until they apply.
+- A set whose second claim is overdue is marked disputed (`claim_timeout`) or void when the list reads it (see [Claims and ratings](#claims-and-ratings)); its players are told of a dispute then (see [Levels](#levels)).
+- Newest first. Each set: `match_id` (the set ID, which the other RPCs take), `session` (the session's match ID), `set` (its number in the session), `game`, `build`, `best_of`, `status`, `reason`, `players` (`[{user_id, username, rating, level, level_text}]`, in the matchmaker's order, with each player's current rating and level), `label` (the name of the game's level), `claims` (`[{user_id, winner, at}]`), `left_early` (user IDs), `replays` (`[{user_id, bytes, complete}]`), `played`, `created`, `ended`, `decided` (when the status last changed), `winner`, `settled_by` and `note`. Times are Unix times in seconds; `ended`, `decided`, `winner` and `settled_by` are left out until they apply.
 
 **`ikemen_ranked_replay`** `{match_id, user_id}` → `{file_name, replay, user_id, complete, matches, bytes}`
 
@@ -481,7 +494,7 @@ With `unwrap`, the request body is the payload and the answer is the RPC's JSON 
 
 **`ikemen_ranked_settle`** `{match_id, winner, void, note}` → `{status, match_id, winner}`
 
-- Either `winner`, the user ID of one of the set's players, which settles the set for that player with the same rating change and settlement marker as the players' claims, or `void: true`, which voids it without a rating change. `note` (optional, at most 500 characters) is kept on the record.
+- Either `winner`, the user ID of one of the set's players, which settles the set for that player with the same rating change, settlement marker, leaderboard entries and notifications as the players' claims, or `void: true`, which voids it without a rating change or a notification. `note` (optional, at most 500 characters) is kept on the record.
 - `status` is `settled` or `void`. A set that is settled or void already is refused (code 9); an open or disputed set can be decided.
 
 ### Watching a ranked set's replay
@@ -494,6 +507,128 @@ For example, with `curl` and `jq`:
 curl -s "http://127.0.0.1:7350/v2/rpc/ikemen_ranked_replay?http_key=<key>&unwrap" -d '{"match_id": "<set ID>"}' > answer.json
 jq -r .replay answer.json | base64 -d > "save/replays/$(jq -r .file_name answer.json)"
 ```
+
+## Levels
+
+Each player keeps an ordinary Elo rating per game (see [Claims and ratings](#claims-and-ratings)): it starts at 1000, the matchmaker pairs ranked players by it, and each ranked set changes it, by 16 between two players of the same rating. What players see is a level computed from it, which each server's creator sets: for example, a community where every new player has a power level of 9,001 and the best players reach the billions. Without settings, the level is the Elo rating itself, labelled `Rating`, as servers showed before.
+
+### The formula
+
+```text
+level = start × (top ÷ start) ^ ((Elo − 1000) ÷ 1000)
+```
+
+`start` is the level of a new player, whose rating is 1000 (with another starting rating in `GAME_CONFIG`, the formula measures from that one), and `top` the level of a player 1000 Elo above a new one, which in a large community is the very top. Each step of Elo multiplies the level by the same factor, so a level is always positive, however low the rating. Levels are rounded to whole numbers, at least 1 and at most 9,000,000,000,000,000: up to there, the server's numbers (64-bit floating point) hold every whole number exactly. The settings only map ratings to levels: changing them changes every player's level at once, and no stored rating.
+
+With `start` 9001 and `top` 1,000,000,000:
+
+| Elo | Level |
+|---|---|
+| 0 | 1 |
+| 600 | 86 |
+| 984 (a new player who lost a set to another) | 7,474 |
+| 1000 (a new player) | 9,001 |
+| 1016 (a new player who won a set against another) | 10,840 |
+| 1100 | 28,765 |
+| 1500 | 3,000,167 |
+| 2000 | 1,000,000,000 |
+| 2200 | 10,212,729,937 |
+
+### Level settings
+
+The levels are set by `IKEMEN_LEVELS`, a runtime environment value like the [ranked settings](#ranked-settings), whose value is a JSON object:
+
+```json
+{
+  "default": {"start": 9001, "top": 1000000000, "label": "Power level"},
+  "games": {
+    "my_other_game": {"start": 100, "top": 10000, "label": "Rank"},
+    "my_third_game": {"label": "Score"}
+  }
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `default` | The levels of every game without an entry of its own. Without it, the plain Elo ratings, labelled `Rating`. |
+| `games` | Entries of their own, by game ID: the `game` of the game's server profile (see [Shipped client server profiles](#shipped-client-server-profiles)), which the game sends in its tickets. A game ID has 1 to 114 bytes, so that the game's leaderboard ID (see [Leaderboards](#leaderboards)) fits in Nakama's 128. |
+| `start`, `top` | Both, or neither. `start` is a number of at least 1, `top` a number more than `start` and at most 9000000000000000. A game's entry without them takes the default's. |
+| `label` | The name of the number, as players see it before the level: 1 to 32 characters, none of them a control character (surrounding spaces are removed). A game's entry without one takes the default's, and the default's is `Rating`. |
+
+Each field is optional, and any other field is an error. In Nakama's YAML configuration file, the value goes in single quotes:
+
+```yaml
+runtime:
+  env:
+    - 'IKEMEN_LEVELS={"default": {"start": 9001, "top": 1000000000, "label": "Power level"}}'
+```
+
+A single quote inside the value is written twice, as YAML requires: a label `Saiyan's power` is written `"label": "Saiyan''s power"`. A single quote written once ends the value early, and Nakama does not start (`Could not parse config file`).
+
+The server reads the value when it starts, and logs the levels in effect:
+
+```text
+ikemen levels: levels are start 9001, top 1000000000, labelled "Power level"; game "my_other_game": start 100, top 10000, labelled "Rank"; game "my_third_game": start 9001, top 1000000000, labelled "Score"
+```
+
+A value that is not valid is logged as an error, with what is wrong, and the server shows the plain Elo ratings for every game:
+
+```text
+ikemen levels: IKEMEN_LEVELS is not valid (default: top must be more than start): levels are the plain Elo ratings, labelled "Rating", for every game
+```
+
+### Where players see them
+
+The server writes each level as text too (`level_text`), with thousands separators (`9,001`), so that every client shows the same text; levels reach billions and more, past what a 32-bit integer holds, and a client that reads them as numbers needs 64-bit ones. IKEMEN GO shows the player's level while it searches for a ranked match, and the set's result after each ranked set (see [Online sessions](#online-sessions)). Each game's leaderboard lists the players by rating, with their levels, for a launcher to show (Nakama Matchmaker's does).
+
+These answers carry the levels:
+
+- **`ikemen_get_rating`** `{game}` → `{rating, games, wins, losses, level, level_text, label}`: the caller's Elo `rating`, the ranked sets they played, won and lost, their `level` as a number and as text, and the `label` of the game's number. A player without a rating has the rating new players start with. When the caller has played a ranked set and their leaderboard entry is missing or older than their rating (a rating from before the leaderboards, or a write that failed), it writes the entry. A payload without `game` is refused with code 3.
+- The answer to a claim, once the set is settled (see [Claims and ratings](#claims-and-ratings)).
+- The moderators' list of sets, with each player's current level (see [Moderator RPCs](#moderator-rpcs)).
+
+### Leaderboards
+
+Each game has a leaderboard: the Nakama leaderboard `ikemen_rating.<game ID>`, created when the game's first ranked set settles. It is authoritative: only the server writes it, and Nakama refuses players' writes and deletes (code 7). A player's record has their rating times 1000, rounded to a whole number (at least 0), as its score and the sets they won as its subscore, highest score first, so that the order follows the levels, which come from the exact rating; its metadata holds the rating itself, `wins`, `losses` and `games`. When a set settles, the server writes both players' records. A player whose rating dates from before the leaderboards appears after their next set, or when their game next asks for their rating (`ikemen_get_rating`, which IKEMEN GO calls when the player queues for a ranked match). Levels are computed when the leaderboard is read.
+
+**`ikemen_leaderboard`** `{game, limit, cursor}` → `{label, records, cursor, mine}`
+
+Called with a player's session, or server to server with the runtime HTTP key, like the [moderator RPCs](#moderator-rpcs).
+
+- `game`: the game ID. `limit`: 1 to 100 records (20 by default). `cursor`: the `cursor` of the previous answer, for the next page; it is `""` after the last page.
+- `records`: `[{rank, user_id, name, level, level_text, wins, losses}]`, highest rating first, `rank` counting from 1. `name` is the player's online name (see [Online names](#online-names)): the account's display name, or its username until the player chooses a name, at most 16 characters.
+- `mine`: the caller's own record, with its rank, whichever page is asked for; left out when the caller has no record, or the call has no player's session.
+- `label`: the name of the game's number. A game none of whose sets has settled has no records.
+- Errors: code 3 `INVALID_ARGUMENT` for no `game`, a game ID over 114 bytes, or a `limit` out of range.
+
+```text
+curl "http://127.0.0.1:7350/v2/rpc/ikemen_leaderboard?http_key=<runtime.http_key>&unwrap" -d '{"game": "my_game", "limit": 2}'
+```
+
+```json
+{"label": "Power level", "cursor": "<the next page's cursor>",
+ "records": [{"rank": 1, "user_id": "<user ID>", "name": "KAI", "level": 12943, "level_text": "12,943", "wins": 2, "losses": 0},
+             {"rank": 2, "user_id": "<user ID>", "name": "ElPeleador", "level": 9153, "level_text": "9,153", "wins": 1, "losses": 1}]}
+```
+
+### Notifications
+
+When a set settles, by its players' claims or by a moderator, the server sends each of its two players a Nakama notification with their level before and after the set. When a set becomes disputed, it tells both players that a moderator will decide; that moderator's settlement then sends the settled notification. A void set sends nothing. The notifications are persistent: a player who was not connected finds them in Nakama's notification list (`GET /v2/notification`). IKEMEN GO receives them as the `notification` event (see [Lua API](#lua-api)).
+
+| Subject | Code | Content |
+|---|---|---|
+| `ikemen_ranked_settled` | 4101 | `match_id` (the set ID), `session` (the session's match ID), `set` (its number in the session), `game`, `won` (whether this player won the set), `settled_by` (`players` or `moderator`), `label`, `rating_before`, `rating`, `level_before`, `level_before_text`, `level`, `level_text`, `change` (`level` − `level_before`), `change_text` (with its sign: `+1,839`, `-1,527`, `+0`), `wins` and `losses` (the player's sets, this one included). |
+| `ikemen_ranked_disputed` | 4102 | `match_id`, `session`, `set`, `game` and `reason`: `claims_disagree` or `replay_hash_disagree` (the claims disagree), or `claim_timeout` (the second claim did not come in time, which the server finds when it next reads the set, see [Claims and ratings](#claims-and-ratings)). |
+
+For example, the winner of a first set between two new players, on a server with the settings above:
+
+```json
+{"match_id": "<set ID>", "session": "<set ID>", "set": 1, "game": "my_game", "won": true, "settled_by": "players",
+ "label": "Power level", "rating_before": 1000, "rating": 1016, "level_before": 9001, "level_before_text": "9,001",
+ "level": 10840, "level_text": "10,840", "change": 1839, "change_text": "+1,839", "wins": 1, "losses": 0}
+```
+
+The leaderboard entries and the notifications follow the settlement's storage transaction and cannot undo it: when one fails, the server logs the failure, and the settlement stands.
 
 ## Online names
 
@@ -747,13 +882,14 @@ Commands (`nakama.lobbySend(kind, fields)`):
 
 ## Server modules
 
-The runtime entrypoint is `nakama/modules/main.lua`. Install all eight files into Nakama's runtime module path:
+The runtime entrypoint is `nakama/modules/main.lua`. Install all nine files into Nakama's runtime module path:
 
 - `main.lua` — loads the supporting modules. Lua match handlers are resolved by module name through `nk.match_create("ikemen_session", ...)`; the Lua runtime has no `register_match`.
-- `ikemen_matchmaker.lua` — uses Nakama's own matchmaker. Buckets come from the client's `+properties.*` query clauses; a `MatchmakerAdd` realtime before-hook replaces the ranked ticket's Elo with the stored rating and appends the Elo window to the query. It creates an `ikemen_session` match for each pair, and records a ranked session's first set (see [Ranked sets](#ranked-sets)).
+- `ikemen_matchmaker.lua` — uses Nakama's own matchmaker. Buckets come from the client's `+properties.*` query clauses; a `MatchmakerAdd` realtime before-hook replaces the ranked ticket's Elo with the stored rating (read by `ikemen_rating.lua`, with its settings) and appends the Elo window to the query. It creates an `ikemen_session` match for each pair, and records a ranked session's first set (see [Ranked sets](#ranked-sets)).
 - `ikemen_session.lua` — Nakama coordination match for matched players, signaling, and replay chunks; it does not simulate the fight. In a ranked session it records the next sets, notes a player who leaves before a set is decided, and keeps both players' replay streams, which it stores for moderators.
 - `ikemen_lobby.lua` — authoritative lobbies of up to 8 members (see [Lobbies](#lobbies)): membership, settings, ready states, pairing and tournament scheduling, results, chat, room IDs, connection types and direct round trips, and the relay of the match being played to its spectators, with the catch-up for late ones; it delivers P2P signals only to the member they name. Its RPCs are `ikemen_lobby_create` (`{settings, game, build}` → `{match_id, code}`) and `ikemen_lobby_find` (`{code}` → `{match_id, code}`). Room IDs are stored as system-owned objects in the `ikemen_lobby_codes` collection and deleted when the lobby ends.
-- `ikemen_rating.lua` — per-game Elo storage, and the `ikemen_submit_result` RPC, which takes the players' claims of a ranked set's winner and settles the set once (see [Claims and ratings](#claims-and-ratings)); `ikemen_get_rating` (`{game}` → `{rating, games, wins, losses}`) reads the caller's rating.
+- `ikemen_rating.lua` — per-game Elo storage, and the `ikemen_submit_result` RPC, which takes the players' claims of a ranked set's winner and settles the set once (see [Claims and ratings](#claims-and-ratings)), then writes the players' leaderboard entries and sends their notifications; `ikemen_get_rating` (`{game}` → `{rating, games, wins, losses, level, level_text, label}`) reads the caller's rating, and `ikemen_leaderboard` a game's leaderboard (see [Levels](#levels)).
+- `ikemen_levels.lua` — the levels players see for their ratings, from `IKEMEN_LEVELS` (see [Levels](#levels)), used by the rating module; it registers nothing itself, and logs the levels in effect when the server starts.
 - `ikemen_ranked.lua` — the ranked sets' records and their replays, shared by the modules above and the next one; it registers nothing itself.
 - `ikemen_moderation.lua` — the moderator RPCs `ikemen_ranked_list`, `ikemen_ranked_replay` and `ikemen_ranked_settle`, called with the runtime HTTP key (see [Moderator RPCs](#moderator-rpcs)).
 - `ikemen_account.lua` — the `ikemen_account_name` RPC (`{name}` → `{display_name}`), which sets the player's online name, a before-hook that applies the same rules to Nakama's account update, and before-hooks that keep a username Nakama would refuse from failing a sign-in (see [Online names](#online-names)).
@@ -764,7 +900,7 @@ The matchmaker reads Elo from server-side storage. The client-supplied `elo` fie
 
 Ratings change only when both players of a recorded ranked set claim the same winner, or a moderator settles the set. It is not an anti-cheat system. Settlement writes a system-owned `ikemen_settlement/<set ID>` marker with version `"*"` (insert-if-absent) in the same storage transaction as both rating updates and the set's record, so retries and simultaneous claims settle a set once.
 
-Nakama lets every signed-in player write and delete storage objects of their own, in any collection, through its storage API. The ranked records are system-owned and the modules read only those, so a player's own objects in their collections change nothing. A player's rating, though, is the player's own object (which only the server writes): on a server that does not refuse players' storage writes, a player who has no rating yet for a game could write one. Nakama Matchmaker's community module refuses players' writes and deletes in every `ikemen_` collection; a server that runs these modules without it needs such a before-hook on `WriteStorageObjects` and `DeleteStorageObjects` (Nakama keeps one before-hook per API, so only one module can register each).
+Nakama lets every signed-in player write and delete storage objects of their own, in any collection, through its storage API. The ranked records are system-owned and the modules read only those, so a player's own objects in their collections change nothing. A player's rating, though, is the player's own object (which only the server writes): on a server that does not refuse players' storage writes, a player who has no rating yet for a game could write one, which the game's leaderboard would then show. The leaderboards themselves are authoritative: Nakama refuses players' writes to them. Nakama Matchmaker's community module refuses players' writes and deletes in every `ikemen_` collection; a server that runs these modules without it needs such a before-hook on `WriteStorageObjects` and `DeleteStorageObjects` (Nakama keeps one before-hook per API, so only one module can register each).
 
 ### Required Nakama settings
 
@@ -774,7 +910,7 @@ Nakama lets every signed-in player write and delete storage objects of their own
 | `matchmaker.rev_precision` | `true` (recommended) | Enforces both tickets' Elo windows instead of only the searching ticket's. |
 | `runtime.http_key` | A secret of the server's own | The moderator RPCs accept calls made with it (see [Moderator RPCs](#moderator-rpcs)); Nakama's default, `defaulthttpkey`, is public. |
 
-The ranked sets' time limits and replay retention are runtime environment values (see [Ranked settings](#ranked-settings)).
+The ranked sets' time limits and replay retention are runtime environment values (see [Ranked settings](#ranked-settings)), and so are the levels (see [Level settings](#level-settings)).
 
 The client refreshes its session token before HTTP calls, so the 60-second default `session.token_expiry_sec` is supported. The session and lobby handlers end when their last member leaves, and after 60 seconds when nobody joins them.
 
@@ -797,6 +933,7 @@ Implemented in this tree:
 - Ranked/unranked matchmaker tickets.
 - Automatic join of the Nakama coordination match after matchmaking.
 - Ranked sets: the server records each set of a ranked session, accepts one claim of its winner from each of its two players, changes the ratings once per set when the claims agree, and keeps both players' replays of the set for its moderators, who list the sets, export and watch the replays, and settle or void sets (see [Ranked sets](#ranked-sets)).
+- Levels for the ratings, set per server and per game (`IKEMEN_LEVELS`), a leaderboard per game, and a notification of each ranked set's result, which the game shows while it searches for a ranked match and after each set (see [Levels](#levels)).
 - Authoritative lobby creation/listing and up-to-8 lobby state.
 - Lobby ready states, queue and winner-stays rotation, round-robin and bracket tournaments, host settings and actions, room IDs and private lobbies, and lobby chat.
 - Lobby screens (lobby search, lobby settings and the lobby room, with states before, during and between matches) configured by the screenpack's `[Lobby Info]` and `[LobbyBgDef]`, and lobby matches played over the P2P netplay session.
