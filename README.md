@@ -22,7 +22,7 @@ Online play needs a Nakama server running this fork's server modules (`nakama/mo
 
 [Nakama Matchmaker](https://github.com/RollinJay/Nakama-Matchmaker) is a launcher for this fork and for the [mGBA](https://github.com/RollinJay/mgba) and [melonDS](https://github.com/RollinJay/melonDS-test) forks, which also play online through Nakama. For an Ikemen GO game, its **Play online** starts this fork signed in as the launcher's player, and its **Leaderboard** shows the game's leaderboard. It can also run a community server, set up with this fork's server modules ([docs/hosting.md](https://github.com/RollinJay/Nakama-Matchmaker/blob/main/docs/hosting.md)); a server with these modules also serves the launcher and the mGBA fork.
 
-- **Downloads:** the [nightly](https://github.com/RollinJay/IkemenGo-Nakama/releases/tag/nightly) pre-release, rebuilt after each push to `main`.
+- **Downloads:** the [nightly](https://github.com/RollinJay/IkemenGo-Nakama/releases/tag/nightly) pre-release, rebuilt at 8 PM Pacific time on each night after new commits to `main`.
 - **Details:** [nakama/README.md](nakama/README.md) describes the online features, the server modules and their settings, and the menu items; [nakama/lobby-screenpack.md](nakama/lobby-screenpack.md) describes the lobby screens and how a screenpack styles them.
 - **License:** unchanged, MIT (see [License](#license)).
 
@@ -36,7 +36,7 @@ Refer to [our wiki](https://github.com/ikemen-engine/Ikemen-GO/wiki) to see a co
 ## Installing
 Ready-to-use builds are available in the [releases section](https://github.com/ikemen-engine/Ikemen-GO/releases). Stable releases use tags such as `v1.0.0`, while release candidates use tags such as `v1.0.0-rc.1` and are marked as pre-releases. [Nightly builds](https://github.com/ikemen-engine/Ikemen-GO/releases/tag/nightly) are updated after each commit to `develop` and may be less stable.
 
-This fork's own builds are on its [releases page](https://github.com/RollinJay/IkemenGo-Nakama/releases): the [nightly](https://github.com/RollinJay/IkemenGo-Nakama/releases/tag/nightly) pre-release, rebuilt after each push to `main`, for Windows, Linux, macOS and Android. The links above lead to upstream's builds, which do not have the fork's online play.
+This fork's own builds are on its [releases page](https://github.com/RollinJay/IkemenGo-Nakama/releases): the [nightly](https://github.com/RollinJay/IkemenGo-Nakama/releases/tag/nightly) pre-release, rebuilt at 8 PM Pacific time on each night after new commits to `main`, for Windows, Linux, macOS and Android. The links above lead to upstream's builds, which do not have the fork's online play.
 
 ### System requirements
 | Platform | Minimum |

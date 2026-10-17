@@ -1,8 +1,11 @@
 # Builds Windows, Linux, macOS and Android packages and publishes them as a
 # GitHub release.
 #
-#   - A push to main (the repository's default branch) or develop rebuilds the
-#     rolling "nightly" release.
+#   - Every night at 8 PM Pacific time (America/Los_Angeles, so it follows
+#     daylight saving time), main (the repository's default branch) rebuilds
+#     the rolling "nightly" release. The night is skipped when main has no
+#     commit since the last nightly (the commit the "nightly" tag points at)
+#     and that release exists. A push to develop also rebuilds it.
 #   - A push to ci-test rebuilds the rolling "ci-test" pre-release.
 #   - Run manually from another branch, it publishes a "branch-<name>"
 #     pre-release; with a tag (vX.Y.Z or vX.Y.Z-rc.N) from a release/X.Y
@@ -10,10 +13,13 @@
 #
 # Publishing uses the IKEMEN_TOKEN secret when the repository has one and the
 # workflow's own token otherwise. Setting the repository variable
-# BUILD_ANDROID to false skips the Android package on pushes.
+# BUILD_ANDROID to false skips the Android package on pushes and nightly runs.
 on:
+  schedule:
+    - cron: '0 20 * * *'
+      timezone: America/Los_Angeles
   push:
-    branches: [ main, develop, ci-test ]
+    branches: [ develop, ci-test ]
   workflow_dispatch:
     inputs:
       tag:
@@ -47,9 +53,50 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  check:
+    name: check for new commits
+    if: ${{ github.actor != 'dependabot[bot]' }}
+    runs-on: ubuntu-latest
+    outputs:
+      build: ${{ steps.decide.outputs.build }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Decide whether to build
+        id: decide
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" != schedule ]; then
+            echo "Started by $EVENT_NAME: building $GITHUB_SHA."
+            echo "build=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # The commit the nightly tag points at; an annotated tag is peeled
+          # (its "^{}" line names the commit).
+          tagged=$(git ls-remote --tags origin 'refs/tags/nightly*' | awk '
+            $2 == "refs/tags/nightly"    { tag = $1 }
+            $2 == "refs/tags/nightly^{}" { peeled = $1 }
+            END { print (peeled != "" ? peeled : tag) }')
+          # A publish that failed after moving the tag leaves no release, or a draft.
+          released=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/nightly" \
+            --jq '(.draft | not) and (.assets | length > 0)' 2>/dev/null || true)
+          if [ "$tagged" = "$GITHUB_SHA" ] && [ "$released" = true ]; then
+            echo "The nightly tag already points at $GITHUB_SHA: nothing new to build."
+            echo "build=false" >> "$GITHUB_OUTPUT"
+          elif [ "$tagged" = "$GITHUB_SHA" ]; then
+            echo "The nightly tag points at $GITHUB_SHA, but its release is missing or empty. Building it again."
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Last nightly: ${tagged:-none}. Building $GITHUB_SHA."
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          fi
+
   tag:
     name: prepare tag
-    if: ${{ github.actor != 'dependabot[bot]' }}
+    needs: check
+    if: ${{ github.actor != 'dependabot[bot]' && needs.check.outputs.build == 'true' }}
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.meta.outputs.version }}
@@ -190,7 +237,8 @@ jobs:
 
   checks:
     name: checks
-    if: ${{ github.actor != 'dependabot[bot]' }}
+    needs: check
+    if: ${{ github.actor != 'dependabot[bot]' && needs.check.outputs.build == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -718,7 +766,7 @@ jobs:
         shell: bash
         run: |
           cat > nightly-release.md <<'EOF'
-          The nightly release is rebuilt after each push to the default branch and contains the newest engine and screenpack files. It is intended for testing and may contain regressions or changes not yet covered by the stable documentation.
+          The nightly release is rebuilt at 8 PM Pacific time on each night after new commits to the default branch and contains the newest engine and screenpack files. It is intended for testing and may contain regressions or changes not yet covered by the stable documentation.
           EOF
 
       - name: Prepare RC release notes
