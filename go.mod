@@ -22,10 +22,10 @@ require (
 	github.com/xtaci/kcp-go/v5 v5.6.72
 	github.com/yuin/gopher-lua v1.1.2
 	golang.org/x/exp v0.0.0-20220609121020-a51bd0440498
-	golang.org/x/image v0.46.0
+	golang.org/x/image v0.47.0
 	golang.org/x/mobile v0.0.0-20221110043201-43a038452099
-	golang.org/x/sys v0.48.0
-	golang.org/x/text v0.42.0
+	golang.org/x/sys v0.49.0
+	golang.org/x/text v0.43.0
 	gopkg.in/ini.v1 v1.67.3
 )
 
