@@ -285,7 +285,6 @@ jobs:
             mingw-w64-x86_64-nasm
             mingw-w64-x86_64-tools-git
             mingw-w64-x86_64-SDL2
-            mingw-w64-x86_64-yasm
             mingw-w64-x86_64-libxmp
       - name: Prepare Vulkan SDK
         uses: humbletim/setup-vulkan-sdk@v1.2.1
