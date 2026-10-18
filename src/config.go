@@ -235,6 +235,20 @@ type Config struct {
 		UiRepeatRate               int32   `ini:"UiRepeatRate" sync:"host"`
 		PauseExitDelay             int32   `ini:"PauseExitDelay" sync:"host"`
 	} `ini:"Input"`
+	// CBR AI settings, applied before each fight by external/mods/cbr.lua.
+	// None is synced: the CBR layer is inactive in netplay anyway.
+	CBR struct {
+		Enabled          bool `ini:"Enabled"`
+		DriveCPU         bool `ini:"DriveCPU"`
+		Execution        int  `ini:"Execution"`
+		Knowledge        int  `ini:"Knowledge"`
+		Ambition         int  `ini:"Ambition"`
+		RecordHumans     bool `ini:"RecordHumans"`
+		RecordCPU        bool `ini:"RecordCPU"`
+		RecordReplays    bool `ini:"RecordReplays"`
+		RecordInTraining bool `ini:"RecordInTraining"`
+		DriveInTraining  bool `ini:"DriveInTraining"`
+	} `ini:"CBR"`
 	Keys     map[string]*KeysProperties `ini:"map:^(?i)Keys_P[0-9]+$" lua:"Keys"`
 	Joystick map[string]*KeysProperties `ini:"map:^(?i)Joystick_P[0-9]+$" lua:"Joystick"`
 }
@@ -347,6 +361,11 @@ func (c *Config) initStruct() {
 func (c *Config) normalize() {
 	c.SetValueUpdate("Config.Players", int(Clamp(int32(c.Config.Players), 1, int32(MaxSimul)*2)))
 	c.SetValueUpdate("Options.Difficulty", int(Clamp(int32(c.Options.Difficulty), 1, 8)))
+	// CBR AI dials: execution 0 follows the CPU's AI level, ambition 0
+	// follows execution.
+	c.SetValueUpdate("CBR.Execution", int(Clamp(int32(c.CBR.Execution), 0, 8)))
+	c.SetValueUpdate("CBR.Knowledge", int(Clamp(int32(c.CBR.Knowledge), 1, 8)))
+	c.SetValueUpdate("CBR.Ambition", int(Clamp(int32(c.CBR.Ambition), 0, 8)))
 	c.SetValueUpdate("Options.GameSpeed", int(Clamp(int32(c.Options.GameSpeed), -9, 9)))
 	c.SetValueUpdate("Options.GameSpeedStep", int(Clamp(int32(c.Options.GameSpeedStep), 1, 60)))
 	c.SetValueUpdate("Options.Simul.Max", int(Clamp(int32(c.Options.Simul.Max), int32(c.Options.Simul.Min), int32(MaxSimul))))

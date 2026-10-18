@@ -214,6 +214,16 @@ options.t_itemname = {
 			modifyGameOption('Arcade.AI.RandomColor', false)
 			modifyGameOption('Arcade.AI.SurvivalColor', true)
 			modifyGameOption('Arcade.AI.Ramping', true)
+			modifyGameOption('CBR.Enabled', true)
+			--modifyGameOption('CBR.DriveCPU', true)
+			--modifyGameOption('CBR.Execution', 0)
+			modifyGameOption('CBR.Knowledge', 8)
+			--modifyGameOption('CBR.Ambition', 0)
+			--modifyGameOption('CBR.RecordHumans', true)
+			--modifyGameOption('CBR.RecordCPU', true)
+			modifyGameOption('CBR.RecordReplays', true)
+			--modifyGameOption('CBR.RecordInTraining', false)
+			modifyGameOption('CBR.DriveInTraining', false)
 			modifyGameOption('Netplay.RollbackNetcode', true)
 			modifyGameOption('Netplay.ListenPort', 7500)
 			modifyGameOption('Netplay.Rollback.Port', 7500)
@@ -708,6 +718,51 @@ options.t_itemname = {
 			sndPlay(motif.Snd, motif.option_info.cursor.move.snd[1], motif.option_info.cursor.move.snd[2])
 			modifyGameOption('Options.Turns.Max', gameOption('Options.Turns.Max') - 1)
 			t.items[item].vardisplay = options.t_vardisplay['maxturns']()
+			options.modified = true
+		end
+		return true
+	end,
+	--CBR AI (external/mods/cbr.lua applies the CBR settings from the next fight)
+	['cbrenabled'] = function(t, item, cursorPosY, moveTxt)
+		if getInput(-1, motif.option_info.menu.add.key, motif.option_info.menu.subtract.key, motif.option_info.menu.done.key) then
+			sndPlay(motif.Snd, motif.option_info.cursor.move.snd[1], motif.option_info.cursor.move.snd[2])
+			modifyGameOption('CBR.Enabled', not gameOption('CBR.Enabled'))
+			t.items[item].vardisplay = options.t_vardisplay['cbrenabled']()
+			options.modified = true
+		end
+		return true
+	end,
+	--CBR AI Knowledge
+	['cbrknowledge'] = function(t, item, cursorPosY, moveTxt)
+		if getInput(-1, motif.option_info.menu.add.key) and gameOption('CBR.Knowledge') < 8 then
+			sndPlay(motif.Snd, motif.option_info.cursor.move.snd[1], motif.option_info.cursor.move.snd[2])
+			modifyGameOption('CBR.Knowledge', gameOption('CBR.Knowledge') + 1)
+			t.items[item].vardisplay = options.t_vardisplay['cbrknowledge']()
+			options.modified = true
+		elseif getInput(-1, motif.option_info.menu.subtract.key) and gameOption('CBR.Knowledge') > 1 then
+			sndPlay(motif.Snd, motif.option_info.cursor.move.snd[1], motif.option_info.cursor.move.snd[2])
+			modifyGameOption('CBR.Knowledge', gameOption('CBR.Knowledge') - 1)
+			t.items[item].vardisplay = options.t_vardisplay['cbrknowledge']()
+			options.modified = true
+		end
+		return true
+	end,
+	--CBR AI Training Dummy (the CBR AI also plays the CPU-controlled dummy)
+	['cbrtraining'] = function(t, item, cursorPosY, moveTxt)
+		if getInput(-1, motif.option_info.menu.add.key, motif.option_info.menu.subtract.key, motif.option_info.menu.done.key) then
+			sndPlay(motif.Snd, motif.option_info.cursor.move.snd[1], motif.option_info.cursor.move.snd[2])
+			modifyGameOption('CBR.DriveInTraining', not gameOption('CBR.DriveInTraining'))
+			t.items[item].vardisplay = options.t_vardisplay['cbrtraining']()
+			options.modified = true
+		end
+		return true
+	end,
+	--CBR AI Learn From Replays
+	['cbrreplays'] = function(t, item, cursorPosY, moveTxt)
+		if getInput(-1, motif.option_info.menu.add.key, motif.option_info.menu.subtract.key, motif.option_info.menu.done.key) then
+			sndPlay(motif.Snd, motif.option_info.cursor.move.snd[1], motif.option_info.cursor.move.snd[2])
+			modifyGameOption('CBR.RecordReplays', not gameOption('CBR.RecordReplays'))
+			t.items[item].vardisplay = options.t_vardisplay['cbrreplays']()
 			options.modified = true
 		end
 		return true
@@ -1641,6 +1696,18 @@ options.t_vardisplay = {
 	end,
 	['bgmvolume'] = function()
 		return gameOption('Sound.BGMVolume') .. '%'
+	end,
+	['cbrenabled'] = function()
+		return options.f_boolDisplay(gameOption('CBR.Enabled'), motif.option_info.menu.valuename.enabled, motif.option_info.menu.valuename.disabled)
+	end,
+	['cbrknowledge'] = function()
+		return gameOption('CBR.Knowledge')
+	end,
+	['cbrreplays'] = function()
+		return options.f_boolDisplay(gameOption('CBR.RecordReplays'), motif.option_info.menu.valuename.enabled, motif.option_info.menu.valuename.disabled)
+	end,
+	['cbrtraining'] = function()
+		return options.f_boolDisplay(gameOption('CBR.DriveInTraining'), motif.option_info.menu.valuename.enabled, motif.option_info.menu.valuename.disabled)
 	end,
 	['credits'] = function()
 		return options.f_definedDisplay(gameOption('Options.Credits'), {[0] = motif.option_info.menu.valuename.disabled}, gameOption('Options.Credits'))
