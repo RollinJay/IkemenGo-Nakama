@@ -1,8 +1,9 @@
 package cbr
 
 // Weights are the similarity weights. The self, helper, enemy and
-// enemy-helper groups carry the defaults recovered from the original CBR
-// build; ally, clock, life-lead and power weights are additions.
+// enemy-helper groups carry the defaults recovered from KDing's original
+// CBR AI for IKEMEN GO (see the package doc); ally, clock, life-lead and
+// power weights are additions.
 //
 // The recovered roundState weight (100) was a hard filter written as a
 // weight and is implemented as a filter instead. The recovered unitOrder

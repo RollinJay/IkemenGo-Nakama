@@ -1,4 +1,9 @@
-// Package cbr implements case-based reasoning AI for IKEMEN GO.
+// Package cbr implements case-based reasoning (CBR) AI for IKEMEN GO.
+//
+// It is a reimplementation and refinement of the original CBR AI for
+// IKEMEN GO by KDing (https://github.com/KDing0), who makes CBR AIs for
+// many games. Comments in this package that mention the original build,
+// or values recovered from it, mean KDing's CBR AI.
 //
 // The package is engine-agnostic: it imports nothing from the engine and
 // sees the game only through Snapshot values that an adapter in the engine

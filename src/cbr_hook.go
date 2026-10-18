@@ -14,6 +14,9 @@ package main
 //   char.go    actionPrepare():   cbrMaskAILevel() after the AssertSpecial reset
 //
 // Everything is inert until a script enables it with cbrEnable(true).
+//
+// The CBR AI is based on KDing's original CBR AI for IKEMEN GO
+// (https://github.com/KDing0).
 
 import (
 	"fmt"
