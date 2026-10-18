@@ -3,7 +3,13 @@
 // reproduce, the character AI's direct state changes kept as hypotheses,
 // and routes found beyond human precedent.
 //
-//	go run ./src/cbr/cmd/cbrinspect save/cbr/local/Kung_Fu_Man.cbr
+//	go run ./src/cbr/cmd/cbrinspect save/cbr/local/kfm-16a05657.cbr
+//
+// A store's file name is the character's definition file name without its
+// extension, in lower case, with characters other than letters, digits, '-'
+// and '_' replaced by '_'; then '-' and a hash (32-bit FNV-1a, in
+// hexadecimal) of that file's path in lower case. The example is the store
+// of chars/kfm/kfm.def.
 package main
 
 import (
