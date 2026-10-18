@@ -1025,6 +1025,103 @@ function stage_android_apk_libs() {
 	cp -av "$REPO_ROOT/lib/"*.so* "$abi_dir/" 2>/dev/null || true
 }
 
+# Prints the files under the given folders of <dir>, one path per line, relative
+# to <dir>. In a git checkout only tracked files are listed, so build leftovers
+# and local files are not picked up; otherwise every file on disk is listed.
+function list_tree_files() {
+	local dir="$1"
+	shift
+	if [[ -e "$dir/.git" ]] && git -C "$dir" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+		git -C "$dir" ls-files -z -- "$@" | tr '\0' '\n'
+		return 0
+	fi
+	local sub
+	for sub in "$@"; do
+		if [[ -d "$dir/$sub" ]]; then
+			( cd "$dir" && find "$sub" -type f )
+		fi
+	done
+}
+
+# Prints the files the desktop release ships, one path per line (see "Bring in
+# runtime assets" in .github/workflows/releases.yml): the engine's data, font and
+# external folders, the screenpack's folders, and the files generated for both
+# (by ensure_android_runtime_assets, and LICENSES.txt in CI). ikemen-droid's
+# manifest.txt only knows upstream Ikemen GO's files, so without this the fork's
+# own scripts, mods, fonts and server list would be left out of the APK.
+function android_apk_extra_assets() {
+	list_tree_files "$REPO_ROOT" data font external
+	if [[ -n "$SCREENPACK_DIR" && -d "$SCREENPACK_DIR" ]]; then
+		list_tree_files "$SCREENPACK_DIR" chars data font sound stages video
+	fi
+	local f
+	for f in data/system.base.def external/gamecontrollerdb.txt LICENSES.txt README.md; do
+		if [[ -f "$REPO_ROOT/$f" ]]; then
+			printf '%s\n' "$f"
+		fi
+	done
+}
+
+# Drops, from the paths read on stdin, those that Android's packaging leaves out
+# of an APK by default (its ignoreAssetsPattern
+# "!.svn:!.git:!.ds_store:!*.scc:.*:<dir>_*:!CVS:!thumbs.db:!picasa.ini:!*~"):
+# any file or folder whose name starts with ".", folders whose name starts with
+# "_", names ending in "~" or ".scc", and CVS, thumbs.db and picasa.ini.
+function drop_android_ignored_assets() {
+	awk '{
+		path = $0
+		sub(/\/$/, "", path)
+		n = split(path, part, "/")
+		for (i = 1; i <= n; i++) {
+			name = part[i]
+			lower = tolower(name)
+			if (name ~ /^\./ || name ~ /~$/ || lower ~ /\.scc$/ || lower == "cvs" || lower == "thumbs.db" || lower == "picasa.ini") next
+			if ((i < n || $0 ~ /\/$/) && name ~ /^_/) next
+		}
+		print
+	}'
+}
+
+# Cleans up manifest lines read on stdin: trims surrounding whitespace (as the
+# app does), then drops empty lines, repeated paths and the paths Android's
+# packaging leaves out of the APK anyway, keeping the original order.
+function normalize_android_manifest() {
+	awk '{
+		gsub(/^[ \t\r]+|[ \t\r]+$/, "")
+		if ($0 == "" || seen[$0]++) next
+		print
+	}' | drop_android_ignored_assets
+}
+
+# Reads asset paths (relative to the APK's assets folder) on stdin and prints the
+# files in external/script that <manifest> does not list, plus any subfolder of
+# external/script. At every launch ikemen-droid compares each entry of the APK's
+# external/script folder with the copy on the device and re-extracts all assets
+# on a mismatch, but it only extracts files listed in manifest.txt. An unlisted
+# script never reaches the device and a subfolder never compares equal, so either
+# one would cause a full re-extraction on every launch. Dotfiles are ignored
+# because Android's packaging leaves them out of the APK.
+function android_apk_unlisted_scripts() {
+	local manifest="$1"
+	awk -v manifest="$manifest" '
+		BEGIN {
+			while ((getline line < manifest) > 0) {
+				gsub(/^[ \t\r]+|[ \t\r]+$/, "", line)
+				listed[line] = 1
+			}
+		}
+		index($0, "external/script/") == 1 {
+			rest = substr($0, length("external/script/") + 1)
+			if (rest == "" || rest ~ /^\./) next
+			if (index(rest, "/") > 0) {
+				sub(/\/.*$/, "/", rest)
+				if (!reported[rest]++) print "external/script/" rest
+			} else if (!(($0) in listed)) {
+				print
+			}
+		}'
+}
+
 function stage_android_apk_assets() {
 	local app_dir="$ANDROID_APK_DIR/app"
 	local assets_dir="$app_dir/src/main/assets"
@@ -1035,14 +1132,25 @@ function stage_android_apk_assets() {
 		exit 1
 	fi
 
+	# Add the files the desktop release ships that the upstream manifest lacks.
+	# Merging an already merged manifest (a reused local checkout) changes nothing.
+	echo "==> Adding the desktop release's files to $manifest"
+	# (echo: the upstream file may lack a final newline)
+	{ cat "$manifest"; echo; android_apk_extra_assets; } | normalize_android_manifest > "$manifest.tmp"
+	mv "$manifest.tmp" "$manifest"
+
 	echo "==> Staging assets into: $assets_dir (from $manifest)"
 	local screenpack="$SCREENPACK_DIR"
 	# Remove everything except manifest.txt so the APK content matches your engine tree
 	find "$assets_dir" -mindepth 1 -maxdepth 1 ! -name "manifest.txt" -exec rm -rf {} + 2>/dev/null || true
 
-	# manifest.txt is whitespace-separated (often a single long line)
-	local p src dst
-	while read -r p; do
+	# The app reads manifest.txt one path per line (surrounding whitespace trimmed).
+	# A line ending in "/" or naming a folder only makes the app create that folder
+	# on the device: files are extracted only when listed one by one. Entries that
+	# cannot be staged are left out of the rewritten manifest.
+	local p src dst kept="$manifest.tmp"
+	: > "$kept"
+	while IFS= read -r p; do
 		[[ -z "$p" ]] && continue
 		src="$REPO_ROOT/$p"
 		dst="$assets_dir/$p"
@@ -1058,16 +1166,109 @@ function stage_android_apk_assets() {
 		elif [[ -f "$src" ]]; then
 			mkdir -p "$(dirname "$dst")"
 			cp -a "$src" "$dst"
-		else
+		elif [[ "$p" != */ ]]; then
 			# If your tree doesn't include some optional paths from manifest, just warn.
-			echo "WARNING: Asset path missing in Ikemen-GO tree: $p" >&2
+			echo "WARNING: Asset path missing in Ikemen-GO tree, dropped from manifest.txt: $p" >&2
+			continue
 		fi
-	done < <(tr -s '[:space:]' '\n' < "$manifest")
+		# Folder lines ending in "/" are kept even when there is nothing to stage:
+		# they make the app create that folder on the device (for example sound/).
+		printf '%s\n' "$p" >> "$kept"
+	done < "$manifest"
+	mv "$kept" "$manifest"
+	echo "==> manifest.txt lists $(wc -l < "$manifest" | tr -d ' ') entries"
+
+	# The engine's own files must all be staged; stop here, before the long Gradle
+	# build, rather than in verify_android_apk_assets afterwards.
+	local missing
+	missing="$(list_tree_files "$REPO_ROOT" data font external | normalize_android_manifest \
+		| awk -v manifest="$manifest" 'BEGIN { while ((getline l < manifest) > 0) listed[l] = 1 } !($0 in listed)')"
+	if [[ -n "$missing" ]]; then
+		echo "ERROR: These engine files could not be staged (missing on disk?):" >&2
+		printf '%s\n' "$missing" | sed 's/^/  /' >&2
+		exit 1
+	fi
+
+	local unlisted=""
+	if [[ -d "$assets_dir/external/script" ]]; then
+		unlisted="$(cd "$assets_dir" && find external/script -type f | drop_android_ignored_assets | android_apk_unlisted_scripts "$manifest")"
+	fi
+	if [[ -n "$unlisted" ]]; then
+		echo "ERROR: These entries in $assets_dir/external/script are subfolders or not listed in manifest.txt." >&2
+		echo "       The app would never extract them and would re-extract all assets on every launch:" >&2
+		printf '%s\n' "$unlisted" | sed 's/^/  /' >&2
+		exit 1
+	fi
+}
+
+# Checks the built APK: every file the engine tree ships in data, font and
+# external must be in the APK's assets and listed in its manifest.txt (the app
+# extracts listed files only), every file the manifest lists must be in the APK,
+# and external/script must hold listed files only (see android_apk_unlisted_scripts).
+function verify_android_apk_assets() {
+	local apk="$1"
+	if ! command -v unzip >/dev/null 2>&1; then
+		echo "ERROR: unzip is required to check the assets in $apk" >&2
+		exit 1
+	fi
+
+	echo "==> Checking the assets in $apk"
+	local tmp
+	tmp="$(mktemp -d)"
+	# Every entry under assets/ in the APK, without that prefix
+	unzip -Z1 "$apk" | sed -n 's|^assets/||p' > "$tmp/apk.txt"
+	if ! grep -qx 'manifest.txt' "$tmp/apk.txt"; then
+		echo "ERROR: $apk has no assets/manifest.txt" >&2
+		rm -rf "$tmp"
+		exit 1
+	fi
+	unzip -p "$apk" assets/manifest.txt > "$tmp/manifest.txt"
+	list_tree_files "$REPO_ROOT" data font external | normalize_android_manifest > "$tmp/expected.txt"
+
+	awk -v apk="$tmp/apk.txt" -v manifest="$tmp/manifest.txt" '
+		BEGIN {
+			while ((getline line < apk) > 0) {
+				in_apk[line] = 1
+				# Also note every folder above the entry, for manifest lines naming a folder
+				while (sub(/\/[^\/]*$/, "", line)) apk_dir[line] = 1
+			}
+			while ((getline line < manifest) > 0) {
+				gsub(/^[ \t\r]+|[ \t\r]+$/, "", line)
+				if (line == "") continue
+				listed[line] = 1
+				if (line !~ /\/$/ && !(line in in_apk) && !(line in apk_dir))
+					print "listed in manifest.txt but not in the APK: " line
+			}
+		}
+		{
+			if (!($0 in in_apk)) print "missing from the APK: " $0
+			if (!($0 in listed)) print "not listed in manifest.txt: " $0
+		}' "$tmp/expected.txt" > "$tmp/problems.txt"
+	android_apk_unlisted_scripts "$tmp/manifest.txt" < "$tmp/apk.txt" \
+		| sed 's|^|subfolder or not listed in manifest.txt (re-extracts on every launch): |' >> "$tmp/problems.txt"
+
+	if [[ -s "$tmp/problems.txt" ]]; then
+		echo "ERROR: $apk does not ship the engine's assets correctly:" >&2
+		sed 's/^/  /' "$tmp/problems.txt" >&2
+		rm -rf "$tmp"
+		exit 1
+	fi
+	local expected_count manifest_count
+	expected_count="$(wc -l < "$tmp/expected.txt" | tr -d ' ')"
+	manifest_count="$(grep -c . "$tmp/manifest.txt" || true)"
+	rm -rf "$tmp"
+	echo "==> APK assets OK: all $expected_count engine files from data, font and external are in the APK and in manifest.txt ($manifest_count entries)"
 }
 
 function build_android_apk() {
 	[[ "$GOOS" != "android" ]] && return 0
 	[[ "$BUILD_ANDROID_APK" == "0" ]] && { echo "==> BUILD_ANDROID_APK=0: skipping APK build"; return 0; }
+
+	# Needed by verify_android_apk_assets once the APK is built; fail before the long build.
+	if ! command -v unzip >/dev/null 2>&1; then
+		echo "ERROR: unzip is required to check the APK's assets after the build. Install it (Debian/Ubuntu: sudo apt install unzip)." >&2
+		exit 1
+	fi
 
 	ensure_android_sdk_for_gradle
 	sync_android_apk_repo
@@ -1094,6 +1295,7 @@ function build_android_apk() {
 	fi
 	mkdir -p "$(dirname "$ANDROID_APK_OUT")"
 	cp -av "$apk_src" "$ANDROID_APK_OUT"
+	verify_android_apk_assets "$ANDROID_APK_OUT"
 
 	echo "==> APK ready: $ANDROID_APK_OUT"
 	popd >/dev/null
