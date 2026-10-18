@@ -224,6 +224,7 @@ options.t_itemname = {
 			modifyGameOption('CBR.RecordReplays', true)
 			--modifyGameOption('CBR.RecordInTraining', false)
 			modifyGameOption('CBR.DriveInTraining', false)
+			modifyGameOption('CBR.AskBeforeMode', true)
 			modifyGameOption('Netplay.RollbackNetcode', true)
 			modifyGameOption('Netplay.ListenPort', 7500)
 			modifyGameOption('Netplay.Rollback.Port', 7500)
@@ -763,6 +764,16 @@ options.t_itemname = {
 			sndPlay(motif.Snd, motif.option_info.cursor.move.snd[1], motif.option_info.cursor.move.snd[2])
 			modifyGameOption('CBR.RecordReplays', not gameOption('CBR.RecordReplays'))
 			t.items[item].vardisplay = options.t_vardisplay['cbrreplays']()
+			options.modified = true
+		end
+		return true
+	end,
+	--CBR AI Ask Before Modes (asks "Fight the CBR AI?" and "Train the CBR AI?" before modes with CPU opponents)
+	['cbraskmode'] = function(t, item, cursorPosY, moveTxt)
+		if getInput(-1, motif.option_info.menu.add.key, motif.option_info.menu.subtract.key, motif.option_info.menu.done.key) then
+			sndPlay(motif.Snd, motif.option_info.cursor.move.snd[1], motif.option_info.cursor.move.snd[2])
+			modifyGameOption('CBR.AskBeforeMode', not gameOption('CBR.AskBeforeMode'))
+			t.items[item].vardisplay = options.t_vardisplay['cbraskmode']()
 			options.modified = true
 		end
 		return true
@@ -1708,6 +1719,9 @@ options.t_vardisplay = {
 	end,
 	['cbrtraining'] = function()
 		return options.f_boolDisplay(gameOption('CBR.DriveInTraining'), motif.option_info.menu.valuename.enabled, motif.option_info.menu.valuename.disabled)
+	end,
+	['cbraskmode'] = function()
+		return options.f_boolDisplay(gameOption('CBR.AskBeforeMode'), motif.option_info.menu.valuename.enabled, motif.option_info.menu.valuename.disabled)
 	end,
 	['credits'] = function()
 		return options.f_definedDisplay(gameOption('Options.Credits'), {[0] = motif.option_info.menu.valuename.disabled}, gameOption('Options.Credits'))

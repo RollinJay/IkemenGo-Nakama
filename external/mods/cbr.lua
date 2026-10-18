@@ -1,12 +1,16 @@
--- CBR AI: applies the CBR settings before every fight.
+-- CBR AI: applies the CBR settings before every fight, and can ask before a
+-- mode whether to fight and train the CBR AI.
+-- Based on KDing's original CBR AI for IKEMEN GO (https://github.com/KDing0).
 --
--- Files in external/mods load automatically; renaming this file to -cbr.lua
--- (any name starting with '-') disables the mod entirely. Learned data is
--- saved per character under save/cbr.
+-- The CBR AI (case-based reasoning) learns from the fights it sees and plays
+-- CPU-controlled characters with what it learned; the engine side is the
+-- "CBR layer". Files in external/mods load automatically; renaming this file
+-- to -cbr.lua (any name starting with '-') disables the mod entirely. Learned
+-- data is saved per character under save/cbr.
 --
 -- The main settings are in Options > Game Settings > CBR AI Settings: CBR AI,
--- Knowledge, Training Dummy and Learn From Replays. All ten settings are in
--- the [CBR] section of save/config.ini:
+-- Knowledge, Training Dummy, Learn From Replays and Ask Before Modes. All
+-- eleven settings are in the [CBR] section of save/config.ini:
 --
 --   Enabled          turns the CBR layer on or off (CBR AI in the options).
 --   DriveCPU         CPU-controlled characters play with the CBR layer. Where
@@ -30,6 +34,8 @@
 --                    that everything works.
 --   DriveInTraining  also drive the training dummy when it is CPU-controlled
 --                    (Training Dummy in the options).
+--   AskBeforeMode    ask two questions before an offline mode with CPU
+--                    opponents (Ask Before Modes in the options; see below).
 --
 -- The settings are read again before every fight (the start.f_game hook), so
 -- a change applies from the next fight, without a restart. That covers fights
@@ -42,6 +48,22 @@
 -- fight directly instead of through start.f_game, so they skip this hook: they
 -- keep whatever CBR state the last fight applied, which is off when no fight
 -- has applied any yet.
+--
+-- The questions. With the CBR AI and AskBeforeMode on, picking an offline
+-- mode where people play against the CPU (arcade, team arcade, team co-op,
+-- survival, survival co-op, time attack, bonus games, quick match, story
+-- arcs) first asks "Fight the CBR AI?", then "Train the CBR AI?", on the
+-- menu's background and before character select. The cursor starts on Yes;
+-- up and down (or left and right) move it, a confirm button answers, and the
+-- menu's cancel button or Esc goes back to the main menu without starting
+-- the mode. The answers hold for the whole mode, continues included, until
+-- the player is back at the main menu: the first decides whether the CBR
+-- layer plays the CPU players (in place of DriveCPU), the second whether it
+-- learns from the fights (RecordHumans, RecordCPU and RecordReplays still
+-- choose whom it learns from). How well it plays stays as set in the options
+-- (Execution, Knowledge, Ambition). Nothing is asked in training, watch, the
+-- versus modes, netplay, online play or replays, or with AskBeforeMode off;
+-- the settings then apply as they are.
 
 -- Each setting: its name in cbrApply, its key in the [CBR] section, and the
 -- value used if the engine has no such key.
@@ -56,6 +78,7 @@ local t_settings = {
 	{'recordReplays', 'RecordReplays', true},
 	{'recordInTraining', 'RecordInTraining', false},
 	{'driveInTraining', 'DriveInTraining', false},
+	{'askBeforeMode', 'AskBeforeMode', true},
 }
 
 -- The current settings. gameOption raises an error for a key the engine does
@@ -74,6 +97,12 @@ local function cbrSettings()
 	return cfg
 end
 
+-- The answers to the questions for the mode being played, as
+-- {fight = true or false, train = true or false}. nil when nothing was
+-- asked (AskBeforeMode is off, or the mode does not ask), and once the
+-- player is back at the main menu.
+local answers = nil
+
 local function cbrApply()
 	local cfg = cbrSettings()
 	cbrEnable(cfg.enabled)
@@ -83,6 +112,12 @@ local function cbrApply()
 	local training = gameMode('training')
 	local record = (cfg.recordHumans or cfg.recordCPU) and (cfg.recordInTraining or not training)
 	local drive = cfg.driveCPU and (cfg.driveInTraining or not training)
+	-- The answers, while they hold, decide instead; whom it learns from still
+	-- follows the settings (cbrRecordWho).
+	if answers ~= nil then
+		record = answers.train
+		drive = answers.fight
+	end
 	cbrRecordWho(cfg.recordHumans, cfg.recordCPU, cfg.recordReplays)
 	for pn = 1, 8 do
 		cbrStop(pn)
@@ -96,3 +131,157 @@ local function cbrApply()
 end
 
 hook.add('start.f_game', 'cbr', cbrApply)
+
+-- Modes that never ask, whoever plays them: training has its own setting
+-- (Training Dummy), watch is CPU against CPU, the versus modes are people
+-- against people (challenger: a second player joining arcade mode), and the
+-- demo fights, the random test and a quick match from the command line
+-- start their fights without the menus.
+local t_noAsk = {
+	training = true,
+	watch = true,
+	versus = true,
+	versuscoop = true,
+	challenger = true,
+	demo = true,
+	randomtest = true,
+	quickvs = true,
+}
+
+-- Whether the mode about to start asks the questions: an offline mode (not
+-- netplay, online play or a replay) where one side is played by people and
+-- the other by the CPU (main.cpuSide, set by the mode's menu item).
+local function cbrShouldAsk(cfg)
+	if not cfg.enabled or not cfg.askBeforeMode then
+		return false
+	end
+	if connected() or main.replayActive or (replay ~= nil and replay.playing) then
+		return false
+	end
+	if online ~= nil and online.f_sessionActive ~= nil and online.f_sessionActive() then
+		return false
+	end
+	local mode = gameMode() or ''
+	if t_noAsk[mode] or mode:match('^netplay') then
+		return false
+	end
+	local cpu = main.cpuSide or {}
+	return (cpu[1] == true) ~= (cpu[2] == true)
+end
+
+-- A [Warning Info] text.<key>.text of the screenpack, or the fallback when
+-- it has none.
+local function warningText(key, fallback)
+	local t = motif.warning_info.text.text or {}
+	local v = t[key]
+	if v == nil or v == '' then
+		return fallback
+	end
+	return v
+end
+
+-- Asks a question and returns true (Yes), false (No) or nil when the player
+-- backs out. It looks like the warning screen ([Warning Info]: its overlay
+-- and text) on the menu's background, with Yes and No below as items in the
+-- menu's style, and uses the menu's keys and sounds. The menu state is a
+-- private table, so the main menu's own cursor stays where it was.
+-- first: fade in (the menu faded out before running the mode); last: fade
+-- out after the answer. Backing out always fades out, back to the menu.
+local function cbrAsk(question, first, last)
+	local sec = motif[main.group]
+	local bg = motif[main.background]
+	local valuename = motif.option_info.menu.valuename
+	local m = {menu = sec.menu}
+	local items = {
+		{itemname = 'yes', displayname = valuename.yes or 'Yes', paramname = 'yes'},
+		{itemname = 'no', displayname = valuename.no or 'No', paramname = 'no'},
+	}
+	local item, cursorPosY, moveTxt = 1, 1, 0
+	local textData = motif.warning_info.text.TextSpriteData
+	textImgReset(textData)
+	textImgSetText(textData, question)
+	local function draw()
+		clearColor(bg.bgclearcolor[1], bg.bgclearcolor[2], bg.bgclearcolor[3])
+		bgDraw(bg.BGDef, 0)
+		rectDraw(motif.warning_info.overlay.RectData)
+		textImgDraw(textData)
+		main.f_menuCommonDraw(items, item, cursorPosY, moveTxt, m, bg, true,
+			{skipBG0 = true, skipBG1 = true, skipTitle = true})
+		bgDraw(bg.BGDef, 1)
+		refresh()
+	end
+	resetKey()
+	esc(false)
+	if first then
+		fadeInInit(sec.fadein.FadeData)
+	end
+	local answer = nil
+	while true do
+		-- Each frame is drawn before the buttons are read, so the button that
+		-- led here, pressed on an earlier frame, does not answer as well.
+		draw()
+		if fadeActive() then
+			if esc() or getInput(-1, sec.menu.cancel.key) then
+				esc(false)
+				fadeSkip()
+			end
+		elseif esc() or getInput(-1, sec.menu.cancel.key) then
+			esc(false)
+			sndPlay(motif.Snd, sec.cancel.snd[1], sec.cancel.snd[2])
+			break
+		elseif getInput(-1, sec.menu.done.key) then
+			local snd = sec.cursor.done.snd.default
+			sndPlay(motif.Snd, snd[1], snd[2])
+			answer = items[item].itemname == 'yes'
+			break
+		else
+			cursorPosY, moveTxt, item = main.f_menuCommonCalc(items, item, cursorPosY, moveTxt, m, sec.cursor)
+		end
+	end
+	if answer == nil or last then
+		fadeOutInit(sec.fadeout.FadeData)
+		while fadeActive() do
+			draw()
+		end
+	end
+	-- The button that answered does not also work the next screen.
+	resetKey()
+	resetTokenGuard()
+	return answer
+end
+
+local function pack(...)
+	return {n = select('#', ...), ...}
+end
+
+-- The questions come before start.f_selectMode, which plays a mode from
+-- character select until the player is back at the main menu: each mode's
+-- menu item (main.t_itemname) returns it, and the menu runs it after its
+-- fade-out. The answers hold until it returns. A start.f_selectMode run
+-- inside another (none of the game's own modes does that) has answers of
+-- its own, and the outer run's come back after it.
+local selectMode = start.f_selectMode
+start.f_selectMode = function(...)
+	local outer = answers
+	answers = nil
+	if cbrShouldAsk(cbrSettings()) then
+		local fight = cbrAsk(warningText('cbrfight', 'Fight the CBR AI?'), true, false)
+		local train = nil
+		if fight ~= nil then
+			train = cbrAsk(warningText('cbrtrain', 'Train the CBR AI?'), false, true)
+		end
+		if train == nil then
+			-- Backed out: back to the menu without starting the mode, as
+			-- start.f_selectMode does when the player leaves character
+			-- select. The menu's music has kept playing.
+			answers = outer
+			bgReset(motif[main.background].BGDef)
+			fadeInInit(motif[main.group].fadein.FadeData)
+			return
+		end
+		answers = {fight = fight, train = train}
+	end
+	local ret = pack(selectMode(...))
+	answers = outer
+	return unpack(ret, 1, ret.n)
+end

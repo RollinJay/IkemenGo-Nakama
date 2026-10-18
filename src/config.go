@@ -248,6 +248,7 @@ type Config struct {
 		RecordReplays    bool `ini:"RecordReplays"`
 		RecordInTraining bool `ini:"RecordInTraining"`
 		DriveInTraining  bool `ini:"DriveInTraining"`
+		AskBeforeMode    bool `ini:"AskBeforeMode"`
 	} `ini:"CBR"`
 	Keys     map[string]*KeysProperties `ini:"map:^(?i)Keys_P[0-9]+$" lua:"Keys"`
 	Joystick map[string]*KeysProperties `ini:"map:^(?i)Joystick_P[0-9]+$" lua:"Joystick"`
