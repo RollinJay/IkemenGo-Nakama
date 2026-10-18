@@ -502,7 +502,64 @@ func (p *NakamaP2P) Close() {
 	})
 }
 
+// p2pRouteProbe is the address the fallback in localIPv4Addresses asks a
+// route for. 192.0.2.1 is reserved for documentation (TEST-NET-1, RFC 5737),
+// so it should not be in use on a real network and normally takes the default
+// route, which is the route traffic to STUN servers and peers takes too. No
+// packet is sent to it, and the port is not used.
+const p2pRouteProbe = "192.0.2.1:9"
+
+// p2pInterfaceAddresses lists this machine's IPv4 addresses from its network
+// interfaces, and p2pRouteAddress returns the local address the operating
+// system picks for traffic to the internet (tests replace both).
+var (
+	p2pInterfaceAddresses = interfaceIPv4Addresses
+	p2pRouteAddress       = routeIPv4Address
+)
+
+// localIPv4Addresses returns the addresses for host candidates. It lists the
+// network interfaces' addresses; when that fails or finds none, it falls back
+// to the address the operating system would send internet traffic from.
+// Android 11 and later do not let apps that target API level 30 or later
+// list interfaces: net.Interfaces fails with "netlinkrib: permission denied"
+// (golang/go#40569). When the fallback fails too, the result is what the
+// interface listing returned.
 func localIPv4Addresses() ([]net.IP, error) {
+	addresses, err := p2pInterfaceAddresses()
+	if err == nil && len(addresses) > 0 {
+		return addresses, nil
+	}
+	local, routeErr := p2pRouteAddress()
+	ip := netAddrIP(local)
+	if routeErr == nil && ip != nil {
+		ip = ip.To4()
+		// A peer cannot reach a loopback or unspecified (0.0.0.0) address.
+		if ip != nil && !ip.IsUnspecified() && !ip.IsLoopback() {
+			if err != nil {
+				log.Printf("P2P could not list network interfaces (%v); using the address %s instead", err, ip)
+			}
+			return []net.IP{ip}, nil
+		}
+	}
+	return addresses, err
+}
+
+// routeIPv4Address returns the local address of a UDP socket connected to
+// p2pRouteProbe. Connecting a UDP socket only makes the operating system
+// choose the route and the local address for it; no packet is sent, and it
+// needs no permission beyond network access.
+func routeIPv4Address() (net.Addr, error) {
+	conn, err := net.Dial("udp4", p2pRouteProbe)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+	return conn.LocalAddr(), nil
+}
+
+// interfaceIPv4Addresses returns the IPv4 addresses of the network interfaces
+// that are up, other than loopback, sorted.
+func interfaceIPv4Addresses() ([]net.IP, error) {
 	interfaces, err := net.Interfaces()
 	if err != nil {
 		return nil, err
