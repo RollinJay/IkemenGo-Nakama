@@ -33,12 +33,31 @@ import (
 // little about how it does when the CBR layer chooses it. A move with no
 // plays yet has proved nothing, so the CBR layer occasionally tries one
 // whose demonstrations beat the base AI (see Params.TakeoverExplore), and
-// only then does it start to take over with it.
+// only then does it start to take over with it. A few plays are noisy, so a
+// move that has been played but has not proved better yet is tried again the
+// same way until it has had a fair number of plays (see
+// Params.TakeoverRetryPlays).
+//
+// Both sides are measured per decision: each decision, the base AI's or a
+// move the CBR layer played, is credited with its share of the reward of the
+// exchange it led into: all of it, less a factor of ComboGamma for each move
+// the CBR layer played after it in the exchange, or none if it never led
+// into one. The base AI's own later decisions do not reduce the share (see
+// chain.split): it makes many more of them than the CBR layer, and counting
+// them would favour the CBR layer's moves. The take-over margin is set per
+// exchange instead, so it is scaled down by the share a decision in the
+// situation usually gets (see baselineShare) before it is compared with a
+// move's advantage. A margin of 0.03 is thus 3% of a life bar per exchange,
+// whether the decision is the one that lands the knockdown or a step in
+// neutral that seldom leads into an exchange.
 
-// BaselineStat is the base AI's decayed record in one situation.
+// BaselineStat is the base AI's decayed record in one situation: how many
+// results, their sum, and the sum of the shares of their exchanges' rewards
+// they were credited with (see baselineShare).
 type BaselineStat struct {
 	Trials   float32
 	ValueSum float32
+	Shares   float32
 }
 
 // Baseline keys come in three grains, marked in bits 20 and 21: a
@@ -51,15 +70,22 @@ const (
 	// The enemy's state type and the distance band, which the coarser
 	// situation leaves out.
 	baseNear uint64 = 0xff
+	// The character's own state type is kept in bits 15 to 17.
+	baseSelfShift = 15
 )
 
 // baselineKey identifies the situation of a decision for the baseline:
 // actionKey's description of the situation without the move (the enemy's
 // state type, the distance band, the exchange context and control), plus the
-// AI level the base AI plays at, which its strength depends on.
+// character's own state type and the AI level the base AI plays at. A move
+// says by itself whether it is played standing, crouching or in the air; the
+// situation has to say it once the move is left out, since what the base AI
+// does in the air is no measure of a ground move and the other way round.
+// The AI level matters because the base AI's strength depends on it.
 func baselineKey(f *Feat, ctrl bool, aiLevel float32) uint64 {
 	k := baseFine | uint64(f.Enemy.State&7)<<4 | distanceBand(f) |
-		uint64(exchangeContext(f))<<8 | aiBand(aiLevel)<<13
+		uint64(exchangeContext(f))<<8 | aiBand(aiLevel)<<13 |
+		uint64(f.Self.State&7)<<baseSelfShift
 	if ctrl {
 		k |= 1 << 11
 	}
@@ -78,7 +104,7 @@ func aiBand(level float32) uint64 {
 }
 
 // coarseKey is the coarser situation of a situation: its exchange context,
-// control and AI level band.
+// control, own state type and AI level band.
 func coarseKey(k uint64) uint64 { return k&^(baseGrain|baseNear) | baseCoarse }
 
 // decayed is the weight of n results in a row after recency decay, the most
@@ -90,9 +116,12 @@ func (p *Params) decayed(n float32) float32 {
 	return float32((1 - math.Pow(float64(p.Decay), float64(n))) / (1 - float64(p.Decay)))
 }
 
-// addBaseline records one result of the base AI in a situation, into the
-// situation, its coarser situation and the store-wide record.
-func (s *Store) addBaseline(p *Params, key uint64, r float32) {
+// addBaseline records one result r of the base AI in a situation, into the
+// situation, its coarser situation and the store-wide record. share is the
+// share of its exchange's reward the decision was credited with: 1, a factor
+// of ComboGamma less for each move the CBR layer played after it in the
+// exchange, 0 when it never led into one.
+func (s *Store) addBaseline(p *Params, key uint64, r, share float32) {
 	for _, k := range [...]uint64{key, coarseKey(key), baseAll} {
 		b := s.Baseline[k]
 		if b == nil {
@@ -101,6 +130,7 @@ func (s *Store) addBaseline(p *Params, key uint64, r float32) {
 		}
 		b.Trials = b.Trials*p.Decay + 1
 		b.ValueSum = b.ValueSum*p.Decay + r
+		b.Shares = b.Shares*p.Decay + share
 	}
 }
 
@@ -130,6 +160,20 @@ func (s *Store) baseline(p *Params, key uint64) (mean, trials float32) {
 	return mean, trials
 }
 
+// baselineShare returns the share of its exchange's reward a decision in a
+// situation is usually credited with (see addBaseline), from the base AI's
+// record and shrunk like its mean, starting from a whole exchange: with
+// little known about a situation, the margin stays at its full size.
+func (s *Store) baselineShare(p *Params, key uint64) float32 {
+	share := float32(1)
+	for _, k := range [...]uint64{baseAll, coarseKey(key), key} {
+		if b := s.Baseline[k]; b != nil && p.BaselineShrink+b.Trials > 0 {
+			share = (p.BaselineShrink*share + b.Shares) / (p.BaselineShrink + b.Trials)
+		}
+	}
+	return share
+}
+
 // applyPlayed records one result of the CBR layer's own play of an action.
 func (p *Params) applyPlayed(a *ActionStat, r float32) {
 	a.PTrials = a.PTrials*p.Decay + 1
@@ -150,13 +194,16 @@ func (p *Params) takeoverMargin(level int) float32 {
 
 // gate is the comparison with the base AI for one choice.
 type gate struct {
-	key     uint64 // the situation (see baselineKey)
-	explore bool   // an unproven move may be tried
-	yield   bool   // leave even a move that proved better to the base AI
+	key       uint64 // the situation (see baselineKey)
+	explore   bool   // a move not played often enough yet may be tried
+	promising bool   // such a move may be tried if it is promising (see promising)
+	retry     bool   // a move played a few times without proving better may be tried again
+	yield     bool   // leave even a move that proved better to the base AI
 	// Set by the choice: held when moves matched but none may take over, so
 	// the base AI keeps control; explored when the move chosen is an
-	// unproven one tried by exploration.
-	held, explored bool
+	// unproven one tried by exploration, and retried as well when it had
+	// been played before without proving better.
+	held, explored, retried bool
 }
 
 // Rejection reasons of the gate, counted by chooseWhy.
@@ -171,23 +218,30 @@ const (
 // gateFilter keeps the candidates that may take over from the base AI: the
 // moves the CBR layer has played often enough whose results beat the base
 // AI's by the margin. When none does and exploring is allowed, it keeps
-// instead the unproven moves that may be tried (see explorable).
+// instead the moves that may be tried to prove themselves (see explorable):
+// those not played often enough yet to have proved anything, or else, if
+// there are none, those played a few times whose results neither proved
+// better nor fell short of the base AI's by more than the margin, until they
+// have TakeoverRetryPlays plays.
 func (d *driver) gateFilter(picks []pick, g *gate, ambExp float64, rej func(string)) []pick {
 	p, st := d.p, d.st
 	b, n := st.baseline(p, g.key)
+	// The margin is per exchange and the results per decision, so it is
+	// scaled by the share of an exchange's reward a decision here gets.
+	margin := d.margin * st.baselineShare(p, g.key)
 	// Counts are decayed, so n results in a row add up to decayed(n), less a
 	// hair for rounding.
-	margin := d.margin
-	if n < p.decayed(p.BaselineMinTrials)-1e-3 {
+	known := n >= p.decayed(p.BaselineMinTrials)-1e-3
+	if !known {
 		margin *= 2
 	}
 	minPlays := p.decayed(p.TakeoverMinPlays) - 1e-3
-	var proven, untried []pick
+	retryPlays := p.decayed(p.TakeoverRetryPlays) - 1e-3
+	var proven, untried, again []pick
 	for _, pk := range picks {
 		c := pk.c
 		a := st.Actions[actionKey(c)]
-		switch {
-		case a != nil && a.PTrials >= minPlays:
+		if a != nil && a.PTrials >= minPlays {
 			adv := (a.PSum - a.PTrials*b) / (p.TakeoverShrink + a.PTrials)
 			if adv > 0 {
 				adv *= float32(math.Pow(float64(d.completion(c)), ambExp))
@@ -196,7 +250,14 @@ func (d *driver) gateFilter(picks []pick, g *gate, ambExp float64, rej func(stri
 				proven = append(proven, pk)
 				continue
 			}
-		case g.explore && explorable(c, b):
+			// Not proved better, but not clearly worse either: its plays so
+			// far are within the margin of the base AI's. A few plays are
+			// noisy, so it may be tried again.
+			if g.retry && a.PTrials < retryPlays && a.PSum/a.PTrials-b > -margin && explorable(c, b) {
+				again = append(again, pk)
+				continue
+			}
+		} else if g.explore && explorable(c, b) || g.promising && known && promising(c, b, margin) {
 			untried = append(untried, pk)
 			continue
 		}
@@ -212,8 +273,14 @@ func (d *driver) gateFilter(picks []pick, g *gate, ambExp float64, rej func(stri
 	case len(proven) > 0:
 		return proven
 	case len(untried) > 0:
+		for range again {
+			rej(RejNotBetter)
+		}
 		g.explored = true
 		return untried
+	case len(again) > 0:
+		g.explored, g.retried = true, true
+		return again
 	}
 	g.held = true
 	return nil
@@ -221,13 +288,23 @@ func (d *driver) gateFilter(picks []pick, g *gate, ambExp float64, rej func(stri
 
 // explorable reports whether an unproven move may be tried by exploration:
 // the case's own result, as demonstrated (and as played, if it has been),
-// beats the base AI's mean b. A hypothesis case has no result until played
-// and is tried only this way.
+// beats the base AI's mean b. A case with no result at all has nothing to
+// compare and may always be tried: a hypothesis, which has none until it is
+// played, or a route recorded in trial mode, whose recording is not graded.
 func explorable(c *Case, b float32) bool {
 	if c.Outcome.Trials > 0 {
 		return c.Outcome.ValueSum/c.Outcome.Trials > b
 	}
-	return c.Source == SrcSynthesized
+	return true
+}
+
+// promising reports whether a move not played often enough yet looks likely
+// to prove better, so it may be tried more often (see
+// Params.TakeoverExplorePromising): its demonstrated result beats the base
+// AI's mean b by more than the margin. It is asked only where the base AI's
+// record holds enough results to compare with.
+func promising(c *Case, b, margin float32) bool {
+	return c.Outcome.Trials > 0 && c.Outcome.ValueSum/c.Outcome.Trials-b > margin
 }
 
 // decisionSit is a decision situation of the driver: a baseline situation
@@ -240,14 +317,21 @@ type decisionSit struct {
 
 // enter notes the decision situation of a choice. In a new one, whether an
 // unproven move may be tried and whether a proven one is left to the base
-// AI are drawn once, so retries in the same situation do not draw again.
+// AI are drawn once, so later choices in the same situation do not draw
+// again. One draw decides both kinds of exploration: a promising move is
+// tried when it falls under TakeoverExplorePromising, any other when it
+// falls under TakeoverExplore.
 func (d *driver) enter(sit decisionSit) {
 	if d.sitSeen && sit == d.sit {
 		return
 	}
 	d.sit, d.sitSeen, d.sitProbed = sit, true, false
 	p := d.p
-	d.sitExplore = p.TakeoverExplore > 0 && d.explores < p.TakeoverExploreMax && d.rng.Float32() < p.TakeoverExplore
+	d.sitExplore, d.sitDraw = false, 1
+	if p.TakeoverExplore > 0 && d.explores < p.TakeoverExploreMax {
+		d.sitDraw = d.rng.Float32()
+		d.sitExplore = d.sitDraw < p.TakeoverExplore || d.sitDraw < p.TakeoverExplorePromising
+	}
 	d.sitYield = p.BaseExplore > 0 && d.rng.Float32() < p.BaseExplore
 }
 
@@ -263,11 +347,19 @@ func (d *driver) decide(cur *Feat, self *CharSnap, tick int64) *Case {
 	}
 	key := baselineKey(cur, self.Ctrl, self.AILevel)
 	d.enter(decisionSit{key, self.StateNo, self.Ctrl})
-	g := gate{key: key, explore: d.sitExplore, yield: d.sitYield}
+	g := gate{key: key, yield: d.sitYield}
+	if d.sitExplore {
+		g.explore = d.sitDraw < d.p.TakeoverExplore
+		g.promising = d.sitDraw < d.p.TakeoverExplorePromising
+		g.retry = g.explore && d.retries < d.p.TakeoverRetryMax
+	}
 	c, _ := d.chooseWhy(cur, self, tick, nil, &g)
 	if c != nil && g.explored {
 		d.explores++
 		d.sitExplore = false
+		if g.retried {
+			d.retries++
+		}
 	}
 	switch {
 	case g.held:
@@ -311,10 +403,25 @@ func SituationString(k uint64) string {
 	}
 	ai := [...]string{"AI level 1-3", "AI level 4-6", "AI level 7-8", "AI level ?"}[k>>13&3]
 	s := contextString(k>>8&3) + ", " + ctrlString(k&(1<<11) != 0) + ", " + ai
-	if k&baseGrain == baseCoarse {
-		return s
+	if k&baseGrain != baseCoarse {
+		s = enemyString(k) + ", " + s
 	}
-	return enemyString(k) + ", " + s
+	return selfString(k) + ", " + s
+}
+
+// selfString describes the character's own state type in a baseline key.
+func selfString(k uint64) string {
+	switch StateType(k >> baseSelfShift & 7) {
+	case StStand:
+		return "self standing"
+	case StCrouch:
+		return "self crouching"
+	case StAir:
+		return "self airborne"
+	case StLying:
+		return "self lying"
+	}
+	return "self in no known state"
 }
 
 // ActionString describes an action key (see actionKey), for inspection.

@@ -28,18 +28,27 @@
 //
 // # The base AI
 //
-// The character's own AI is the base AI, always (see baseline.go). The CBR
-// layer takes over only with a move that has proved better than that AI in
-// the same kind of situation: the move's results when the CBR layer played
-// it, graded like any chain (damage dealt, weighted by how the exchange
-// ended, minus damage taken), beat the AI's record there by the take-over
-// margin, a setting of Low, Medium or High. The adapter pauses the
-// character's AI only on the frames the CBR layer gives the input, so the AI
-// plays again as soon as the move is over. Now and then, in a new situation,
-// the CBR layer tries a move that has not proved itself yet, so that it can.
-// An older AI that switches itself on with a long command and then ignores
-// AILevel cannot be paused; when it acts during a move the CBR layer is
-// playing, the move is dropped and nothing counts against it.
+// The character's own AI is the base AI, always (see baseline.go). This
+// works with any kind of character AI: a character with an AI of its own
+// keeps it as the base, and a character without one falls back to the
+// engine's AI, as before. The CBR layer takes over only with a move that has
+// proved better than that AI in the same kind of situation: the move's
+// results when the CBR layer played it, graded like any chain (damage dealt,
+// weighted by how the exchange ended, minus damage taken), beat the AI's
+// record there by the take-over margin, a setting of Low, Medium or High.
+// The margin says how much better per exchange a move must have proved; at
+// first a move must clear a higher bar, which comes down as it is played
+// more (see Params.TakeoverMargin). The adapter pauses the character's AI
+// only on the frames the CBR layer gives the input, so the AI plays again as
+// soon as the move is over. Now and then (at about one in twenty decision
+// points, more often for a move that looks promising, up to a limit per
+// round) the CBR layer tries a move it has not proved yet, so that it can.
+// An AI that keeps itself switched on in a variable (one a long command
+// turns on, or one that notes AILevel once and then only checks its
+// variable), or that never reads AILevel, cannot be paused; when such an AI
+// starts an attack during a move the CBR layer is playing, that move is
+// usually dropped without counting against it (see the adapter's notes in
+// src/cbr_hook.go).
 //
 // # Commands
 //

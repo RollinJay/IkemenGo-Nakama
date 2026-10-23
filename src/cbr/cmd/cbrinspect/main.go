@@ -134,7 +134,10 @@ func main() {
 			c.MoveRef, sourceNames[c.Source], c.Value(p), c.Outcome.Trials, c.Completion.Result, 100*c.Completion.DamageDealt)
 	}
 
-	// Results are chain rewards: about a fraction of a life bar per exchange.
+	// Results are chain rewards, a fraction of a life bar per exchange, each
+	// decision credited with its share of its exchange's reward; the share
+	// shown is the average one in the situation, by which the take-over
+	// margin is scaled there.
 	const show = 20
 	baseKeys := make([]uint64, 0, len(st.Baseline))
 	for k := range st.Baseline {
@@ -154,7 +157,7 @@ func main() {
 			break
 		}
 		b := st.Baseline[k]
-		fmt.Printf("  %s: %.1f results, mean %+.3f\n", cbr.SituationString(k), b.Trials, b.ValueSum/b.Trials)
+		fmt.Printf("  %s: %.1f results, mean %+.3f, share %.2f\n", cbr.SituationString(k), b.Trials, b.ValueSum/b.Trials, b.Shares/b.Trials)
 	}
 	var played []uint64
 	for k, a := range st.Actions {

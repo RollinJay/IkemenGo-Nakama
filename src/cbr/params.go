@@ -107,45 +107,71 @@ type Params struct {
 	// is the base and plays whenever the CBR layer does not take over, and the
 	// CBR layer takes over only with a move that has proved better than the
 	// base AI in the same kind of situation. Results are chain rewards (see
-	// Params.reward), whose scale is a fraction of a life bar per exchange.
+	// Params.reward), whose scale is a fraction of a life bar per exchange,
+	// credited to each decision with its share of its exchange's reward.
 	//
 	// A move has proved itself once the CBR layer has played it
 	// TakeoverMinPlays times. Its advantage is the mean result of those plays
 	// minus the base AI's mean in the situation, shrunk toward zero as if
 	// TakeoverShrink more plays had matched the base AI exactly, then weighted
 	// by the chance that its route completes, as the value is (see score). It
-	// takes over when the advantage exceeds TakeoverMargin, the Medium
-	// take-over margin setting (Low is half of it, High twice; see
-	// Engine.SetTakeoverMargin), or twice the setting's margin while the base
-	// AI has fewer than BaselineMinTrials results in the situation.
+	// takes over when the advantage exceeds the take-over margin: TakeoverMargin
+	// for the Medium setting (Low is half of it, High twice; see
+	// Engine.SetTakeoverMargin), twice the setting's while the base AI has
+	// fewer than BaselineMinTrials results in the situation. The margin is per
+	// exchange, so before the comparison it is scaled by the share of an
+	// exchange's reward a decision in the situation usually gets (see
+	// Store.baselineShare): nearly in full where decisions lead into an
+	// exchange, much less where most never do (a step in neutral far from the
+	// enemy, say). Because of the shrinking, a move's first plays must beat
+	// the base AI by about twice the margin (three plays count half), and less
+	// the more it is played.
 	//
 	// The base AI's mean in a situation is shrunk toward the mean of a
 	// coarser situation as if BaselineShrink results had matched that, the
 	// coarser one likewise toward the mean of all its results in the store,
 	// and that toward BaselineDefault.
 	//
-	// Untested moves are tried now and then so they can prove themselves:
-	// in a new decision situation where no move has proved better, with
-	// chance TakeoverExplore, the best unproven move whose demonstrated result
-	// beats the base AI's mean is played, at most TakeoverExploreMax times a
-	// round. With chance BaseExplore the CBR layer leaves even a situation
-	// where a move has proved better to the base AI, so the base AI's record
-	// stays current.
+	// Moves are tried now and then so they can prove themselves: in a new
+	// decision situation where no move has proved better, with chance
+	// TakeoverExplore, the best of the moves that may be tried is played, at
+	// most TakeoverExploreMax times a round. A move may be tried while its
+	// demonstrated result beats the base AI's mean (a move with no result at
+	// all, such as a hypothesis, always may) and it has fewer than
+	// TakeoverRetryPlays plays, so that a move whose first few plays were
+	// unlucky gets more, unless those plays fell short of the base AI's by
+	// more than the margin. Moves not played TakeoverMinPlays times yet come
+	// first, and at most TakeoverRetryMax of a round's explorations try a move
+	// again, so that moves in neutral tried again do not crowd out the rest.
+	// A move not played TakeoverMinPlays times yet is promising when its
+	// demonstrated result beats the base AI's mean by more than the margin,
+	// where the base AI's record holds BaselineMinTrials results; it is tried
+	// with the larger chance TakeoverExplorePromising. Such moves are often
+	// in situations that come up only a few times a round (a follow-up after
+	// a hit, say), where the smaller chance would take many rounds.
+	//
+	// With chance BaseExplore the CBR layer leaves even a situation where a
+	// move has proved better to the base AI, so the base AI's record stays
+	// current.
 	//
 	// After declining because nothing proved better, the CBR layer waits
 	// NotBetterBackoff frames before looking again while it has control,
-	// unless its state or control changes first.
-	BaseAI             bool
-	TakeoverMargin     float32
-	TakeoverMinPlays   float32
-	TakeoverShrink     float32
-	BaselineMinTrials  float32
-	BaselineShrink     float32
-	BaselineDefault    float32
-	TakeoverExplore    float32
-	TakeoverExploreMax int32
-	BaseExplore        float32
-	NotBetterBackoff   int32
+	// unless its state or control, or the situation compared with the base
+	// AI, changes first.
+	BaseAI                   bool
+	TakeoverMargin           float32
+	TakeoverMinPlays         float32
+	TakeoverRetryPlays       float32
+	TakeoverShrink           float32
+	BaselineMinTrials        float32
+	BaselineShrink           float32
+	BaselineDefault          float32
+	TakeoverExplore          float32
+	TakeoverExplorePromising float32
+	TakeoverExploreMax       int32
+	TakeoverRetryMax         int32
+	BaseExplore              float32
+	NotBetterBackoff         int32
 
 	// Store budget (see Store.Prune).
 	MaxCases         int
@@ -281,17 +307,20 @@ func DefaultParams() *Params {
 		DemoWeight:            1,
 		DemoComboWeight:       1,
 
-		BaseAI:             true,
-		TakeoverMargin:     0.03,
-		TakeoverMinPlays:   3,
-		TakeoverShrink:     3,
-		BaselineMinTrials:  5,
-		BaselineShrink:     5,
-		BaselineDefault:    0,
-		TakeoverExplore:    0.05,
-		TakeoverExploreMax: 6,
-		BaseExplore:        0.02,
-		NotBetterBackoff:   8,
+		BaseAI:                   true,
+		TakeoverMargin:           0.03,
+		TakeoverMinPlays:         3,
+		TakeoverRetryPlays:       10,
+		TakeoverShrink:           3,
+		BaselineMinTrials:        5,
+		BaselineShrink:           5,
+		BaselineDefault:          0,
+		TakeoverExplore:          0.05,
+		TakeoverExplorePromising: 0.25,
+		TakeoverExploreMax:       6,
+		TakeoverRetryMax:         3,
+		BaseExplore:              0.02,
+		NotBetterBackoff:         8,
 
 		MaxCases:         6000,
 		MaxNonHumanShare: 0.4,

@@ -230,17 +230,25 @@ func (t *chainTracker) contest(caseID uint64) {
 // split gives each of a chain's entries its place in the backward credit.
 // Recorded and played cases count among themselves, as if there were no
 // probes: pos[i] is case i's position among them and n their number. For the
-// comparison with the base AI, played cases and probes count among
-// themselves, leaving out recorded cases, which repeat the base AI's
-// decisions when it is recorded as well: after[i] is how many of them follow
-// entry i.
+// comparison with the base AI, only the CBR layer's played cases count:
+// after[i] is how many of them follow entry i. Probes do not count, so that a
+// probe and a move played in its place take the same share whatever the base
+// AI does next: the base AI gets a probe at every change of state while it
+// has control, many more decisions than the CBR layer makes, which makes one
+// per move it plays, and counting them would hand the base AI's decisions
+// smaller shares than the moves compared with them. Recorded cases do not
+// count either, since they repeat the base AI's decisions when it is
+// recorded as well.
 func (ch *chain) split() (pos, after []int, n int) {
 	pos = make([]int, len(ch.cases))
 	after = make([]int, len(ch.cases))
 	k := 0
 	for i := len(ch.cases) - 1; i >= 0; i-- {
-		if cc := &ch.cases[i]; cc.probe || cc.caseID != 0 {
+		cc := &ch.cases[i]
+		if cc.probe || cc.caseID != 0 {
 			after[i] = k
+		}
+		if !cc.probe && cc.caseID != 0 {
 			k++
 		}
 	}

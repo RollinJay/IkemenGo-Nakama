@@ -170,3 +170,177 @@ func TestCBRDriveMargin(t *testing.T) {
 		}
 	}
 }
+
+// TestCBRMaskEndsWithTheDrivenFrame: the NoAILevel flag that pauses the
+// character's AI holds only while a frame the CBR layer drives runs. It is
+// cleared once the frame's code has run, and when the next frame starts
+// without the mask, also for a WinMugen-version character in hitpause, whose
+// AssertSpecial flags the reset keeps. A NoAILevel the character asserted
+// itself is left as the engine would leave it. Helpers follow their root.
+func TestCBRMaskEndsWithTheDrivenFrame(t *testing.T) {
+	cbrTestRuntime(t)
+	savedCgi := sys.cgi[0]
+	t.Cleanup(func() { sys.cgi[0] = savedCgi })
+	s := &sysCBR.slots[0]
+	s.active = true
+	// frame runs a character's frame start (Char.actionPrepare); a helper
+	// is used, as player-only resets need a stage.
+	frame := func(c *Char, driven bool, hitpause int32) bool {
+		s.driven = driven
+		c.hitPauseTime = hitpause
+		c.actionPrepare()
+		return c.asf(ASF_noailevel)
+	}
+	for _, v := range []struct {
+		name      string
+		mugen     [2]uint16
+		ikemen    bool
+		keepsFlag bool // AssertSpecial flags last through hitpause
+	}{
+		{"winmugen", [2]uint16{0, 0}, false, true},
+		{"mugen 1.0", [2]uint16{1, 0}, false, false},
+		{"ikemen", [2]uint16{1, 1}, true, false},
+	} {
+		sys.cgi[0].mugenver = v.mugen
+		sys.cgi[0].ikemenver = [3]uint16{}
+		if v.ikemen {
+			sys.cgi[0].ikemenver[1] = 1
+		}
+		newHelper := func() *Char {
+			c := &Char{id: 7, minus: 3, helperIndex: 1}
+			return c
+		}
+		for _, hp := range []int32{0, 5} {
+			// A driven frame masks; the next frame, the base AI's, does not,
+			// with or without the end-of-frame clear in between.
+			for _, endClear := range []bool{true, false} {
+				c := newHelper()
+				if !frame(c, true, hp) {
+					t.Fatalf("%s, hitpause %d: a driven frame must mask AILevel", v.name, hp)
+				}
+				if endClear {
+					cbrUnmaskAll()
+					if c.asf(ASF_noailevel) {
+						t.Fatalf("%s, hitpause %d: the mask must end with the frame", v.name, hp)
+					}
+				}
+				if frame(c, false, hp) {
+					t.Fatalf("%s, hitpause %d (end clear %v): AILevel still masked on the base AI's frame", v.name, hp, endClear)
+				}
+				if len(sysCBR.masked) != 0 {
+					t.Fatalf("%s: marks left over: %d", v.name, len(sysCBR.masked))
+				}
+			}
+			// Driven frames in a row keep the mask.
+			c := newHelper()
+			frame(c, true, hp)
+			cbrUnmaskAll()
+			if !frame(c, true, hp) {
+				t.Fatalf("%s, hitpause %d: a second driven frame must mask again", v.name, hp)
+			}
+			cbrUnmaskAll()
+		}
+		// The character's own NoAILevel, asserted before hitpause, is left as
+		// the engine leaves it: kept through hitpause only where flags are.
+		c := newHelper()
+		c.setASF(ASF_noailevel)
+		frame(c, true, 5)
+		cbrUnmaskAll()
+		if got := c.asf(ASF_noailevel); got != v.keepsFlag {
+			t.Fatalf("%s: the character's own NoAILevel after a driven frame in hitpause: %v, want %v", v.name, got, v.keepsFlag)
+		}
+		c.setASF(ASF_noailevel)
+		if got := frame(c, false, 5); got != v.keepsFlag {
+			t.Fatalf("%s: the character's own NoAILevel on a base frame in hitpause: %v, want %v", v.name, got, v.keepsFlag)
+		}
+	}
+	// A helper of another player is not masked; nor is anything once the
+	// slot is no longer driven by the CBR layer.
+	other := &Char{id: 8, minus: 3, helperIndex: 1, playerNo: 1}
+	s.driven = true
+	other.actionPrepare()
+	if other.asf(ASF_noailevel) {
+		t.Fatal("another player's helper must not be masked")
+	}
+	c := &Char{id: 9, minus: 3, helperIndex: 1}
+	c.actionPrepare()
+	s.active = false
+	c.actionPrepare()
+	if c.asf(ASF_noailevel) {
+		t.Fatal("the mask must end when the slot is no longer driven")
+	}
+}
+
+// TestCBRButtonJamStaysOffAfterDrivenFrames: on the first frame the
+// character's own AI plays after the CBR layer's, an AI that had the engine
+// AI's button jam off on its last frame keeps it off, through InputUpdate,
+// although the flag InputUpdate reads is from the CBR layer's frame; the
+// frame stays the AI's. Without NoAIButtonJam the jam plays as usual.
+func TestCBRButtonJamStaysOffAfterDrivenFrames(t *testing.T) {
+	cbrTestRuntime(t)
+	savedChars, savedAI, savedLevel, savedIntro := sys.chars, sys.aiInput, sys.aiLevel, sys.intro
+	t.Cleanup(func() { sys.chars, sys.aiInput, sys.aiLevel, sys.intro = savedChars, savedAI, savedLevel, savedIntro })
+	root := &Char{controller: -1}
+	sys.chars = [len(sys.chars)][]*Char{{root}}
+	sys.intro = 0
+	sys.aiLevel[0] = 8
+	s := &sysCBR.slots[0]
+	s.active = true // the engine has no player 0, so it declines every frame
+
+	// jammed runs InputUpdate with the engine AI's jam holding up, as the
+	// AI's own flag of the frame before (jamOff) allows, and reports whether
+	// up reached the input buffer.
+	cl := NewCommandList(NewInputBuffer())
+	jammed := func(jamOff bool) bool {
+		sys.aiInput[0] = AiInput{dir: 0, dirt: 30}
+		root.unsetASF(ASF_noaibuttonjam)
+		if jamOff {
+			root.setASF(ASF_noaibuttonjam)
+		}
+		cl.Buffer.Reset()
+		cl.InputUpdate(root, -1)
+		return cl.Buffer.Ub > 0
+	}
+	if !jammed(false) {
+		t.Fatal("setup: the jam should press up")
+	}
+
+	// The AI's frame with NoAIButtonJam, then a frame the CBR layer gives
+	// the input (the paused AI asserts nothing), then the AI's again.
+	root.setASF(ASF_noaibuttonjam)
+	cbrEndFrame()
+	if !s.noJam || s.wasDriven {
+		t.Fatalf("after the AI's frame: noJam %v wasDriven %v", s.noJam, s.wasDriven)
+	}
+	s.driven = true
+	root.unsetASF(ASF_noaibuttonjam)
+	cbrEndFrame()
+	if !s.noJam || !s.wasDriven {
+		t.Fatalf("after the CBR layer's frame: noJam %v wasDriven %v", s.noJam, s.wasDriven)
+	}
+	if jammed(false) {
+		t.Fatal("the jam the AI keeps off must stay off on its first frame after the CBR layer's")
+	}
+	if s.driven || cbrMaskAILevel(root) {
+		t.Fatal("that frame is the AI's: nothing is paused")
+	}
+	// Only that first frame: the AI's own flag holds from then on.
+	cbrEndFrame()
+	if s.wasDriven {
+		t.Fatal("the frame after is not after a driven frame")
+	}
+	if jammed(true) {
+		t.Fatal("the AI's own NoAIButtonJam keeps the jam off")
+	}
+	if !jammed(false) {
+		t.Fatal("an AI that lets the jam play gets it")
+	}
+	// An AI that leaves the jam on gets it after the CBR layer's frames too.
+	root.unsetASF(ASF_noaibuttonjam)
+	cbrEndFrame()
+	s.driven = true
+	cbrEndFrame()
+	if !jammed(false) {
+		t.Fatal("an AI without NoAIButtonJam gets the jam after the CBR layer's frames")
+	}
+}

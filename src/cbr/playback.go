@@ -43,15 +43,20 @@ type driver struct {
 	// The comparison with the base AI (see baseline.go): margin is the
 	// take-over margin; held is set when the last choice left the base AI in
 	// control although moves matched; explores counts this round's
-	// explorations; sit is the current decision situation, with what was
-	// drawn for it and whether a probe follows it; waitCtrl holds off until
-	// control returns after the character's own AI took over from a play.
+	// explorations, and retries those of them that tried a move again; sit
+	// is the current decision situation, with what was drawn for it (whether
+	// it may still explore, with sitDraw deciding for which moves, and whether
+	// it is left to the base AI) and whether a probe follows it; waitCtrl
+	// holds off until control returns after the character's own AI took over
+	// from a play.
 	margin     float32
 	held       bool
 	explores   int32
+	retries    int32
 	sit        decisionSit
 	sitSeen    bool
 	sitExplore bool
+	sitDraw    float32
 	sitYield   bool
 	sitProbed  bool
 	probeTick  int64
@@ -138,7 +143,10 @@ func (d *driver) input(w *WorldSnap, self *CharSnap, cur *Feat) (InputBits, bool
 		// After a decline, wait a few frames before searching again unless
 		// the situation changed; mid-action cases need frame-exact starts,
 		// so while busy every frame is tried. When moves matched but none
-		// proved better than the base AI, the wait with control is longer.
+		// proved better than the base AI, the wait with control is longer,
+		// and it also ends when the situation compared with the base AI
+		// changes (the enemy starts an attack, say), where a move may have
+		// proved better.
 		wait := int64(retryFrames)
 		if d.held {
 			wait = int64(d.p.NotBetterBackoff)
@@ -147,6 +155,9 @@ func (d *driver) input(w *WorldSnap, self *CharSnap, cur *Feat) (InputBits, bool
 			wait = 1
 		}
 		unchanged := self.StateNo == d.declineNo && self.Ctrl == d.declineCtl
+		if unchanged && d.held {
+			unchanged = baselineKey(cur, self.Ctrl, self.AILevel) == d.sit.key
+		}
 		if d.declined && unchanged && tick-d.lastDecline < wait {
 			return 0, false
 		}
@@ -231,7 +242,7 @@ func (d *driver) contest() {
 // roundEnd clears what lasts only a round.
 func (d *driver) roundEnd() {
 	d.cur, d.cpCache = nil, nil
-	d.explores = 0
+	d.explores, d.retries = 0, 0
 	d.sitSeen, d.waitCtrl = false, false
 }
 

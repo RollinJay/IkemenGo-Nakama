@@ -66,11 +66,18 @@ type simChar struct {
 
 	// Command layer (sim.cmdLayer): cmds are this frame's active commands;
 	// assist activates a command with no input, as AssertCommand or the
-	// engine AI's command cheat do; force enters an attack state directly,
-	// as ChangeState AI does.
-	cmds   []string
-	assist string
-	force  int32
+	// engine AI's command cheat do; force enters an attack state directly
+	// from control, as ChangeState AI does; cancelTo does the same from an
+	// attack that connected, without control, as ChangeState AI cancelling
+	// its own move does. movesOff keeps commands from starting moves (they
+	// still show as active), as a character whose move code people use is
+	// switched off while its own AI is on; walking, jumping and guarding,
+	// which the engine does itself, still work.
+	cmds     []string
+	assist   string
+	force    int32
+	cancelTo int32
+	movesOff bool
 }
 
 func (c *simChar) setState(no int32, st StateType, mt MoveType, ctrl bool) {
@@ -210,6 +217,9 @@ func (s *sim) control(c, o *simChar) {
 	c.cmds = c.commands()
 	c.assist = ""
 	has := func(n string) bool {
+		if c.movesOff {
+			return false
+		}
 		for _, x := range c.cmds {
 			if x == n {
 				return true
@@ -223,6 +233,13 @@ func (s *sim) control(c, o *simChar) {
 		}
 		c.force = 0
 		return
+	}
+	if no := c.cancelTo; no != 0 {
+		c.cancelTo = 0
+		if c.mt == MtAttack && c.contacted && c.state != no {
+			s.attack(c, no)
+			return
+		}
 	}
 	canCancel := c.mt == MtAttack && c.state == 200 && c.contacted
 	if c.ctrl && c.st != StAir {
@@ -676,6 +693,132 @@ func (c *switchedOn) contend(s *sim, me int) {
 	ch, o := s.ch[me], s.ch[1-me]
 	if ch.ctrl && absf(o.x-ch.x) <= 75 && c.rng.Intn(6) == 0 {
 		ch.force = 1000
+	}
+}
+
+// Base AIs for the kinds of character AI (see aikinds_test.go). A pausable
+// one plays only on the frames the CBR layer leaves to it, as an AI written
+// against AILevel does. An unpausable one (a contender) also acts on the
+// frames the CBR layer gives the input, as an AI that keeps itself on in a
+// variable does.
+
+// latched keeps itself on in a variable, set once it saw AILevel above 0 or
+// from AILevel never being read at all (IsHomeTeam, TeamSide): a stateChanger
+// the AILevel mask cannot pause. With movesOff, the moves people input are
+// switched off while it is on, so the CBR layer's commands start nothing.
+type latched struct {
+	stateChanger
+	movesOff bool
+}
+
+func (c *latched) next(s *sim, me int) InputBits {
+	s.ch[me].movesOff = c.movesOff
+	return c.stateChanger.next(s, me)
+}
+
+func (c *latched) contend(s *sim, me int) {
+	ch, o := s.ch[me], s.ch[1-me]
+	ch.movesOff = c.movesOff
+	if ch.ctrl && absf(o.x-ch.x) <= 75 && c.rng.Intn(6) == 0 {
+		ch.force = 1000
+	}
+}
+
+// switchCode is an older AI that a long command switches on. The engine
+// AI's command cheat picks that command now and then, but only on frames the
+// base AI plays, since the cheat does not fire on the CBR layer's frames.
+// Until then the character plays as the engine AI (cheater), and from then
+// on it is latched.
+type switchCode struct {
+	engine cheater
+	on     latched
+	onTick int64 // the frame it switched on; 0 while it is off
+}
+
+func (c *switchCode) next(s *sim, me int) InputBits {
+	if c.onTick == 0 && c.engine.rng.Intn(30) == 0 {
+		c.onTick = s.tick + 1
+	}
+	if c.onTick == 0 {
+		return c.engine.next(s, me)
+	}
+	return c.on.next(s, me)
+}
+
+func (c *switchCode) contend(s *sim, me int) {
+	if c.onTick != 0 {
+		c.on.contend(s, me)
+	}
+}
+
+// switchCodeOff is a switch-code AI that also switches itself off whenever
+// AILevel reads 0, as on the CBR layer's frames, and on again only through
+// its switch code: after each take-over the character plays as the engine
+// AI until the cheat picks the switch code again.
+type switchCodeOff struct{ switchCode }
+
+func (c *switchCodeOff) contend(*sim, int) { c.onTick = 0 }
+
+// cheatOnly has no AI of its own and turns the engine AI's button jam off
+// (NoAIButtonJam), so it never walks: it acts only when the engine AI's
+// command cheat picks one of its motion commands. The cheat never picks a
+// single-button command for a character's root.
+type cheatOnly struct{ rng *rand.Rand }
+
+func (c *cheatOnly) next(s *sim, me int) InputBits {
+	if ch := s.ch[me]; ch.ctrl && c.rng.Intn(25) == 0 {
+		ch.assist = [...]string{"qcf_a", "qcf_b", "d_b"}[c.rng.Intn(3)]
+	}
+	return 0
+}
+
+// engineAI stands in for a character with no AI of its own, played by the
+// engine AI: the button jam holds random directions and now and then a
+// button, and the command cheat picks one of its motion commands at random.
+type engineAI struct {
+	rng  *rand.Rand
+	jam  jammer
+	held int // frames the jammed button is still held
+}
+
+func (c *engineAI) next(s *sim, me int) InputBits {
+	if ch := s.ch[me]; ch.ctrl && c.rng.Intn(20) == 0 {
+		ch.assist = [...]string{"qcf_a", "qcf_b", "d_b"}[c.rng.Intn(3)]
+	}
+	in := c.jam.next(c.rng)
+	switch {
+	case c.held > 0:
+		c.held--
+		in |= InA
+	case c.rng.Intn(40) == 0:
+		c.held = 1 + c.rng.Intn(5)
+	}
+	return in
+}
+
+// canceller keeps itself on, as latched does, and cancels its own jab into
+// the two-part special by changing state directly when the jab hits, without
+// control. It does so during the CBR layer's moves too, where taking over
+// mid-move is not detected (see Engine.watchDriven).
+type canceller struct{ rng *rand.Rand }
+
+func (c *canceller) next(s *sim, me int) InputBits {
+	c.contend(s, me)
+	ch, o := s.ch[me], s.ch[1-me]
+	switch {
+	case !ch.ctrl:
+		return 0
+	case absf(o.x-ch.x) > 62:
+		return InF
+	case ch.input&InA != 0 || c.rng.Intn(4) != 0:
+		return 0
+	}
+	return InA
+}
+
+func (c *canceller) contend(s *sim, me int) {
+	if ch := s.ch[me]; ch.state == 200 && ch.contacted && ch.moveHit > 0 {
+		ch.cancelTo = 1100
 	}
 }
 

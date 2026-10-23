@@ -8,21 +8,24 @@
 -- renaming this file to -cbr.lua (any name starting with '-') disables the
 -- mod entirely. Learned data is saved per character under save/cbr.
 --
--- How it plays. A CPU-controlled character plays with its own AI as usual:
--- the AI in the character's files, or the engine's AI for a character without
--- one. That AI is the base and always plays. The CBR AI takes over only with
--- a move that has proved better than that AI in the same kind of situation,
--- by at least the take-over margin (TakeoverMargin below). While that move
+-- How it plays. It works with any kind of character AI: a character with an
+-- AI of its own keeps it as the base, and a character without one falls back
+-- to the engine's AI, as before. That base AI plays the CPU-controlled
+-- character as usual, always. The CBR AI takes over only with a move that its
+-- own plays have proved better than that AI in the same kind of situation, by
+-- at least the take-over margin (TakeoverMargin below). While that move
 -- plays, the character's own AI pauses (its AILevel trigger reads 0); then it
 -- carries on. Moves are compared by their average result per exchange (an
 -- attack or combo and what came of it): damage dealt, weighted by how well
--- the exchange ended, minus damage taken. Now and then (in about one in
--- twenty situations new to it, up to a limit per round) the CBR AI tries a
--- move that did well in the fights it learned from but has not proved itself
--- yet, to find out whether it is better. Older character AI that turns itself
--- on without the AILevel trigger (with commands no person can input) is not
--- paused and keeps running; when it acts during a move the CBR AI is
--- playing, that move is dropped without counting against it.
+-- the exchange ended, minus damage taken. Now and then (at about one in
+-- twenty decision points, more often for a move that looks promising, up to
+-- a limit per round) the CBR AI tries a move it has not proved yet, to find
+-- out whether it is better. An AI that keeps itself switched on in a
+-- variable (one a long command turns on, or one that notes AILevel once and
+-- then only checks its variable), or that never reads AILevel, cannot be
+-- paused and keeps running; when such an AI starts an attack during a move
+-- the CBR AI is playing, that move is usually dropped without counting
+-- against it.
 --
 -- The main settings are in Options > Game Settings > CBR AI Settings: CBR AI,
 -- Knowledge, Take-Over Margin, Training Dummy, Learn From Replays and Ask
@@ -34,10 +37,14 @@
 --                    described above.
 --   TakeoverMargin   how much better, per exchange, a move must have proved
 --                    than the character's own AI before the CBR AI takes
---                    over with it: 1 Low, 2 Medium or 3 High, roughly 1.5, 3
---                    and 6 percent of a life bar (Take-Over Margin in the
---                    options). Low takes over more often; High only with
---                    clearly better moves.
+--                    over with it: 1 Low, 2 Medium or 3 High (Take-Over
+--                    Margin in the options). Medium asks for a few percent of
+--                    a life bar, Low half as much and High twice as much. At
+--                    first a move must clear a higher bar, which comes down
+--                    as it is played more (it is also higher while little is
+--                    known about how the character's own AI does in that
+--                    situation). Low lets the CBR AI take over more readily;
+--                    High only with clearly better moves.
 --   Execution        1-8, or 0 to follow each CPU's AI level (the Difficulty
 --                    option). Below 8, combo timing is perturbed and long
 --                    routes are valued less.

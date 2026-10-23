@@ -142,7 +142,7 @@ func (e *Engine) SetPlayer(n int, char, opponent string) error {
 		neutral := e.p.Situation[CompNeutral]
 		switch {
 		case cc.probe:
-			ps.st.addBaseline(e.p, cc.key, neutral)
+			ps.st.addBaseline(e.p, cc.key, neutral, 0)
 		case cc.rec != nil:
 			if ps.rec != nil {
 				ps.rec.finalizeLoose(cc.rec, tick)
@@ -261,7 +261,7 @@ func (e *Engine) TakeoverMargin(n int) float32 {
 	return 0
 }
 
-// StopDrive returns player n to the engine's AI.
+// StopDrive returns player n to the character's own AI alone.
 func (e *Engine) StopDrive(n int) {
 	if ps := e.player(n); ps != nil {
 		ps.drv = nil
@@ -333,13 +333,16 @@ func (e *Engine) watchDriven(ps *playerState, self *CharSnap, roundState int32) 
 
 // watchBase adds a probe when, on a frame the CBR layer did not drive, the
 // base AI starts an action from control, so its record covers what it does
-// on its own as well as where the CBR layer left it in control.
+// on its own as well as where the CBR layer left it in control. As for the
+// recorder, getting hit and landing from a jump are not actions: the engine
+// takes control away for both, whatever the AI does.
 func (e *Engine) watchBase(ps *playerState, self *CharSnap, w *WorldSnap) {
 	prev := &ps.lastSelf
 	if !e.p.BaseAI || !ps.observed || w.RoundState != 2 || self.CBRDriven {
 		return
 	}
-	if prev.Ctrl && !self.Ctrl && self.StateNo != prev.StateNo && self.MoveType != MtHit {
+	landing := prev.StateType == StAir && self.StateType != StAir && self.MoveType == MtIdle
+	if prev.Ctrl && !self.Ctrl && self.StateNo != prev.StateNo && self.MoveType != MtHit && !landing {
 		ps.drv.baseAction(&ps.lastFeat, prev, w.Tick)
 	}
 }
@@ -374,7 +377,8 @@ func (e *Engine) finalizeChain(ps *playerState, rc *resolvedChain) {
 	for i, cc := range rc.ch.cases {
 		switch {
 		case cc.probe:
-			ps.st.addBaseline(e.p, cc.key, r*pow32(e.p.ComboGamma, after[i]))
+			share := pow32(e.p.ComboGamma, after[i])
+			ps.st.addBaseline(e.p, cc.key, r*share, share)
 		case cc.rec != nil:
 			if ps.rec != nil {
 				ps.rec.finalizeCase(cc.rec, rc, pos[i], n)
