@@ -78,6 +78,15 @@ type simChar struct {
 	force    int32
 	cancelTo int32
 	movesOff bool
+
+	// redirect enters an attack state from control as force does, but the
+	// way AI in a helper does it, with a ChangeState redirected to the
+	// character: the helper runs after the character's own frame, so the
+	// state number changes at the end of the frame while control and move
+	// type stay as they were, and the state takes effect (pending) at the
+	// start of the character's next frame.
+	redirect int32
+	pending  int32
 }
 
 func (c *simChar) setState(no int32, st StateType, mt MoveType, ctrl bool) {
@@ -150,6 +159,14 @@ func (s *sim) step(in [2]InputBits) {
 	for i, c := range s.ch {
 		s.advance(c, s.ch[1-i])
 	}
+	for _, c := range s.ch {
+		if no := c.redirect; no != 0 {
+			c.redirect = 0
+			if c.ctrl && c.st != StAir {
+				c.state, c.stateTime, c.pending = no, 0, no
+			}
+		}
+	}
 	// Resolve both attacks against the pre-hit state so simultaneous hits
 	// trade instead of the first-processed player winning.
 	a0, a1 := s.hits(s.ch[0], s.ch[1]), s.hits(s.ch[1], s.ch[0])
@@ -216,6 +233,13 @@ func (c *simChar) commands() []string {
 func (s *sim) control(c, o *simChar) {
 	c.cmds = c.commands()
 	c.assist = ""
+	if no := c.pending; no != 0 {
+		c.pending = 0
+		if c.state == no { // unless a hit came first
+			s.attack(c, no)
+			return
+		}
+	}
 	has := func(n string) bool {
 		if c.movesOff {
 			return false
@@ -792,6 +816,19 @@ func (c *engineAI) next(s *sim, me int) InputBits {
 		in |= InA
 	case c.rng.Intn(40) == 0:
 		c.held = 1 + c.rng.Intn(5)
+	}
+	return in
+}
+
+// helperAI is a stateChanger that runs in a helper and moves its root with
+// a redirected ChangeState, reading root,AILevel, so it is paused on the CBR
+// layer's frames: its attacks start a frame late (see simChar.redirect).
+type helperAI struct{ stateChanger }
+
+func (c *helperAI) next(s *sim, me int) InputBits {
+	in := c.stateChanger.next(s, me)
+	if ch := s.ch[me]; ch.force != 0 {
+		ch.redirect, ch.force = ch.force, 0
 	}
 	return in
 }

@@ -388,7 +388,7 @@ IKEMEN GO has two netcodes. With delay-based netcode, each game waits for the ot
 
 Online play through Nakama (quick match, ranked match and lobby matches) always uses rollback netcode, whatever each player's Netcode option says, and the two players' options are not compared. Its fights are always saved as match replays (see [Match replays](#match-replays)). The Options screen says so (Netcode (Online): Always Rollback). Host Game and Join Game are unchanged.
 
-The fork's AI that plays CPU opponents with what it has learned from earlier fights by case-based reasoning (the CBR AI, see [About this fork](../README.md#about-this-fork)) never runs in a netplay session: it is inactive in every online match, ranked or not, and in Host Game and Join Game. It learns from online matches only through their replays, outside the session: a replay played from WATCH MODE > REPLAY, or a lobby match watched as a spectator (see [Watching a lobby match](#watching-a-lobby-match)), when the Learn From Replays option is on (as it is by default).
+The fork's AI that learns from earlier fights by case-based reasoning and takes over CPU opponents with moves it has proved better than their own AI (the CBR AI, see [About this fork](../README.md#about-this-fork)) never runs in a netplay session: it is inactive in every online match, ranked or not, and in Host Game and Join Game. It learns from online matches only through their replays, outside the session: a replay played from WATCH MODE > REPLAY, or a lobby match watched as a spectator (see [Watching a lobby match](#watching-a-lobby-match)), when the Learn From Replays option is on (as it is by default).
 
 ### The screen after a ranked set
 

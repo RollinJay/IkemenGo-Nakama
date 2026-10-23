@@ -17,6 +17,12 @@ package cbr
 // command active is the move's own automatic transition, not a cancel; an
 // attack started from control with no command active is a direct state
 // change by the character's AI (see command.go).
+//
+// A state change another character makes, such as an AI in one of the
+// character's helpers moving it with a redirected ChangeState, shows its
+// action a frame after its state number (see lateChange in engine.go). The
+// recorder takes that frame as the action's start, judged by the commands
+// active on the frame the change was made.
 
 type frameRec struct {
 	tick      int64
@@ -73,6 +79,13 @@ type recorder struct {
 	prevCtrl     bool
 	prevState    StateType
 	prevHoriz    uint8
+	prevHitPause int32
+
+	// late is set when the last frame recorded showed a late state change
+	// into lateState, with lateCmds the commands active on it.
+	late      bool
+	lateState int32
+	lateCmds  []string
 
 	out []*Case
 }
@@ -236,14 +249,26 @@ func (r *recorder) step(s *Snapshot, f Feat) {
 		hitPause: self.HitPause, driven: self.CBRDriven,
 	})
 
+	// The action of a late state change shows on the frame after it, and
+	// the commands that count for it are those of the frame it was made on.
+	prev := CharSnap{StateNo: r.prevStateNo, StateType: r.prevState, MoveType: r.prevMoveType, Ctrl: r.prevCtrl, HitPause: r.prevHitPause}
+	late := r.late && lateStart(r.lateState, &prev, self)
+	r.late = false
+	cmds := self.Commands
+	if late {
+		cmds = r.lateCmds
+	}
+
 	if r.log.flagged {
 		// Nothing more is recorded from this source this match, but the
 		// states it enters directly are still collected as hypotheses.
-		if r.started && self.CmdKnown && !self.CBRDriven && s.World.RoundState == 2 &&
-			self.StateNo != r.prevStateNo && r.prevCtrl && !self.Ctrl &&
-			self.MoveType == MtAttack && !r.significant(self.Commands) {
-			r.st.hypothesis(self.StateNo).Seen++
-			r.hypothesisCase(self, tick)
+		if r.started && !self.CBRDriven && s.World.RoundState == 2 {
+			if self.CmdKnown && (self.StateNo != r.prevStateNo || late) && r.prevCtrl && !self.Ctrl &&
+				self.MoveType == MtAttack && !r.significant(cmds) {
+				r.st.hypothesis(self.StateNo).Seen++
+				r.hypothesisCase(self, tick)
+			}
+			r.noteLate(&prev, self)
 		}
 		r.started = true
 		r.remember(self)
@@ -262,7 +287,7 @@ func (r *recorder) step(s *Snapshot, f Feat) {
 		return
 	}
 
-	changed := self.StateNo != r.prevStateNo
+	changed := self.StateNo != r.prevStateNo || late
 	landing := r.prevState == StAir && self.StateType != StAir && self.MoveType == MtIdle
 	fromCtrl := r.prevCtrl && !self.Ctrl
 	cancel := r.prevMoveType == MtAttack && self.MoveType == MtAttack
@@ -276,14 +301,14 @@ func (r *recorder) step(s *Snapshot, f Feat) {
 	// only the engine's own direction-driven states (walk, jump, guard).
 	significant := false
 	if command && self.CmdKnown {
-		if len(self.Commands) > 0 {
+		if len(cmds) > 0 {
 			if r.source.IsHuman() {
-				r.st.noteCommand(self.StateNo, self.Commands)
+				r.st.noteCommand(self.StateNo, cmds)
 			} else {
-				r.log.note(self.StateNo, self.Commands)
+				r.log.note(self.StateNo, cmds)
 			}
 		}
-		significant = r.significant(self.Commands)
+		significant = r.significant(cmds)
 		switch {
 		case significant:
 		case fromCtrl && self.MoveType == MtAttack:
@@ -293,6 +318,9 @@ func (r *recorder) step(s *Snapshot, f Feat) {
 		case !fromCtrl:
 			command = false // the move's own transition, not a cancel
 		}
+	}
+	if !command {
+		r.noteLate(&prev, self)
 	}
 	if r.skip {
 		if !regain {
@@ -309,10 +337,17 @@ func (r *recorder) step(s *Snapshot, f Feat) {
 
 	switch {
 	case command:
+		act := self
+		if late {
+			// The case reads the commands behind its action.
+			a := *self
+			a.Commands = cmds
+			act = &a
+		}
 		if significant && r.source.assisted() {
-			r.openAssisted(s, self, f, tick)
+			r.openAssisted(s, act, f, tick)
 		} else {
-			r.openCommand(s, self, f, tick)
+			r.openCommand(s, act, f, tick)
 		}
 	case regain:
 		r.closeOpen(tick)
@@ -440,6 +475,17 @@ func (r *recorder) remember(self *CharSnap) {
 	r.prevCtrl = self.Ctrl
 	r.prevState = self.StateType
 	r.prevHoriz = horizClass(self.Input)
+	r.prevHitPause = self.HitPause
+}
+
+// noteLate remembers a late state change on this frame, which came after
+// prev (see lateChange), with the commands active on it: its action shows
+// on the next frame.
+func (r *recorder) noteLate(prev, self *CharSnap) {
+	if lateChange(prev, self) {
+		r.late, r.lateState = true, self.StateNo
+		r.lateCmds = append(r.lateCmds[:0], self.Commands...)
+	}
 }
 
 func (r *recorder) movementSplit(self *CharSnap, length int32) bool {

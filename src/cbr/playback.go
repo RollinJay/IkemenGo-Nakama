@@ -228,13 +228,18 @@ func (d *driver) abort() {
 // contest drops the case being played because the character's own AI took
 // over from it (see Engine.watchDriven). Unlike an abort, nothing counts
 // against the case, and its chain credit is left out, since its inputs were
-// not what moved the character. The driver then waits for control to return
-// before choosing again.
+// not what moved the character. The contest is noted on the record of the
+// move's plays, so that a move such an AI keeps taking over from is not
+// tried again and again (see gateFilter). The driver then waits for control
+// to return before choosing again.
 func (d *driver) contest() {
 	if d.cur == nil {
 		return
 	}
 	d.ct.contest(d.cur.ID)
+	if d.p.BaseAI {
+		d.st.contestPlay(d.p, d.cur)
+	}
 	d.cur = nil
 	d.waitCtrl = true
 }

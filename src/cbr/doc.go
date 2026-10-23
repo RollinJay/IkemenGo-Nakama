@@ -28,27 +28,43 @@
 //
 // # The base AI
 //
-// The character's own AI is the base AI, always (see baseline.go). This
-// works with any kind of character AI: a character with an AI of its own
-// keeps it as the base, and a character without one falls back to the
-// engine's AI, as before. The CBR layer takes over only with a move that has
-// proved better than that AI in the same kind of situation: the move's
-// results when the CBR layer played it, graded like any chain (damage dealt,
-// weighted by how the exchange ended, minus damage taken), beat the AI's
-// record there by the take-over margin, a setting of Low, Medium or High.
-// The margin says how much better per exchange a move must have proved; at
-// first a move must clear a higher bar, which comes down as it is played
-// more (see Params.TakeoverMargin). The adapter pauses the character's AI
-// only on the frames the CBR layer gives the input, so the AI plays again as
-// soon as the move is over. Now and then (at about one in twenty decision
-// points, more often for a move that looks promising, up to a limit per
-// round) the CBR layer tries a move it has not proved yet, so that it can.
+// With Params.BaseAI set, as it is by default, the AI the character plays with
+// is the base AI (see baseline.go), and it plays whenever the CBR layer has
+// not taken over. This works with any kind of character AI: a character with
+// an AI of its own keeps playing with it, and one without plays with the
+// engine's AI, as it would without the CBR layer. The CBR layer takes over
+// only with a move that has proved better than the base AI in the same kind of
+// situation: the move's results when the CBR layer played it, graded like any
+// chain (damage dealt, weighted by how the exchange ended, minus damage
+// taken), beat the base AI's record there by the take-over margin, a setting
+// of Low, Medium or High. The margin says how much better per exchange a move
+// must have proved; at first a move must clear a higher bar, which comes down
+// as it is played more (see Params.TakeoverMargin). The adapter pauses the
+// character's AI only on the frames the CBR layer gives the input, so the AI
+// plays again as soon as the move is over. Now and then the CBR layer tries a
+// move it has not proved yet, so that the move can prove itself: at about one
+// in twenty of the moments it could try one (counting one each time the
+// situation changes), more often for a move that looks promising, and a few
+// times a round at most (see Params.TakeoverExplore).
+//
+// The CBR layer learns moves from people playing the character, and from
+// CPU play by the engine's AI or by a character AI that inputs commands.
+// From a character AI that changes states directly (the most common kind)
+// it learns only how well that AI does, and which states it enters, which
+// become moves only once a command has been seen bringing them about (see
+// Commands); so with such an AI it takes over only once people have played
+// the character. A driven player's base AI record and the results of the
+// CBR layer's plays are kept whether or not the player is also recorded
+// (Engine.Record), since they are what the comparison needs; recording
+// decides which play new cases come from.
+//
 // An AI that keeps itself switched on in a variable (one a long command
 // turns on, or one that notes AILevel once and then only checks its
 // variable), or that never reads AILevel, cannot be paused; when such an AI
 // starts an attack during a move the CBR layer is playing, that move is
-// usually dropped without counting against it (see the adapter's notes in
-// src/cbr_hook.go).
+// usually dropped without counting against it, and a move such an AI keeps
+// taking over from is not tried again (see Params.TakeoverContestMax, and
+// the adapter's notes in src/cbr_hook.go).
 //
 // # Commands
 //
@@ -59,8 +75,9 @@
 // are recorded with the command's canonical inputs, supplied by the adapter
 // (see Motion). Attack states entered with no command at all mark the
 // character's AI as direct state change: its cases for the match are
-// discarded and the states it entered are kept as hypotheses, which the CBR
-// layer tests by exploration.
+// discarded and the states it entered are kept as hypotheses. Once a
+// command has been seen bringing such a state about often enough (see
+// Params.HypothesisMinEvidence), the CBR layer tests it by exploration.
 //
 // # Difficulty
 //

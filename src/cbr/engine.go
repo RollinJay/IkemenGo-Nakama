@@ -40,6 +40,13 @@ type playerState struct {
 	lastWorld WorldSnap
 	observed  bool
 
+	// late is set when the last frame showed a late state change (see
+	// lateChange) into lateState; lateCmd is whether a significant command
+	// was active on that frame.
+	late      bool
+	lateState int32
+	lateCmd   bool
+
 	// unexplained counts attack starts with no command active during moves
 	// the CBR layer played: the character's own AI changing states directly
 	// while it was meant to be paused.
@@ -287,7 +294,7 @@ func (e *Engine) Frame(s *Snapshot) {
 		if me == nil {
 			// Not in the fight this frame (a Turns or Tag member waiting):
 			// nothing to observe, and no input to give from stale state.
-			ps.observed = false
+			ps.observed, ps.late = false, false
 			continue
 		}
 		ps.tr.observe(s)
@@ -301,11 +308,40 @@ func (e *Engine) Frame(s *Snapshot) {
 			e.watchDriven(ps, &me.Root, s.World.RoundState)
 			e.watchBase(ps, &me.Root, &s.World)
 		}
+		ps.late = ps.observed && s.World.RoundState == 2 && lateChange(&ps.lastSelf, &me.Root)
+		if ps.late {
+			ps.lateState, ps.lateCmd = me.Root.StateNo, significant(me.Root.Commands, e.motions[ps.char])
+		}
 		ps.lastFeat = f
 		ps.lastSelf = me.Root
 		ps.lastWorld = s.World
 		ps.observed = true
 	}
+}
+
+// A state change that another character makes, such as one of the
+// character's helpers with a ChangeState redirected to it (AI that runs in a
+// helper moves its root this way), comes after the character's own frame has
+// run. Its state number shows at once, at StateTime 0, but the new state's
+// control, move type and state type only on the character's next frame,
+// when that state first runs. lateChange reports such a change on self, the
+// frame after prev: the state number changed at StateTime 0 while the
+// character kept its control, move type and state type, out of hitpause.
+// lateStart reports, on the frame after a late change into state, the
+// character losing control there on that state's first frame (StateTime 1):
+// that is where the action the change made shows, one frame after its state
+// number did. A change the character makes itself shows at StateTime 1 with
+// its new control, as StateTime counts the frame it ran, so neither applies
+// to it; nor to a state that drops control later than on its first frame.
+// In hitpause StateTime stands still, so a change made then is left out.
+func lateChange(prev, self *CharSnap) bool {
+	return self.StateNo != prev.StateNo && self.StateTime == 0 && prev.Ctrl && self.Ctrl &&
+		self.MoveType == prev.MoveType && self.StateType == prev.StateType &&
+		prev.HitPause == 0 && self.HitPause == 0
+}
+
+func lateStart(state int32, prev, self *CharSnap) bool {
+	return self.StateNo == state && prev.StateNo == state && self.StateTime == 1 && prev.Ctrl && !self.Ctrl
 }
 
 // watchDriven watches the moves the CBR layer plays. An attack started from
@@ -315,14 +351,31 @@ func (e *Engine) Frame(s *Snapshot) {
 // is dropped without counting against it (see driver.contest), and after
 // ChangeStateFlagCount such starts the store notes the AI as direct state
 // change. The recorder does the same for recorded play.
+//
+// A late state change (see lateChange) is judged on the frame it was made:
+// by the commands active then, and by who gave that frame's input. Made on
+// a frame the base AI played, it is the base AI's own action, which the CBR
+// layer began a move on top of before it showed: that move is dropped too,
+// since its input could not act, and nothing counts against the AI.
 func (e *Engine) watchDriven(ps *playerState, self *CharSnap, roundState int32) {
 	prev := &ps.lastSelf
 	d := ps.drv
 	if !ps.observed || !self.CmdKnown || roundState != 2 || !self.CBRDriven || d.cur == nil {
 		return
 	}
-	if prev.Ctrl && !self.Ctrl && self.StateNo != prev.StateNo && self.MoveType == MtAttack &&
-		self.StateNo != d.cur.MoveRef && !significant(self.Commands, e.motions[ps.char]) {
+	late := ps.late && lateStart(ps.lateState, prev, self)
+	if late && !prev.CBRDriven {
+		if self.MoveType != MtHit {
+			d.contest()
+		}
+		return
+	}
+	cmd := significant(self.Commands, e.motions[ps.char])
+	if late {
+		cmd = ps.lateCmd
+	}
+	if prev.Ctrl && !self.Ctrl && (self.StateNo != prev.StateNo || late) && self.MoveType == MtAttack &&
+		self.StateNo != d.cur.MoveRef && !cmd {
 		d.contest()
 		ps.unexplained++
 		if ps.unexplained >= e.p.ChangeStateFlagCount {
@@ -335,14 +388,20 @@ func (e *Engine) watchDriven(ps *playerState, self *CharSnap, roundState int32) 
 // base AI starts an action from control, so its record covers what it does
 // on its own as well as where the CBR layer left it in control. As for the
 // recorder, getting hit and landing from a jump are not actions: the engine
-// takes control away for both, whatever the AI does.
+// takes control away for both, whatever the AI does. A late state change
+// (see lateChange) counts as the base AI's when the frame it was made on
+// was, and is probed on the frame its action shows.
 func (e *Engine) watchBase(ps *playerState, self *CharSnap, w *WorldSnap) {
 	prev := &ps.lastSelf
-	if !e.p.BaseAI || !ps.observed || w.RoundState != 2 || self.CBRDriven {
+	if !e.p.BaseAI || !ps.observed || w.RoundState != 2 {
+		return
+	}
+	late := ps.late && lateStart(ps.lateState, prev, self)
+	if late && prev.CBRDriven || !late && self.CBRDriven {
 		return
 	}
 	landing := prev.StateType == StAir && self.StateType != StAir && self.MoveType == MtIdle
-	if prev.Ctrl && !self.Ctrl && self.StateNo != prev.StateNo && self.MoveType != MtHit && !landing {
+	if prev.Ctrl && !self.Ctrl && (self.StateNo != prev.StateNo || late) && self.MoveType != MtHit && !landing {
 		ps.drv.baseAction(&ps.lastFeat, prev, w.Tick)
 	}
 }

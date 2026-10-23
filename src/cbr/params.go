@@ -113,19 +113,22 @@ type Params struct {
 	// A move has proved itself once the CBR layer has played it
 	// TakeoverMinPlays times. Its advantage is the mean result of those plays
 	// minus the base AI's mean in the situation, shrunk toward zero as if
-	// TakeoverShrink more plays had matched the base AI exactly, then weighted
-	// by the chance that its route completes, as the value is (see score). It
-	// takes over when the advantage exceeds the take-over margin: TakeoverMargin
-	// for the Medium setting (Low is half of it, High twice; see
-	// Engine.SetTakeoverMargin), twice the setting's while the base AI has
-	// fewer than BaselineMinTrials results in the situation. The margin is per
-	// exchange, so before the comparison it is scaled by the share of an
-	// exchange's reward a decision in the situation usually gets (see
-	// Store.baselineShare): nearly in full where decisions lead into an
+	// TakeoverShrink more exchanges' worth of plays had matched the base AI
+	// exactly, then weighted by the chance that its route completes, as the
+	// value is (see score). It takes over when the advantage exceeds the
+	// take-over margin: TakeoverMargin for the Medium setting (Low is half of
+	// it, High twice; see Engine.SetTakeoverMargin), twice the setting's while
+	// the base AI has fewer than BaselineMinTrials results in the situation.
+	// The margin is per exchange, so before the comparison it is scaled by the
+	// share of an exchange's reward a decision in the situation usually gets
+	// (see Store.baselineShare): nearly in full where decisions lead into an
 	// exchange, much less where most never do (a step in neutral far from the
-	// enemy, say). Because of the shrinking, a move's first plays must beat
-	// the base AI by about twice the margin (three plays count half), and less
-	// the more it is played.
+	// enemy, say). The shrinking counts exchanges the same way (see
+	// Params.advantage): where decisions take half an exchange's reward on
+	// average, TakeoverShrink exchanges' worth is twice TakeoverShrink plays.
+	// Because of the shrinking, a move's first plays must beat the base AI by
+	// about twice the margin (three exchanges' worth count half), and less the
+	// more it is played.
 	//
 	// The base AI's mean in a situation is shrunk toward the mean of a
 	// coarser situation as if BaselineShrink results had matched that, the
@@ -135,20 +138,29 @@ type Params struct {
 	// Moves are tried now and then so they can prove themselves: in a new
 	// decision situation where no move has proved better, with chance
 	// TakeoverExplore, the best of the moves that may be tried is played, at
-	// most TakeoverExploreMax times a round. A move may be tried while its
-	// demonstrated result beats the base AI's mean (a move with no result at
-	// all, such as a hypothesis, always may) and it has fewer than
-	// TakeoverRetryPlays plays, so that a move whose first few plays were
-	// unlucky gets more, unless those plays fell short of the base AI's by
-	// more than the margin. Moves not played TakeoverMinPlays times yet come
-	// first, and at most TakeoverRetryMax of a round's explorations try a move
-	// again, so that moves in neutral tried again do not crowd out the rest.
-	// A move not played TakeoverMinPlays times yet is promising when its
-	// demonstrated result beats the base AI's mean by more than the margin,
-	// where the base AI's record holds BaselineMinTrials results; it is tried
-	// with the larger chance TakeoverExplorePromising. Such moves are often
-	// in situations that come up only a few times a round (a follow-up after
-	// a hit, say), where the smaller chance would take many rounds.
+	// most TakeoverExploreMax times a round, so that trying moves costs the
+	// base AI little. A move may be tried while its demonstrated result beats
+	// the base AI's mean (a move with no result at all, such as a hypothesis,
+	// always may) and it has fewer than TakeoverRetryPlays plays, so that a
+	// move whose first few plays were unlucky gets more, unless those plays
+	// fell short of the base AI's by more than the margin. A move not proved
+	// better yet is promising when TakeoverRetryPlays plays as good as its
+	// demonstrated result (or, once it has a few plays, as good as their
+	// mean) would prove it, where the base AI's record holds
+	// BaselineMinTrials results; it is tried with the larger chance
+	// TakeoverExplorePromising. Such moves are mostly in situations that come
+	// up only a few times a round (a follow-up after a hit, say), where the
+	// smaller chance would take many rounds; in neutral, where a decision
+	// seldom leads into an exchange, proving a move takes many more plays, so
+	// few moves there are promising. Moves not played TakeoverMinPlays times
+	// yet come first, and at most TakeoverRetryMax of a round's explorations
+	// try a move again, and only one that could still prove itself (its plays
+	// or its case's record promising), so that moves in neutral tried again do
+	// not crowd out the rest. The caps per round always hold.
+	// A move whose plays the character's own AI has taken over from
+	// TakeoverContestMax times (an AI that cannot be paused starting attacks
+	// of its own during them) is not tried any more: such plays count for
+	// nothing, and trying it again would only spend the exploration on them.
 	//
 	// With chance BaseExplore the CBR layer leaves even a situation where a
 	// move has proved better to the base AI, so the base AI's record stays
@@ -170,6 +182,7 @@ type Params struct {
 	TakeoverExplorePromising float32
 	TakeoverExploreMax       int32
 	TakeoverRetryMax         int32
+	TakeoverContestMax       float32
 	BaseExplore              float32
 	NotBetterBackoff         int32
 
@@ -317,8 +330,9 @@ func DefaultParams() *Params {
 		BaselineDefault:          0,
 		TakeoverExplore:          0.05,
 		TakeoverExplorePromising: 0.25,
-		TakeoverExploreMax:       6,
-		TakeoverRetryMax:         3,
+		TakeoverExploreMax:       3,
+		TakeoverRetryMax:         1,
+		TakeoverContestMax:       3,
 		BaseExplore:              0.02,
 		NotBetterBackoff:         8,
 

@@ -6,12 +6,30 @@ package cbr
 //
 // A chain can also hold probes: markers of the base AI's decisions (see
 // baseline.go), credited like the CBR layer's played cases into the base
-// AI's record instead of a case. Probes are not cases: they take no place
-// in the lead-in, do not count toward the horizon, and leave the credit of
-// recorded and played cases as it would be without them.
+// AI's record instead of a case. Probes are not cases: they do not count
+// toward the horizon, do not change the backward credit of recorded and
+// played cases (see split), and take no recorded case's place in the
+// lead-in.
+//
+// The lead-in. Before an exchange, the lead-in keeps the last leadInMax
+// neutral decisions that might have led into it; an older one leaves it and
+// resolves as neutral (see chainTracker.onEvict). With the base AI on, the
+// two sides of the comparison with the base AI leave it by one rule: the
+// base AI's decisions (probes) and the moves the CBR layer played count
+// alike, so that a decision leaves the lead-in once leadInMax decisions of
+// either layer have followed it, whichever layer made it. A step the CBR
+// layer played long before an exchange, with many of the base AI's
+// decisions after it, is then as neutral as a step of the base AI's own in
+// its place would be. Without that, the CBR layer's moves would wait for the
+// next exchange while the base AI's decisions in between rotated out, and
+// the base AI's own moves, played by the CBR layer, would measure better
+// than the base AI. Recorded cases, the recorded player's demonstrations,
+// keep a count of their own, as they would with no CBR layer playing. With
+// the base AI off there are no probes, and recorded and played cases count
+// together.
 
 const (
-	leadInMax = 4  // neutral cases kept as a chain prefix, and as many probes
+	leadInMax = 4  // neutral decisions kept as a chain prefix (see addCase)
 	otgWindow = 20 // frames a knockdown stays open for an OTG follow-up
 )
 
@@ -160,11 +178,12 @@ func (t *chainTracker) addCase(cc chainCase) {
 		return
 	}
 	t.leadIn = append(t.leadIn, cc)
-	// Past leadInMax cases, or leadInMax probes, the oldest of that kind
-	// leaves the lead-in.
+	// Past leadInMax entries that count together (see leadInGroup), the
+	// oldest of them leaves the lead-in.
+	g := t.leadInGroup(cc)
 	n := 0
 	for _, l := range t.leadIn {
-		if l.probe == cc.probe {
+		if t.leadInGroup(l) == g {
 			n++
 		}
 	}
@@ -172,7 +191,7 @@ func (t *chainTracker) addCase(cc chainCase) {
 		return
 	}
 	for i, ev := range t.leadIn {
-		if ev.probe == cc.probe {
+		if t.leadInGroup(ev) == g {
 			t.leadIn = append(t.leadIn[:i], t.leadIn[i+1:]...)
 			if t.onEvict != nil {
 				t.onEvict(ev, cc.startTick)
@@ -180,6 +199,18 @@ func (t *chainTracker) addCase(cc chainCase) {
 			return
 		}
 	}
+}
+
+// leadInGroup tells which lead-in entries count together toward leadInMax
+// (see the lead-in at the top of this file): with the base AI on, the
+// decisions compared with each other (probes and played cases) apart from
+// recorded cases; with it off, probes (there are none then) apart from
+// cases.
+func (t *chainTracker) leadInGroup(cc chainCase) bool {
+	if t.p.BaseAI {
+		return cc.rec == nil
+	}
+	return cc.probe
 }
 
 func (ch *chain) add(cc chainCase) {

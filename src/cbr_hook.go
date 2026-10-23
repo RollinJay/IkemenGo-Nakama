@@ -21,7 +21,11 @@ package main
 // command cheat does not fire, and the CBR layer's input replaces the engine
 // AI's button jam. On every other frame the character's AI plays as it would
 // without the CBR layer, and the CBR layer learns from those frames how the
-// base AI does, whatever kind of AI it is (probes, in baseline.go).
+// base AI does (probes, in baseline.go): from every action the base AI
+// starts from control, whether the character's code makes it in the root or
+// in a helper (a ChangeState redirected to the root), or the engine AI's
+// button jam and command cheat do. What it cannot tell apart is listed under
+// the limits below.
 //
 // Which AIs this pauses depends on how they are written:
 //
@@ -29,10 +33,7 @@ package main
 //     CNS or ZSS alike, whether in the root or in its helpers (their own
 //     AILevel or root,AILevel); AI that acts through commands gated on
 //     AILevel, or through the engine AI's command cheat; and a character
-//     with no AI of its own, which plays as the engine AI. Code meant for a
-//     person (gated on AILevel reading 0) runs on those frames instead,
-//     which is what lets the CBR layer's commands work; an AI that resets
-//     itself when AILevel reads 0 starts over after each take-over.
+//     with no AI of its own, which plays as the engine AI.
 //   - Not paused: AI that keeps itself switched on in a variable, whether a
 //     long command turns it on (an older AI's switch code, which the cheat
 //     picks now and then on the frames the base AI plays) or it notes
@@ -44,7 +45,12 @@ package main
 // the CBR layer is playing, with no command active, the move is dropped
 // (contested): it counts as neither an abort nor a failed execution, gets
 // no credit, and the CBR layer waits for control to return before choosing
-// again. Nothing else such an AI does during a move is detected, so the
+// again. An attack a helper starts with a redirected ChangeState shows a
+// frame after its state number does (see lateChange in package cbr); it is
+// judged by the commands active on the frame the helper made it, and when
+// the base AI made it on its own frame just before the CBR layer began a
+// move, that move is dropped the same way, and nothing counts against the
+// AI either. Nothing else such an AI does during a move is detected, so the
 // move is credited with it: a cancel without control, an attack on a frame
 // a command is active (the CBR layer's own button press, say), or a state
 // that is not an attack (a dash or a jump). When that keeps the move's own
@@ -58,12 +64,51 @@ package main
 // starts without the mask, since WinMugen-version characters keep
 // AssertSpecial flags through hitpause; Lua scripts and the next frame
 // therefore read the real AILevel. On the first frame the AI plays after the
-// CBR layer's, the AssertSpecial flags the engine reads before the
-// character's code runs are still those of the CBR layer's frame, when the
-// AI was paused. An AI that turned the engine AI's button jam off
-// (NoAIButtonJam) on its last frame keeps it off there; other such flags
-// (NoWalk, NoJump and the like) are not carried over, so an AI that asserts
-// them only while AILevel reads above 0 goes without them for that frame.
+// CBR layer's, the engine reads, before the character's code runs, the
+// AssertSpecial flags of the CBR layer's frame, when the AI was paused and
+// asserted none: NoAIButtonJam as it resolves the input, and the flags that
+// switch off its built-in walk, jump, crouch and guard as it moves the
+// character on that input. cbrInput gives the AI back, for that frame, those
+// of them it had on its last frame (see there), so an AI that asserts them
+// only while AILevel reads above 0 and leaves the engine AI's jam on (as the
+// stock ZSS Kung Fu Man's does) gets no random walk, jump or guard there.
+//
+// Limits:
+//
+//   - Mid-move cancels: an AI that is not paused and changes the character's
+//     state during a move the CBR layer plays, without control in between
+//     and with no command active, looks the same as the move's own change
+//     into a later part, so the play is credited with what the AI did, or
+//     counts as a failed execution when the AI keeps the move's command from
+//     coming out (see TestMidMoveTakeOverIsCreditedToTheMove in package cbr).
+//   - Helper-only attacks: an attack only a helper makes while the root goes
+//     on with what it does (a striker, a projectile a helper fires) counts in
+//     the result of whatever decision is under way, but is not itself
+//     recorded as a decision of the base AI, nor seen as one that takes over
+//     from a move the CBR layer plays; only changes of the root's state are.
+//   - Helpers' state changes: one a helper makes with a redirected
+//     ChangeState is seen only when the new state takes control away on its
+//     first frame, the frame right after the state number changed (not
+//     across hitpause or a pause), and when nothing else changed the state
+//     first (the root's own built-in walk on that frame, say). The same
+//     pattern from something other than a helper, such as an opponent's
+//     TargetState into a state that is not a hit state, counts as the
+//     character's own action, as it does when the opponent's code runs
+//     before the character's.
+//   - First CBR frame: on the first frame of a move the CBR layer plays, the
+//     engine still reads the flags the AI asserted on its last frame, so the
+//     AI's NoWalk, NoJump, NoCrouch or NoHardcodedKeys holds back the move's
+//     own walk, jump or crouch for that frame, which then starts a frame
+//     late. Flags the character set are never cleared. In the simulator's
+//     runs of every kind of AI (aikinds_test.go), a third to a half of the
+//     take-overs from control began by holding such a direction, and all of
+//     those were commands that begin with down (a quarter circle, a
+//     crouching kick), whose command still comes out; none was a walk or a
+//     jump.
+//   - An AI that resets itself whenever AILevel reads 0 starts over after
+//     each take-over.
+//   - Code meant for a person (gated on AILevel reading 0) runs on the CBR
+//     layer's frames, which is what lets the CBR layer's commands work.
 //
 // Everything is inert until a script enables it with cbrEnable(true).
 //
@@ -102,13 +147,44 @@ type cbrSlot struct {
 
 	// Per frame: driven is set when this frame's input came from the CBR
 	// layer, with btn the input given, for the slot's key-controlled helpers.
-	// wasDriven is driven of the frame before; noJam is whether the root had
-	// the engine AI's button jam turned off (NoAIButtonJam) at the end of the
-	// last frame its own AI played.
+	// wasDriven is driven of the frame before; aiFlags holds the flags of
+	// cbrAIFlags the root had at the end of the last frame its own AI played
+	// (see cbrInput).
 	driven    bool
 	btn       [14]bool
 	wasDriven bool
-	noJam     bool
+	aiFlags   AssertSpecialFlag
+}
+
+// cbrMoveFlags are the AssertSpecial flags that switch off the engine's
+// built-in moves: walking, jumping, air jumping, crouching, standing up,
+// braking, and all of them with guarding (NoHardcodedKeys). The engine reads
+// them at the start of a character's frame (Char.actionPrepare), before the
+// flags are reset and the character's code asserts them anew, so it reads
+// the ones the character asserted on its frame before. cbrGuardFlags switch
+// guarding off while standing, crouching or in the air; the built-in guard
+// at the start of a frame goes by whether the character could guard at the
+// end of the frame before (SCF_guard), which the engine worked out from them
+// then. cbrAIFlags adds the engine AI's button jam switch (NoAIButtonJam),
+// which the engine reads even earlier, as it resolves the AI's input.
+const (
+	cbrMoveFlags = ASF_nojump | ASF_noairjump | ASF_nowalk | ASF_nobrake |
+		ASF_nocrouch | ASF_nostand | ASF_nohardcodedkeys
+	cbrGuardFlags = ASF_nostandguard | ASF_nocrouchguard | ASF_noairguard
+	cbrAIFlags    = cbrMoveFlags | cbrGuardFlags | ASF_noaibuttonjam
+)
+
+// cbrGuardOff reports whether flags switch guarding off in state type st.
+func cbrGuardOff(flags AssertSpecialFlag, st StateType) bool {
+	switch st {
+	case ST_S:
+		return flags&ASF_nostandguard != 0
+	case ST_C:
+		return flags&ASF_nocrouchguard != 0
+	case ST_A:
+		return flags&ASF_noairguard != 0
+	}
+	return false
 }
 
 type cbrRuntime struct {
@@ -658,7 +734,7 @@ func cbrFrame() {
 	if !sysCBR.roundOpen && s.World.RoundState == 2 {
 		for i := range sysCBR.slots {
 			sl := &sysCBR.slots[i]
-			sl.configured, sl.active, sl.wasDriven, sl.noJam = false, false, false, false
+			sl.configured, sl.active, sl.wasDriven, sl.aiFlags = false, false, false, 0
 		}
 		sysCBR.roundOpen = true
 	}
@@ -680,14 +756,14 @@ func cbrFrame() {
 }
 
 // cbrEndFrame ends the frame for every slot: it notes, after a frame the
-// character's own AI played, whether the AI turned the engine AI's button
-// jam off, for the first frame it plays after the CBR layer's (see
+// character's own AI played, which of the flags in cbrAIFlags the AI had
+// asserted, for the first frame it plays after the CBR layer's (see
 // cbrInput). Input for the next frame is decided anew in InputUpdate.
 func cbrEndFrame() {
 	for i := range sysCBR.slots {
 		sl := &sysCBR.slots[i]
 		if !sl.driven && i < len(sys.chars) && len(sys.chars[i]) > 0 && sys.chars[i][0] != nil {
-			sl.noJam = sys.chars[i][0].asf(ASF_noaibuttonjam)
+			sl.aiFlags = sys.chars[i][0].assertFlag & cbrAIFlags
 		}
 		sl.wasDriven, sl.driven = sl.driven, false
 	}
@@ -772,11 +848,21 @@ func cbrStartDrive(pn int, slot *cbrSlot, aiLevel float32) {
 // person's would.
 //
 // On the first frame the character's own AI plays after the CBR layer's,
-// InputUpdate has read the character's AssertSpecial flags of the frame
-// before, when its AI was paused. An AI that turns the button jam off only
-// while AILevel reads above 0 would get a frame of random input there, so
-// when it had the jam off on its last frame, cbrInput keeps it off: it
-// returns no buttons with ok=true, while the frame stays the AI's.
+// the engine reads AssertSpecial flags the character asserted on the frame
+// before, when its AI was paused and asserted nothing: InputUpdate reads
+// NoAIButtonJam, and Char.actionPrepare the flags of cbrMoveFlags, and
+// whether the character could guard, before it moves the character on its
+// input (walk, jump, crouch, guard). An AI that asserts them only while
+// AILevel reads above 0 and leaves the button jam on would get random walks,
+// jumps and guards there that it never makes without the CBR layer. So on
+// that frame cbrInput gives the character back the flags its AI had at the
+// end of its last frame, and takes guarding away if those flags switched it
+// off in the character's state type. It only ever adds such restrictions,
+// never clearing a flag the character has, and the usual reset in
+// actionPrepare clears them before the character's code runs, which asserts
+// its own (the engine works out guarding anew after that code). As
+// NoAIButtonJam is read before cbrInput runs, the jam is kept off by
+// returning no buttons with ok=true; the frame stays the AI's.
 func cbrInput(c *Char) (btn [14]bool, ok bool) {
 	s := cbrRootSlot(c)
 	if s == nil || !s.active || !cbrCanDrive() {
@@ -790,8 +876,14 @@ func cbrInput(c *Char) (btn [14]bool, ok bool) {
 	}
 	btn, ok = sysCBR.eng.Input(c.playerNo, !c.fbFlip)
 	s.driven, s.btn = ok, btn
-	if !ok && s.wasDriven && s.noJam {
-		return [14]bool{}, true
+	if !ok && s.wasDriven {
+		c.setASF(s.aiFlags & cbrMoveFlags)
+		if cbrGuardOff(s.aiFlags, c.ss.stateType) {
+			c.unsetSCF(SCF_guard)
+		}
+		if s.aiFlags&ASF_noaibuttonjam != 0 {
+			return [14]bool{}, true
+		}
 	}
 	return btn, ok
 }
@@ -803,7 +895,7 @@ func cbrMatchEnd() {
 	for i := range sysCBR.slots {
 		s := &sysCBR.slots[i]
 		s.driven, s.configured, s.active, s.rootID = false, false, false, 0
-		s.wasDriven, s.noJam = false, false
+		s.wasDriven, s.aiFlags = false, 0
 	}
 	id := sysCBR.replayID
 	sysCBR.replayID = ""

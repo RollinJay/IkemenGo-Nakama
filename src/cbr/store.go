@@ -32,6 +32,13 @@ type Store struct {
 	// the character's own AI achieves where the CBR layer leaves it in
 	// control, for comparison with the CBR layer's own plays.
 	Baseline map[uint64]*BaselineStat
+	// Played is the other side of that comparison: what the CBR layer's own
+	// plays of each move achieved, by the move and the stance it is played
+	// from (see playKey).
+	Played map[uint64]*PlayStat
+	// BaseFormat is the layout Baseline and Played are kept in (see
+	// baseFormat). Records kept in an older layout are dropped on load.
+	BaseFormat int
 
 	global       *globalModels
 	dirtyRemoved bool
@@ -63,6 +70,8 @@ func NewStore(char string) *Store {
 		CmdStates:   map[int32]map[string]float32{},
 		Hypotheses:  map[int32]*Hypothesis{},
 		Baseline:    map[uint64]*BaselineStat{},
+		Played:      map[uint64]*PlayStat{},
+		BaseFormat:  baseFormat,
 	}
 	s.index()
 	return s
@@ -85,16 +94,93 @@ func (s *Store) compact() {
 }
 
 // ActionStat is the pooled outcome record of one action in one situation.
-// PTrials and PSum hold the results of the CBR layer's own plays of it alone,
-// without demonstrations, decayed like the rest and never shrunk toward a
-// prior: they are what a move has proved against the base AI (see
-// baseline.go).
+// PTrials and PSum are the results of the CBR layer's own plays of the
+// action from any stance, credited by Params.applyPlayed. The comparison
+// with the base AI reads the plays kept by stance instead (see PlayStat), and
+// falls back to these only for a move with none of those.
 type ActionStat struct {
 	Trials   float32
 	ValueSum float32
 	ByOpp    map[string]OppStat
 	PTrials  float32
 	PSum     float32
+}
+
+// PlayStat is what the CBR layer's own plays of a move achieved, alone,
+// without demonstrations: how many plays, the sum of their results, both
+// decayed like the rest and never shrunk toward a prior, and how many plays
+// the character's own AI took over from (see driver.contest), which count
+// for nothing else. It is what a move has proved against the base AI (see
+// baseline.go).
+type PlayStat struct {
+	Trials   float32
+	Sum      float32
+	Contests float32
+}
+
+// playKey identifies the record of the CBR layer's plays of a case's move:
+// its action (see actionKey) and the stance it is played from, which is the
+// one it was recorded in (see gateFilter): the character's own state type,
+// and whether it is being hit or guarding (see selfStun). The action alone
+// does not say it: a step back on the ground and a drift back in the air are
+// the same movement, and the same button can start the same move standing
+// or from a crouch. The stance takes bits 48 to 52, above the move.
+func playKey(c *Case) uint64 {
+	return actionKey(c) | uint64(c.StartStateType&7)<<48 | selfStun(&c.Start)<<51
+}
+
+// played returns the record of the CBR layer's plays of a case's move,
+// creating it.
+func (s *Store) played(c *Case) *PlayStat {
+	k := playKey(c)
+	r := s.Played[k]
+	if r == nil {
+		r = &PlayStat{}
+		s.Played[k] = r
+	}
+	return r
+}
+
+// playRecord returns what the CBR layer's plays of a case's move achieved,
+// for the comparison with the base AI. A move with no plays kept by stance
+// takes the plays credited to its action as a whole (ActionStat.PTrials and
+// PSum), if any.
+func (s *Store) playRecord(c *Case) PlayStat {
+	var r PlayStat
+	if pr := s.Played[playKey(c)]; pr != nil {
+		r = *pr
+	}
+	if r.Trials == 0 {
+		if a := s.Actions[actionKey(c)]; a != nil {
+			r.Trials, r.Sum = a.PTrials, a.PSum
+		}
+	}
+	return r
+}
+
+// addPlay records one result r of the CBR layer's own play of a case.
+func (s *Store) addPlay(p *Params, c *Case, r float32) {
+	pr := s.played(c)
+	pr.Trials = pr.Trials*p.Decay + 1
+	pr.Sum = pr.Sum*p.Decay + r
+}
+
+// creditPlay adds credit to the record of a case's plays without counting a
+// new play, for the round's terminal reward.
+func (s *Store) creditPlay(c *Case, r float32) {
+	s.played(c).Sum += r
+}
+
+// contestPlay notes that the character's own AI took over from a play of a
+// case, decayed like a play.
+func (s *Store) contestPlay(p *Params, c *Case) {
+	pr := s.played(c)
+	pr.Contests = pr.Contests*p.Decay + 1
+}
+
+// PlayString describes a played-record key (see playKey), for inspection.
+func PlayString(k uint64) string {
+	return ActionString(k&(1<<48-1)) + ", " + stanceString(k>>48&7, k>>51&3)
 }
 
 const actionBandPx = 40

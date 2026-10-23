@@ -150,6 +150,20 @@ func LoadStore(path, char string) (*Store, error) {
 	if s.Baseline == nil {
 		s.Baseline = map[uint64]*BaselineStat{} // a store saved before the baseline existed
 	}
+	if s.Played == nil {
+		s.Played = map[uint64]*PlayStat{}
+	}
+	if s.BaseFormat < baseFormat {
+		// The base AI's record and the CBR layer's plays were kept by
+		// situations that mixed what is now kept apart (see baseFormat): both
+		// start over, and fill again as the character plays.
+		clear(s.Baseline)
+		clear(s.Played)
+		for _, a := range s.Actions {
+			a.PTrials, a.PSum = 0, 0
+		}
+		s.BaseFormat = baseFormat
+	}
 	s.index()
 	return s, nil
 }

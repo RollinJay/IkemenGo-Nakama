@@ -309,14 +309,15 @@ func TestCBRButtonJamStaysOffAfterDrivenFrames(t *testing.T) {
 	// the input (the paused AI asserts nothing), then the AI's again.
 	root.setASF(ASF_noaibuttonjam)
 	cbrEndFrame()
-	if !s.noJam || s.wasDriven {
-		t.Fatalf("after the AI's frame: noJam %v wasDriven %v", s.noJam, s.wasDriven)
+	noJam := func() bool { return s.aiFlags&ASF_noaibuttonjam != 0 }
+	if !noJam() || s.wasDriven {
+		t.Fatalf("after the AI's frame: noJam %v wasDriven %v", noJam(), s.wasDriven)
 	}
 	s.driven = true
 	root.unsetASF(ASF_noaibuttonjam)
 	cbrEndFrame()
-	if !s.noJam || !s.wasDriven {
-		t.Fatalf("after the CBR layer's frame: noJam %v wasDriven %v", s.noJam, s.wasDriven)
+	if !noJam() || !s.wasDriven {
+		t.Fatalf("after the CBR layer's frame: noJam %v wasDriven %v", noJam(), s.wasDriven)
 	}
 	if jammed(false) {
 		t.Fatal("the jam the AI keeps off must stay off on its first frame after the CBR layer's")
@@ -342,5 +343,154 @@ func TestCBRButtonJamStaysOffAfterDrivenFrames(t *testing.T) {
 	cbrEndFrame()
 	if !jammed(false) {
 		t.Fatal("an AI without NoAIButtonJam gets the jam after the CBR layer's frames")
+	}
+}
+
+// TestCBRBuiltInMovesKeepTheAIsFlags: on the first frame the character's
+// own AI plays after the CBR layer's, the engine's built-in moves see the
+// flags the AI asserted on its last frame, through InputUpdate and
+// Char.actionPrepare, although the flags they read are from the CBR layer's
+// frame, when the AI was paused. So an AI that leaves the engine AI's button
+// jam on but switches off the built-in jump and walk only while AILevel
+// reads above 0 (as the stock ZSS Kung Fu Man's does) does not jump or walk
+// on the jam there. The flags are only added, never cleared, and the usual
+// reset clears them before the character's code runs.
+func TestCBRBuiltInMovesKeepTheAIsFlags(t *testing.T) {
+	cbrTestRuntime(t)
+	savedChars, savedAI, savedLevel, savedIntro := sys.chars, sys.aiInput, sys.aiLevel, sys.intro
+	savedCgi, savedIgnore, savedRound := sys.cgi[0], sys.ignoreMostErrors, sys.fightScreen.round
+	t.Cleanup(func() {
+		sys.chars, sys.aiInput, sys.aiLevel, sys.intro = savedChars, savedAI, savedLevel, savedIntro
+		sys.cgi[0], sys.ignoreMostErrors, sys.fightScreen.round = savedCgi, savedIgnore, savedRound
+	})
+	sys.fightScreen.round = &FightScreenRound{} // the round is in progress
+	root := &Char{controller: -1, minus: 3, localcoord: 320, localscl: 1, life: 1000}
+	root.cmd = []CommandList{*NewCommandList(NewInputBuffer())}
+	root.keyctrl[0] = true
+	sys.chars = [len(sys.chars)][]*Char{{root}}
+	sys.cgi[0].mugenver, sys.cgi[0].ikemenver = [2]uint16{1, 1}, [3]uint16{0, 1}
+	sys.intro = 0
+	sys.aiLevel[0] = 8
+	sys.ignoreMostErrors = true // the test character has no states to enter
+	s := &sysCBR.slots[0]
+	s.active = true // the engine has no player 0, so it declines every frame
+
+	// start runs the start of a frame of the character's AI, standing with
+	// control in state 0, with the engine AI's jam holding dir (0 up, 2
+	// right, 4 down, 6 left): InputUpdate, then actionPrepare, whose built-in
+	// moves act on the input. It reports the state they put the character
+	// in, and which flags the character had when they did.
+	start := func(dir int32) (state int32, flags AssertSpecialFlag) {
+		root.ss.no, root.ss.prevno, root.ss.time, root.ss.stateType = 0, 0, 10, ST_S
+		root.setSCF(SCF_ctrl)
+		sys.aiInput[0] = AiInput{dir: dir, dirt: 30}
+		root.cmd[0].Buffer.Reset()
+		root.cmd[0].InputUpdate(root, -1)
+		flags = root.assertFlag
+		root.actionPrepare()
+		return root.ss.no, flags
+	}
+	// end ends a frame: the character's code asserts flags (none on the CBR
+	// layer's frames, where the AI is paused), and the CBR layer notes the
+	// frame.
+	end := func(driven bool, asserted AssertSpecialFlag) {
+		root.assertFlag |= asserted
+		s.driven = driven
+		cbrEndFrame()
+	}
+	if got, _ := start(0); got != 40 {
+		t.Fatalf("setup: the jam holding up should jump, got state %d", got)
+	}
+	if got, _ := start(2); got != 20 {
+		t.Fatalf("setup: the jam holding right should walk, got state %d", got)
+	}
+
+	// The AI's frame switches the built-in jump and walk off, then the CBR
+	// layer gives the input for a frame, then the AI plays again.
+	for _, tc := range []struct {
+		name  string
+		dir   int32
+		moved int32
+		flag  AssertSpecialFlag
+	}{
+		{"jump", 0, 40, ASF_nojump | ASF_noairjump},
+		{"walk", 2, 20, ASF_nowalk | ASF_nobrake},
+	} {
+		start(tc.dir)
+		end(false, tc.flag)
+		start(tc.dir)
+		end(true, 0)
+		got, flags := start(tc.dir)
+		if got != 0 {
+			t.Fatalf("%s: the AI switches the built-in %s off, but the jam made it on its first frame after the CBR layer's (state %d)", tc.name, tc.name, got)
+		}
+		if flags&tc.flag != tc.flag {
+			t.Fatalf("%s: the built-in moves saw flags %#x, want %#x set", tc.name, flags, tc.flag)
+		}
+		if root.asf(tc.flag) {
+			t.Fatalf("%s: the reset must clear the flags before the character's code runs", tc.name)
+		}
+		// From then on the AI's own flags hold: it asserted nothing on that
+		// frame, so the jam moves it on the next.
+		end(false, 0)
+		if got, _ := start(tc.dir); got != tc.moved {
+			t.Fatalf("%s: on the AI's next frame the flags are its own, got state %d", tc.name, got)
+		}
+		end(false, 0)
+	}
+
+	// An AI that asserted nothing gets the jam's moves after the CBR layer's
+	// frames too: nothing is added that it did not have.
+	start(0)
+	end(false, 0)
+	start(0)
+	end(true, 0)
+	if got, _ := start(0); got != 40 {
+		t.Fatalf("an AI without NoJump jumps on the jam after the CBR layer's frames, got state %d", got)
+	}
+	end(false, 0)
+
+	// Guarding, with an attack near and the jam holding back: the CBR
+	// layer's frame left the character able to guard, but an AI that
+	// switched standing guard off on its last frame does not guard, and
+	// walks back as it would without the CBR layer (back walks when guarding
+	// is off); one that switched only crouching guard off guards.
+	root.inguarddist = true
+	guard := func() int32 {
+		root.setSCF(SCF_guard) // as the frame before left it
+		got, _ := start(6)
+		return got
+	}
+	if got := guard(); got != 120 {
+		t.Fatalf("setup: the jam holding back should guard, got state %d", got)
+	}
+	for _, tc := range []struct {
+		flag AssertSpecialFlag
+		want int32
+	}{{ASF_nostandguard, 20}, {ASF_nocrouchguard, 120}} {
+		end(false, 0)
+		guard()
+		end(false, tc.flag)
+		guard()
+		end(true, 0)
+		if got := guard(); got != tc.want {
+			t.Fatalf("flag %#x standing: state %d on the AI's first frame after the CBR layer's, want %d", tc.flag, got, tc.want)
+		}
+	}
+	end(false, 0)
+	root.inguarddist = false
+
+	// Every flag of the built-in moves is carried over, and a flag the
+	// character asserted on the CBR layer's frame (its own code, not its AI)
+	// is kept.
+	for _, f := range []AssertSpecialFlag{ASF_nojump, ASF_noairjump, ASF_nowalk, ASF_nobrake, ASF_nocrouch, ASF_nostand, ASF_nohardcodedkeys} {
+		start(4)
+		end(false, f)
+		start(4)
+		end(true, ASF_noautoturn)
+		if _, flags := start(4); flags&f == 0 || flags&ASF_noautoturn == 0 {
+			t.Fatalf("flag %#x: the built-in moves saw flags %#x", f, flags)
+		}
+		end(false, 0)
 	}
 }
