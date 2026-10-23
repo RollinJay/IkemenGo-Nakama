@@ -7,7 +7,9 @@ import (
 
 // The driver plays cases back for a CBR-driven player. It emits one frame
 // of input per call, converted to the character's current facing, and
-// declines when it has nothing confident so the engine's AI keeps control.
+// declines when it has nothing confident, or nothing that proved better
+// than the base AI (see baseline.go), so the character's own AI keeps
+// control.
 
 const (
 	retryFrames       = 4   // wait after declining before trying again
@@ -38,13 +40,31 @@ type driver struct {
 	declineCtl  bool
 	lastCheck   int64 // tick of the last better-case check
 
+	// The comparison with the base AI (see baseline.go): margin is the
+	// take-over margin; held is set when the last choice left the base AI in
+	// control although moves matched; explores counts this round's
+	// explorations; sit is the current decision situation, with what was
+	// drawn for it and whether a probe follows it; waitCtrl holds off until
+	// control returns after the character's own AI took over from a play.
+	margin     float32
+	held       bool
+	explores   int32
+	sit        decisionSit
+	sitSeen    bool
+	sitExplore bool
+	sitYield   bool
+	sitProbed  bool
+	probeTick  int64
+	waitCtrl   bool
+
 	cpCache      map[uint64]float32
 	lastBest     float32
 	lastBestDist float32
 }
 
 func newDriver(p *Params, player int, lv Levels, seed int64, st *Store, ct *chainTracker) *driver {
-	return &driver{p: p, player: player, levels: lv.clamp(), rng: rand.New(rand.NewSource(seed)), st: st, ct: ct}
+	return &driver{p: p, player: player, levels: lv.clamp(), rng: rand.New(rand.NewSource(seed)), st: st, ct: ct,
+		margin: p.TakeoverMargin}
 }
 
 // observe is called once per logical frame with the frame's result.
@@ -99,20 +119,30 @@ func (d *driver) input(w *WorldSnap, self *CharSnap, cur *Feat) (InputBits, bool
 			// The recovered better-case check: while the character can act
 			// and the case has nothing committed left, switch when another
 			// case beats this one, re-scored against the current state, by
-			// BetterCaseThreshold.
+			// BetterCaseThreshold. With the base AI on, only to a case that
+			// proved better than the base AI here.
 			d.lastCheck = tick
-			if nc, _ := d.choose(cur, self, tick); nc != nil && nc != c && d.lastBest+d.p.BetterCaseThreshold < d.currentScore(cur) {
+			g := &gate{key: baselineKey(cur, self.Ctrl, self.AILevel)}
+			if nc, _ := d.chooseWhy(cur, self, tick, nil, g); nc != nil && nc != c && d.lastBest+d.p.BetterCaseThreshold < d.currentScore(cur) {
 				d.begin(nc, self, tick)
 			}
 		}
 	}
 	if d.cur == nil {
-		// Mid-action cases need frame-exact starts, so retry every frame
-		// while the character is busy; in neutral a short wait is fine.
+		if d.waitCtrl {
+			if !self.Ctrl {
+				return 0, false
+			}
+			d.waitCtrl = false
+		}
 		// After a decline, wait a few frames before searching again unless
 		// the situation changed; mid-action cases need frame-exact starts,
-		// so while busy every frame is tried.
+		// so while busy every frame is tried. When moves matched but none
+		// proved better than the base AI, the wait with control is longer.
 		wait := int64(retryFrames)
+		if d.held {
+			wait = int64(d.p.NotBetterBackoff)
+		}
 		if !self.Ctrl {
 			wait = 1
 		}
@@ -120,7 +150,7 @@ func (d *driver) input(w *WorldSnap, self *CharSnap, cur *Feat) (InputBits, bool
 		if d.declined && unchanged && tick-d.lastDecline < wait {
 			return 0, false
 		}
-		c, _ := d.choose(cur, self, tick)
+		c := d.decide(cur, self, tick)
 		if c == nil {
 			d.lastDecline, d.declined = tick, true
 			d.declineNo, d.declineCtl = self.StateNo, self.Ctrl
@@ -182,6 +212,27 @@ func (d *driver) abort() {
 		d.cur.Outcome.Aborts++
 	}
 	d.cur = nil
+}
+
+// contest drops the case being played because the character's own AI took
+// over from it (see Engine.watchDriven). Unlike an abort, nothing counts
+// against the case, and its chain credit is left out, since its inputs were
+// not what moved the character. The driver then waits for control to return
+// before choosing again.
+func (d *driver) contest() {
+	if d.cur == nil {
+		return
+	}
+	d.ct.contest(d.cur.ID)
+	d.cur = nil
+	d.waitCtrl = true
+}
+
+// roundEnd clears what lasts only a round.
+func (d *driver) roundEnd() {
+	d.cur, d.cpCache = nil, nil
+	d.explores = 0
+	d.sitSeen, d.waitCtrl = false, false
 }
 
 // schedule copies a case's inputs and, below execution 8, shifts each combo

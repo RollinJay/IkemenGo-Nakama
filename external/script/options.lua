@@ -216,6 +216,7 @@ options.t_itemname = {
 			modifyGameOption('Arcade.AI.Ramping', true)
 			modifyGameOption('CBR.Enabled', true)
 			--modifyGameOption('CBR.DriveCPU', true)
+			modifyGameOption('CBR.TakeoverMargin', 2)
 			--modifyGameOption('CBR.Execution', 0)
 			modifyGameOption('CBR.Knowledge', 8)
 			--modifyGameOption('CBR.Ambition', 0)
@@ -748,7 +749,22 @@ options.t_itemname = {
 		end
 		return true
 	end,
-	--CBR AI Training Dummy (the CBR AI also plays the CPU-controlled dummy)
+	--CBR AI Take-Over Margin (how much better than the character's own AI a move must have proved before the CBR AI takes over with it)
+	['cbrmargin'] = function(t, item, cursorPosY, moveTxt)
+		if getInput(-1, motif.option_info.menu.add.key) and gameOption('CBR.TakeoverMargin') < 3 then
+			sndPlay(motif.Snd, motif.option_info.cursor.move.snd[1], motif.option_info.cursor.move.snd[2])
+			modifyGameOption('CBR.TakeoverMargin', gameOption('CBR.TakeoverMargin') + 1)
+			t.items[item].vardisplay = options.t_vardisplay['cbrmargin']()
+			options.modified = true
+		elseif getInput(-1, motif.option_info.menu.subtract.key) and gameOption('CBR.TakeoverMargin') > 1 then
+			sndPlay(motif.Snd, motif.option_info.cursor.move.snd[1], motif.option_info.cursor.move.snd[2])
+			modifyGameOption('CBR.TakeoverMargin', gameOption('CBR.TakeoverMargin') - 1)
+			t.items[item].vardisplay = options.t_vardisplay['cbrmargin']()
+			options.modified = true
+		end
+		return true
+	end,
+	--CBR AI Training Dummy (the CBR AI may also take over the CPU-controlled dummy)
 	['cbrtraining'] = function(t, item, cursorPosY, moveTxt)
 		if getInput(-1, motif.option_info.menu.add.key, motif.option_info.menu.subtract.key, motif.option_info.menu.done.key) then
 			sndPlay(motif.Snd, motif.option_info.cursor.move.snd[1], motif.option_info.cursor.move.snd[2])
@@ -1713,6 +1729,10 @@ options.t_vardisplay = {
 	end,
 	['cbrknowledge'] = function()
 		return gameOption('CBR.Knowledge')
+	end,
+	['cbrmargin'] = function()
+		local valuename = motif.option_info.menu.valuename
+		return options.f_definedDisplay(gameOption('CBR.TakeoverMargin'), {[1] = valuename.low or 'Low', [2] = valuename.medium or 'Medium', [3] = valuename.high or 'High'}, gameOption('CBR.TakeoverMargin'))
 	end,
 	['cbrreplays'] = function()
 		return options.f_boolDisplay(gameOption('CBR.RecordReplays'), motif.option_info.menu.valuename.enabled, motif.option_info.menu.valuename.disabled)

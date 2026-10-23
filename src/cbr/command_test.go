@@ -38,7 +38,7 @@ func hasPrefix(in, motion []InputBits) bool {
 }
 
 func TestAssistedCommandRecordedWithMotion(t *testing.T) {
-	eng := New(DefaultParams(), t.TempDir(), 1)
+	eng := New(withoutBaseAI(), t.TempDir(), 1)
 	eng.SetMotions("Rush", simMotions)
 	recordWith(t, eng, SrcEngineAI, 4, 10, func(r *rand.Rand) controller { return &cheater{rng: r} })
 	st, _ := eng.Store("Rush")

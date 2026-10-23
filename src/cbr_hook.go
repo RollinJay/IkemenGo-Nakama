@@ -13,6 +13,16 @@ package main
 //   char.go    command():         cbrSuppressAICheat() in the AI cheat test
 //   char.go    actionPrepare():   cbrMaskAILevel() after the AssertSpecial reset
 //
+// The character's own AI is the base, always. The CBR layer takes over only
+// with a move that has proved better than that AI in the same kind of
+// situation (see package cbr, baseline.go), and pauses the AI only on the
+// frames it gives the input: on those frames AILevel reads 0, so AI code
+// written against AILevel stays off, and the engine AI's command cheat does
+// not fire. On every other frame the character's AI plays as usual. An older
+// AI that a long command switches on, and that ignores AILevel once on,
+// cannot be paused; when it takes over during a move the CBR layer is
+// playing, that move is dropped without counting against it.
+//
 // Everything is inert until a script enables it with cbrEnable(true).
 //
 // The CBR AI is based on KDing's original CBR AI for IKEMEN GO
@@ -39,17 +49,14 @@ type cbrSlot struct {
 	source cbr.Source
 	drive  bool
 	levels cbr.Levels
+	margin int   // take-over margin setting: 1 Low, 2 Medium, 3 High
 	rootID int32 // detects Turns member changes
 
 	// Per round: configured is set once the slot's character has been
 	// assigned (at round start, or when it first enters the fight, as a Tag
-	// partner does); active is set when the CBR layer drives the slot; char
-	// is the character's store key; mask keeps the character's own AI off
-	// because that AI was seen changing states directly.
+	// partner does); active is set when the CBR layer drives the slot.
 	configured bool
 	active     bool
-	char       string
-	mask       bool
 
 	// Per frame: driven is set when this frame's input came from the CBR
 	// layer, with btn the input given, for the slot's key-controlled helpers.
@@ -279,29 +286,23 @@ func cbrRootSlot(c *Char) *cbrSlot {
 }
 
 // cbrSuppressAICheat reports whether the engine AI's command cheat must not
-// fire for a command of a character the CBR layer drives this round. On
-// frames the CBR layer supplies the input it never fires, since it would
-// play random motion commands on top of that input. On fallback frames it
-// still plays the engine AI's moves, except commands longer than any move a
-// person inputs: older character AI uses such commands as switches that
-// turn itself on. Called from Char.command.
-func cbrSuppressAICheat(c *Char, cl []Command) bool {
+// fire for a command of a character the CBR layer drives this round: on
+// frames the CBR layer supplies the input, since it would play random motion
+// commands on top of that input. On every other frame the base AI plays,
+// cheat included, so an older AI can still switch itself on with a long
+// command. Called from Char.command.
+func cbrSuppressAICheat(c *Char, _ []Command) bool {
 	s := cbrRootSlot(c)
-	if s == nil || !s.active || !cbrCanDrive() {
-		return false
-	}
-	return s.driven || len(cl) == 0 || len(cl[0].steps) > cbrMaxSynthSteps
+	return s != nil && s.active && s.driven && cbrCanDrive()
 }
 
-// cbrMaskAILevel reports whether a character's AILevel trigger must read 0.
-// While the CBR layer supplies its input, the character's own AI code stays
-// off so it does not act on top of that input; when that AI was seen
-// changing states directly, it also stays off on frames the CBR layer
-// declines, and the engine AI is the fallback. Called from
+// cbrMaskAILevel reports whether a character's AILevel trigger must read 0:
+// on frames the CBR layer supplies the input, so the character's own AI
+// code pauses and does not act on top of it. Called from
 // Char.actionPrepare, which sets the engine's NoAILevel flag.
 func cbrMaskAILevel(c *Char) bool {
 	s := cbrRootSlot(c)
-	return s != nil && s.active && (s.driven || s.mask) && cbrCanDrive()
+	return s != nil && s.active && s.driven && cbrCanDrive()
 }
 
 // cbrScale converts a character's local position units to 320-wide game
@@ -370,7 +371,10 @@ func cbrCommandList(c *Char) *CommandList {
 
 // cbrActiveCommands lists a root's commands active this frame: completed by
 // input or asserted (buffer time left), or chosen by the engine AI's
-// command cheat under the same conditions Char.command applies.
+// command cheat under the same conditions Char.command applies. Commands
+// longer than any move a person inputs are left out: older character AI
+// uses them as switches that turn itself on, and one active by chance must
+// not pass for the command behind a move.
 func cbrActiveCommands(c *Char, cl *CommandList) []string {
 	var out []string
 	cheat := -1
@@ -378,7 +382,7 @@ func cbrActiveCommands(c *Char, cl *CommandList) []string {
 		cheat = int(c.cpucmd)
 	}
 	for i, cmds := range cl.Commands {
-		if len(cmds) == 0 {
+		if len(cmds) == 0 || len(cmds[0].steps) > cbrMaxSynthSteps {
 			continue
 		}
 		active := false
@@ -557,7 +561,7 @@ func cbrFrame() {
 	if !sysCBR.roundOpen && s.World.RoundState == 2 {
 		for i := range sysCBR.slots {
 			sl := &sysCBR.slots[i]
-			sl.configured, sl.active, sl.mask = false, false, false
+			sl.configured, sl.active = false, false
 		}
 		sysCBR.roundOpen = true
 	}
@@ -576,14 +580,8 @@ func cbrFrame() {
 		sysCBR.roundOpen = false
 	}
 	for i := range sysCBR.slots {
-		sl := &sysCBR.slots[i]
-		// Driven play can reveal the character's own AI changing states
-		// directly; keep it off from then on.
-		if sl.active && !sl.mask && eng.ChangeStateAI(sl.char) {
-			sl.mask = true
-		}
 		// Input for the next frame is decided anew in InputUpdate.
-		sl.driven = false
+		sysCBR.slots[i].driven = false
 	}
 }
 
@@ -597,7 +595,6 @@ func cbrConfigure(pn int, s *cbr.Snapshot) {
 		return
 	}
 	name := s.Players[pn].Name
-	slot.char = name
 	if pn < len(sys.chars) && len(sys.chars[pn]) > 0 {
 		eng.SetMotions(name, cbrMotions(sys.chars[pn][0]))
 	}
@@ -637,15 +634,25 @@ func cbrConfigure(pn int, s *cbr.Snapshot) {
 		}
 	}
 	if slot.drive && cpu && cbrCanDrive() {
-		lv := slot.levels
-		if lv.Execution == 0 {
-			// Execution follows the CPU's AI level.
-			lv.Execution = int(math.Round(float64(s.Players[pn].Root.AILevel)))
-		}
-		eng.Drive(pn, lv)
-		slot.active = true
-		slot.mask = eng.ChangeStateAI(name)
+		cbrStartDrive(pn, slot, s.Players[pn].Root.AILevel)
 	}
+}
+
+// cbrStartDrive puts player pn under CBR control for the round with its
+// slot's settings, its character already assigned to the engine.
+func cbrStartDrive(pn int, slot *cbrSlot, aiLevel float32) {
+	eng := sysCBR.eng
+	lv := slot.levels
+	if lv.Execution == 0 {
+		// Execution follows the CPU's AI level.
+		lv.Execution = int(math.Round(float64(aiLevel)))
+	}
+	if err := eng.Drive(pn, lv); err != nil {
+		sysCBR.lastErr = err.Error()
+		return
+	}
+	eng.SetTakeoverMargin(pn, slot.margin)
+	slot.active = true
 }
 
 // cbrInput is called from InputUpdate's AI branch. It returns the CBR
@@ -675,7 +682,7 @@ func cbrMatchEnd() {
 	sysCBR.roundOpen = false
 	for i := range sysCBR.slots {
 		s := &sysCBR.slots[i]
-		s.driven, s.configured, s.active, s.mask, s.rootID = false, false, false, false, 0
+		s.driven, s.configured, s.active, s.rootID = false, false, false, 0
 	}
 	id := sysCBR.replayID
 	sysCBR.replayID = ""
@@ -751,10 +758,13 @@ func cbrRegisterLua(l *lua.LState) {
 		sysCBR.skipReplays = l.GetTop() >= 3 && !boolArg(l, 3)
 		return 0
 	})
-	// cbrDrive(pn, execution, knowledge[, ambition]): puts player pn under CBR
-	// control whenever it is CPU-controlled, with the given 1-8 dials.
-	// Execution 0 follows the CPU's AI level; ambition 0 follows execution.
-	// Execution and knowledge both at 8 is the level-9 tier.
+	// cbrDrive(pn, execution, knowledge[, ambition[, margin]]): puts player pn
+	// under CBR control whenever it is CPU-controlled, with the given 1-8
+	// dials. Execution 0 follows the CPU's AI level; ambition 0 follows
+	// execution. Execution and knowledge both at 8 is the level-9 tier. The
+	// character's own AI stays the base, and margin is how much better a move
+	// must have proved for the CBR layer to take over with it: 1 Low, 2 Medium
+	// (also when missing or not 1-3), 3 High.
 	luaRegister(l, "cbrDrive", func(l *lua.LState) int {
 		pn := int(numArg(l, 1)) - 1
 		if pn < 0 || pn >= len(sysCBR.slots) {
@@ -764,8 +774,13 @@ func cbrRegisterLua(l *lua.LState) {
 		if l.GetTop() >= 4 {
 			lv.Ambition = int(numArg(l, 4))
 		}
+		margin := 2
+		if v, ok := l.Get(5).(lua.LNumber); ok && v >= 1 && v <= 3 {
+			margin = int(v)
+		}
 		sysCBR.slots[pn].drive = true
 		sysCBR.slots[pn].levels = lv
+		sysCBR.slots[pn].margin = margin
 		return 0
 	})
 	// cbrStop(pn): stops recording and driving player pn.

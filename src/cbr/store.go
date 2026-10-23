@@ -21,10 +21,17 @@ type Store struct {
 	// (see command.go). It resolves assisted commands and hypotheses.
 	CmdStates map[int32]map[string]float32
 	// ChangeStateAI is set once this character's own AI has been seen
-	// entering attack states with no command active. While the CBR layer
-	// drives the character, that AI is kept off entirely.
+	// entering attack states with no command active, in recorded play or
+	// during a move the CBR layer played. It is a record for inspection: the
+	// AI's recorded cases are discarded for the match it was seen in (the
+	// states it entered are kept as hypotheses), and how the character is
+	// driven does not change.
 	ChangeStateAI bool
 	Hypotheses    map[int32]*Hypothesis
+	// Baseline is the base AI's record by situation (see baseline.go): what
+	// the character's own AI achieves where the CBR layer leaves it in
+	// control, for comparison with the CBR layer's own plays.
+	Baseline map[uint64]*BaselineStat
 
 	global       *globalModels
 	dirtyRemoved bool
@@ -55,6 +62,7 @@ func NewStore(char string) *Store {
 		Actions:     map[uint64]*ActionStat{},
 		CmdStates:   map[int32]map[string]float32{},
 		Hypotheses:  map[int32]*Hypothesis{},
+		Baseline:    map[uint64]*BaselineStat{},
 	}
 	s.index()
 	return s
@@ -77,13 +85,36 @@ func (s *Store) compact() {
 }
 
 // ActionStat is the pooled outcome record of one action in one situation.
+// PTrials and PSum hold the results of the CBR layer's own plays of it alone,
+// without demonstrations, decayed like the rest and never shrunk toward a
+// prior: they are what a move has proved against the base AI (see
+// baseline.go).
 type ActionStat struct {
 	Trials   float32
 	ValueSum float32
 	ByOpp    map[string]OppStat
+	PTrials  float32
+	PSum     float32
 }
 
 const actionBandPx = 40
+
+// distanceBand is actionKey's coarse distance to the enemy: 40-pixel bands
+// of its position ahead (band 4 within 40 pixels either way, higher bands
+// ahead, lower behind), 4 with no enemy.
+func distanceBand(f *Feat) uint64 {
+	band := int64(4)
+	if f.Enemy.Present {
+		band = int64(f.Enemy.RelX/actionBandPx) + 4
+	}
+	if band < 0 {
+		band = 0
+	}
+	if band > 15 {
+		band = 15
+	}
+	return uint64(band)
+}
 
 // actionKey identifies what a case does and in what kind of situation: the
 // move it executes (or, for movement, its direction class), the enemy's
@@ -98,18 +129,8 @@ func actionKey(c *Case) uint64 {
 	if c.Kind == KindMovement {
 		move = -1 - int64(movementClass(c))
 	}
-	band := int64(4)
-	if c.Start.Enemy.Present {
-		band = int64(c.Start.Enemy.RelX/actionBandPx) + 4
-	}
-	if band < 0 {
-		band = 0
-	}
-	if band > 15 {
-		band = 15
-	}
 	k := uint64(uint32(int32(move)))<<16 |
-		uint64(c.Start.Enemy.State&7)<<4 | uint64(band) |
+		uint64(c.Start.Enemy.State&7)<<4 | distanceBand(&c.Start) |
 		uint64(exchangeContext(&c.Start))<<8
 	if c.StartCtrl {
 		k |= 1 << 11

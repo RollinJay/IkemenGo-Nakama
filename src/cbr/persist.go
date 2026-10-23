@@ -147,6 +147,9 @@ func LoadStore(path, char string) (*Store, error) {
 	if s.Hypotheses == nil {
 		s.Hypotheses = map[int32]*Hypothesis{}
 	}
+	if s.Baseline == nil {
+		s.Baseline = map[uint64]*BaselineStat{} // a store saved before the baseline existed
+	}
 	s.index()
 	return s, nil
 }

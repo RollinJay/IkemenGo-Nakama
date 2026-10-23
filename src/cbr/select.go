@@ -3,7 +3,8 @@ package cbr
 import "math"
 
 // Selection: filter by hard constraints, score what remains, and decline
-// when nothing is close enough so the engine's own AI keeps control.
+// when nothing is close enough, or (with the base AI on) nothing has proved
+// better than the base AI, so the character's own AI keeps control.
 
 func grounded(st StateType) bool { return st == StStand || st == StCrouch }
 
@@ -80,9 +81,10 @@ type pick struct {
 }
 
 // choose returns the best case for the current state, or nil when nothing
-// passes the filters within the confidence threshold.
+// passes the filters within the confidence threshold. It does not compare
+// with the base AI; the driver's own choices do (see decide).
 func (d *driver) choose(cur *Feat, self *CharSnap, tick int64) (*Case, float32) {
-	return d.chooseWhy(cur, self, tick, nil)
+	return d.chooseWhy(cur, self, tick, nil, nil)
 }
 
 // Rejection reasons counted by chooseWhy, for the debug overlay.
@@ -102,8 +104,9 @@ const (
 )
 
 // chooseWhy is choose, counting why candidates were rejected into why when
-// it is non-nil.
-func (d *driver) chooseWhy(cur *Feat, self *CharSnap, tick int64, why map[string]int) (*Case, float32) {
+// it is non-nil. With a gate and Params.BaseAI set, a candidate must also
+// be allowed to take over from the base AI (see gateFilter).
+func (d *driver) chooseWhy(cur *Feat, self *CharSnap, tick int64, why map[string]int, g *gate) (*Case, float32) {
 	rej := func(r string) {
 		if why != nil {
 			why[r]++
@@ -193,7 +196,8 @@ func (d *driver) chooseWhy(cur *Feat, self *CharSnap, tick int64, why map[string
 		return nil, 0
 	}
 	// Stage two: among cases within the similarity band of the best match,
-	// rank by value, exploration and reuse.
+	// rank by value, exploration and reuse, keeping with the base AI on only
+	// those allowed to take over from it.
 	band := bestDist + p.SimilarityBand
 	human := false
 	for _, pk := range picks {
@@ -211,12 +215,19 @@ func (d *driver) chooseWhy(cur *Feat, self *CharSnap, tick int64, why map[string
 		if human && !pk.c.Source.IsHuman() {
 			pk.score += p.HumanPrecedence
 		}
-		if pk.score < bestScore {
-			bestScore = pk.score
-		}
 		kept = append(kept, pk)
 	}
 	picks = kept
+	if g != nil && p.BaseAI {
+		if picks = d.gateFilter(picks, g, ambExp, rej); len(picks) == 0 {
+			return nil, 0
+		}
+	}
+	for _, pk := range picks {
+		if pk.score < bestScore {
+			bestScore = pk.score
+		}
+	}
 	d.lastBest = bestScore
 	d.lastBestDist = bestDist
 	tie := bestScore + p.TopSelectionThreshold

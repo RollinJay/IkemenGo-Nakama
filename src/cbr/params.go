@@ -103,6 +103,50 @@ type Params struct {
 	DemoWeight      float32
 	DemoComboWeight float32
 
+	// The base AI (see baseline.go). With BaseAI set, the character's own AI
+	// is the base and plays whenever the CBR layer does not take over, and the
+	// CBR layer takes over only with a move that has proved better than the
+	// base AI in the same kind of situation. Results are chain rewards (see
+	// Params.reward), whose scale is a fraction of a life bar per exchange.
+	//
+	// A move has proved itself once the CBR layer has played it
+	// TakeoverMinPlays times. Its advantage is the mean result of those plays
+	// minus the base AI's mean in the situation, shrunk toward zero as if
+	// TakeoverShrink more plays had matched the base AI exactly, then weighted
+	// by the chance that its route completes, as the value is (see score). It
+	// takes over when the advantage exceeds TakeoverMargin, the Medium
+	// take-over margin setting (Low is half of it, High twice; see
+	// Engine.SetTakeoverMargin), or twice the setting's margin while the base
+	// AI has fewer than BaselineMinTrials results in the situation.
+	//
+	// The base AI's mean in a situation is shrunk toward the mean of a
+	// coarser situation as if BaselineShrink results had matched that, the
+	// coarser one likewise toward the mean of all its results in the store,
+	// and that toward BaselineDefault.
+	//
+	// Untested moves are tried now and then so they can prove themselves:
+	// in a new decision situation where no move has proved better, with
+	// chance TakeoverExplore, the best unproven move whose demonstrated result
+	// beats the base AI's mean is played, at most TakeoverExploreMax times a
+	// round. With chance BaseExplore the CBR layer leaves even a situation
+	// where a move has proved better to the base AI, so the base AI's record
+	// stays current.
+	//
+	// After declining because nothing proved better, the CBR layer waits
+	// NotBetterBackoff frames before looking again while it has control,
+	// unless its state or control changes first.
+	BaseAI             bool
+	TakeoverMargin     float32
+	TakeoverMinPlays   float32
+	TakeoverShrink     float32
+	BaselineMinTrials  float32
+	BaselineShrink     float32
+	BaselineDefault    float32
+	TakeoverExplore    float32
+	TakeoverExploreMax int32
+	BaseExplore        float32
+	NotBetterBackoff   int32
+
 	// Store budget (see Store.Prune).
 	MaxCases         int
 	MaxNonHumanShare float32
@@ -236,6 +280,18 @@ func DefaultParams() *Params {
 		HumanPrecedence:       1,
 		DemoWeight:            1,
 		DemoComboWeight:       1,
+
+		BaseAI:             true,
+		TakeoverMargin:     0.03,
+		TakeoverMinPlays:   3,
+		TakeoverShrink:     3,
+		BaselineMinTrials:  5,
+		BaselineShrink:     5,
+		BaselineDefault:    0,
+		TakeoverExplore:    0.05,
+		TakeoverExploreMax: 6,
+		BaseExplore:        0.02,
+		NotBetterBackoff:   8,
 
 		MaxCases:         6000,
 		MaxNonHumanShare: 0.4,

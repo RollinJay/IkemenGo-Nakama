@@ -8,7 +8,8 @@ import (
 
 // Learning tests: a scripted player (rushdown) is recorded against a
 // scripted opponent, then the CBR layer plays in its place against the same
-// opponent on fixed seeds.
+// opponent on fixed seeds. The base AI is off, so the CBR layer plays
+// whatever it matches; baseline_test.go covers playing over a base AI.
 
 type oppFactory func(rng *rand.Rand) controller
 
@@ -91,7 +92,7 @@ func TestValueLearningImprovesPlay(t *testing.T) {
 	}
 	lv := Levels{Execution: 8, Knowledge: 8}
 	run := func(mod func(*Params), learn int) (float32, float32) {
-		p := DefaultParams()
+		p := withoutBaseAI()
 		if mod != nil {
 			mod(p)
 		}
@@ -123,7 +124,7 @@ func TestPlaybackFidelityFloor(t *testing.T) {
 		runRound(s, nil, [2]controller{&rushdown{rng: rand.New(rand.NewSource(int64(r)))}, &defender{rng: rand.New(rand.NewSource(int64(900 + r)))}}, 3600)
 		base += 1000 - s.ch[1].life
 	}
-	p := DefaultParams()
+	p := withoutBaseAI()
 	pureRetrieval(p)
 	eng := New(p, t.TempDir(), 7)
 	recordRounds(t, eng, 20, 40)
@@ -164,7 +165,7 @@ func TestLearningCurve(t *testing.T) {
 	for _, v := range variants {
 		var before, after []roundResult
 		for trial := 0; trial < 4; trial++ {
-			p := DefaultParams()
+			p := withoutBaseAI()
 			v.mod(p)
 			eng := New(p, t.TempDir(), int64(7+trial))
 			recordVs(t, eng, 20, int64(40+trial*100), of)

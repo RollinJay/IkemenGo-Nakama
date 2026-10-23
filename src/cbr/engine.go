@@ -40,9 +40,9 @@ type playerState struct {
 	lastWorld WorldSnap
 	observed  bool
 
-	// unexplained counts attack starts with no command active while the
-	// slot is driven: the character's own AI changing states directly
-	// underneath the CBR layer.
+	// unexplained counts attack starts with no command active during moves
+	// the CBR layer played: the character's own AI changing states directly
+	// while it was meant to be paused.
 	unexplained int32
 }
 
@@ -69,7 +69,7 @@ func (e *Engine) SetMotions(char string, m map[string]Motion) {
 }
 
 // ChangeStateAI reports whether the character's own AI has been seen
-// entering attack states with no command active.
+// entering attack states with no command active (see Store.ChangeStateAI).
 func (e *Engine) ChangeStateAI(char string) bool {
 	st, err := e.Store(char)
 	return err == nil && st.ChangeStateAI
@@ -134,9 +134,23 @@ func (e *Engine) SetPlayer(n int, char, opponent string) error {
 	ps.tr = newTracker(e.p, n)
 	ps.ct = newChainTracker(e.p, n, &e.ids)
 	ps.ct.onFinal = func(rc *resolvedChain) { e.finalizeChain(ps, rc) }
+	// A case or probe that never joined an exchange resolves as neutral: a
+	// recorded case and the base AI's record take the neutral result, and so
+	// does a played case's record against the base AI, so the two stay
+	// comparable. A played case's value is left as it was.
 	ps.ct.onEvict = func(cc chainCase, tick int64) {
-		if cc.rec != nil && ps.rec != nil {
-			ps.rec.finalizeLoose(cc.rec, tick)
+		neutral := e.p.Situation[CompNeutral]
+		switch {
+		case cc.probe:
+			ps.st.addBaseline(e.p, cc.key, neutral)
+		case cc.rec != nil:
+			if ps.rec != nil {
+				ps.rec.finalizeLoose(cc.rec, tick)
+			}
+		case cc.caseID != 0 && !cc.contested:
+			if c := ps.st.Get(cc.caseID); c != nil {
+				e.p.applyPlayed(ps.st.action(c), neutral)
+			}
 		}
 	}
 	e.players[n] = ps
@@ -228,6 +242,25 @@ func (e *Engine) Drive(n int, lv Levels) error {
 	return nil
 }
 
+// SetTakeoverMargin sets how much better than the base AI a move must have
+// proved before the CBR layer takes over with it, for player n while it is
+// driven (call it after Drive): level 1 Low, half of Params.TakeoverMargin;
+// 2 Medium, TakeoverMargin; 3 High, twice it. Any other level is Medium.
+func (e *Engine) SetTakeoverMargin(n, level int) {
+	if ps := e.player(n); ps != nil && ps.drv != nil {
+		ps.drv.margin = e.p.takeoverMargin(level)
+	}
+}
+
+// TakeoverMargin returns player n's take-over margin, or 0 when the CBR
+// layer does not drive it.
+func (e *Engine) TakeoverMargin(n int) float32 {
+	if ps := e.player(n); ps != nil && ps.drv != nil {
+		return ps.drv.margin
+	}
+	return 0
+}
+
 // StopDrive returns player n to the engine's AI.
 func (e *Engine) StopDrive(n int) {
 	if ps := e.player(n); ps != nil {
@@ -266,6 +299,7 @@ func (e *Engine) Frame(s *Snapshot) {
 		if ps.drv != nil {
 			ps.drv.observe(&me.Root)
 			e.watchDriven(ps, &me.Root, s.World.RoundState)
+			e.watchBase(ps, &me.Root, &s.World)
 		}
 		ps.lastFeat = f
 		ps.lastSelf = me.Root
@@ -274,21 +308,39 @@ func (e *Engine) Frame(s *Snapshot) {
 	}
 }
 
-// watchDriven flags the character's own AI as direct state change when,
-// while the slot is driven, the character starts attacks from control with
-// no command active. The recorder does the same for recorded play; this
-// covers driven play, which is never recorded.
+// watchDriven watches the moves the CBR layer plays. An attack started from
+// control with no command active during one is the character's own AI
+// changing states directly although it was paused: an older AI that a long
+// command switched on, for instance, ignores the AILevel it reads. The move
+// is dropped without counting against it (see driver.contest), and after
+// ChangeStateFlagCount such starts the store notes the AI as direct state
+// change. The recorder does the same for recorded play.
 func (e *Engine) watchDriven(ps *playerState, self *CharSnap, roundState int32) {
 	prev := &ps.lastSelf
-	if !ps.observed || !self.CmdKnown || roundState != 2 || ps.st.ChangeStateAI {
+	d := ps.drv
+	if !ps.observed || !self.CmdKnown || roundState != 2 || !self.CBRDriven || d.cur == nil {
 		return
 	}
 	if prev.Ctrl && !self.Ctrl && self.StateNo != prev.StateNo && self.MoveType == MtAttack &&
-		!significant(self.Commands, e.motions[ps.char]) {
+		self.StateNo != d.cur.MoveRef && !significant(self.Commands, e.motions[ps.char]) {
+		d.contest()
 		ps.unexplained++
 		if ps.unexplained >= e.p.ChangeStateFlagCount {
 			ps.st.ChangeStateAI = true
 		}
+	}
+}
+
+// watchBase adds a probe when, on a frame the CBR layer did not drive, the
+// base AI starts an action from control, so its record covers what it does
+// on its own as well as where the CBR layer left it in control.
+func (e *Engine) watchBase(ps *playerState, self *CharSnap, w *WorldSnap) {
+	prev := &ps.lastSelf
+	if !e.p.BaseAI || !ps.observed || w.RoundState != 2 || self.CBRDriven {
+		return
+	}
+	if prev.Ctrl && !self.Ctrl && self.StateNo != prev.StateNo && self.MoveType != MtHit {
+		ps.drv.baseAction(&ps.lastFeat, prev, w.Tick)
 	}
 }
 
@@ -311,21 +363,25 @@ func (e *Engine) Input(n int, facingRight bool) (btn EngineButtons, ok bool) {
 }
 
 // finalizeChain credits a resolved chain to its cases: recorded cases take
-// their demonstrated result, played cases update their value. A failure
-// caused by injected execution noise is kept out of the value.
+// their demonstrated result, played cases update their value and their
+// record against the base AI, and probes the base AI's record. A failure
+// caused by injected execution noise is kept out of the value, and a play
+// the character's own AI took over from counts for nothing.
 func (e *Engine) finalizeChain(ps *playerState, rc *resolvedChain) {
-	n := len(rc.ch.cases)
+	pos, after, n := rc.ch.split()
 	r := e.p.reward(&rc.comp)
 	dropped := rc.comp.Result == CompDropped || rc.comp.Result == CompPunished
 	for i, cc := range rc.ch.cases {
 		switch {
+		case cc.probe:
+			ps.st.addBaseline(e.p, cc.key, r*pow32(e.p.ComboGamma, after[i]))
 		case cc.rec != nil:
 			if ps.rec != nil {
-				ps.rec.finalizeCase(cc.rec, rc, i, n)
+				ps.rec.finalizeCase(cc.rec, rc, pos[i], n)
 			}
 		case cc.caseID != 0:
 			c := ps.st.Get(cc.caseID)
-			if c == nil {
+			if c == nil || cc.contested {
 				continue
 			}
 			if cc.perturbed {
@@ -334,9 +390,11 @@ func (e *Engine) finalizeChain(ps *playerState, rc *resolvedChain) {
 					continue
 				}
 			}
-			cr := r * pow32(e.p.ComboGamma, n-1-i)
+			cr := r * pow32(e.p.ComboGamma, n-1-pos[i])
+			a := ps.st.action(c)
 			e.p.applyOutcome(c, cr, ps.opp, rc.endTick)
-			e.p.applyAction(ps.st.action(c), cr, ps.opp, true)
+			e.p.applyAction(a, cr, ps.opp, true)
+			e.p.applyPlayed(a, r*pow32(e.p.ComboGamma, after[i]))
 			ps.st.total++
 			ps.st.evDirty = true
 		}
@@ -358,21 +416,26 @@ func (e *Engine) RoundEnd(s *Snapshot) {
 			lost := s.World.WinTeam >= 0 && int(s.World.WinTeam) != me.Root.TeamSide
 			shares := e.p.terminalShares(chains, won, lost)
 			for i, rc := range chains {
-				n := len(rc.ch.cases)
+				if shares[i] == 0 {
+					continue
+				}
+				pos, after, n := rc.ch.split()
 				for j, cc := range rc.ch.cases {
-					credit := shares[i] * pow32(e.p.ComboGamma, n-1-j)
-					if credit == 0 {
-						continue
-					}
+					credit := shares[i] * pow32(e.p.ComboGamma, n-1-pos[j])
+					base := shares[i] * pow32(e.p.ComboGamma, after[j])
 					switch {
+					case cc.probe:
+						ps.st.creditBaseline(cc.key, base)
 					case cc.rec != nil:
 						if !cc.rec.Removed && cc.rec.Source != SrcTrial {
 							cc.rec.Outcome.ValueSum += credit
 						}
-					case cc.caseID != 0:
+					case cc.caseID != 0 && !cc.contested:
 						if c := ps.st.Get(cc.caseID); c != nil {
+							a := ps.st.action(c)
 							applyCredit(c, credit, ps.opp)
-							e.p.applyAction(ps.st.action(c), credit, ps.opp, false)
+							e.p.applyAction(a, credit, ps.opp, false)
+							a.PSum += base
 						}
 					}
 				}
@@ -387,8 +450,7 @@ func (e *Engine) RoundEnd(s *Snapshot) {
 			ps.rec.cmdFloor = 0
 		}
 		if ps.drv != nil {
-			ps.drv.cur = nil
-			ps.drv.cpCache = nil
+			ps.drv.roundEnd()
 		}
 		ps.tr.reset()
 		ps.observed = false

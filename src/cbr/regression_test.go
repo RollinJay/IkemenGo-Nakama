@@ -34,7 +34,7 @@ func (ff *frameFeeder) end() {
 // A case whose inputs end on its exec frame must still have a failed exec
 // noted, and a hypothesis play must count toward its classification.
 func TestExecFailAtLastInputIsNoted(t *testing.T) {
-	p := DefaultParams()
+	p := withoutBaseAI()
 	eng := New(p, t.TempDir(), 1)
 	st, _ := eng.Store("Rush")
 	c := &Case{ID: 1, Source: SrcSynthesized, Kind: KindCommand, ExecFrame: 2, MoveRef: 1234, ExecAttack: true, ExecClass: StStand,
@@ -60,7 +60,7 @@ func TestExecFailAtLastInputIsNoted(t *testing.T) {
 // The better-case check must not switch away from a command case whose
 // command has not come out yet; the exec check decides first.
 func TestBetterCaseWaitsForExec(t *testing.T) {
-	p := DefaultParams()
+	p := withoutBaseAI()
 	st := NewStore("x")
 	start := Feat{RoundState: 2, Enemy: CharFeat{Present: true, RelX: 120}, TimeFrac: 1}
 	cmd := &Case{ID: 1, Source: SrcHumanLocal, Kind: KindCommand, ExecFrame: 0, MoveRef: 1234, ExecAttack: true, ExecClass: StStand,
@@ -87,7 +87,7 @@ func TestBetterCaseWaitsForExec(t *testing.T) {
 
 // A mid-action case starts at its recorded point in the action, not before.
 func TestMidActionCaseNotEarly(t *testing.T) {
-	p := DefaultParams()
+	p := withoutBaseAI()
 	st := NewStore("x")
 	start := Feat{RoundState: 2, Self: CharFeat{Present: true, StateNo: 200, StateTime: 10, Move: MtAttack, State: StStand}, Enemy: CharFeat{Present: true, RelX: 50}, TimeFrac: 1}
 	c := &Case{ID: 1, Source: SrcHumanLocal, Kind: KindCommand, ExecFrame: 0, MoveRef: 210, ExecAttack: true, ExecClass: StStand,

@@ -3,9 +3,15 @@ package cbr
 // A chain is a sequence of cases forming one exchange, prefixed by the
 // neutral movement cases that led into it. Chains are graded when they
 // resolve, and the grade is credited backward across their cases.
+//
+// A chain can also hold probes: markers of the base AI's decisions (see
+// baseline.go), credited like the CBR layer's played cases into the base
+// AI's record instead of a case. Probes are not cases: they take no place
+// in the lead-in, do not count toward the horizon, and leave the credit of
+// recorded and played cases as it would be without them.
 
 const (
-	leadInMax = 4  // neutral cases kept as a chain prefix
+	leadInMax = 4  // neutral cases kept as a chain prefix, and as many probes
 	otgWindow = 20 // frames a knockdown stays open for an OTG follow-up
 )
 
@@ -18,6 +24,13 @@ type chainCase struct {
 	attackClass StateType
 	perturbed   bool // injected execution noise affected this case
 	level       int8 // execution level when played
+	// contested: the character's own AI took over during the play (see
+	// Engine.watchDriven), so its result is not the case's.
+	contested bool
+	// probe marks a decision of the base AI in situation key (see
+	// baselineKey) rather than a case.
+	probe bool
+	key   uint64
 }
 
 type chain struct {
@@ -25,6 +38,7 @@ type chain struct {
 	session   uint64
 	startTick int64
 	cases     []chainCase
+	probes    int32 // how many of cases are probes
 
 	selfLifeMax  int32
 	powerMax     int32
@@ -142,17 +156,101 @@ func (t *chainTracker) addCase(cc chainCase) {
 		}
 	}
 	if t.active != nil {
-		t.active.cases = append(t.active.cases, cc)
+		t.active.add(cc)
 		return
 	}
 	t.leadIn = append(t.leadIn, cc)
-	if len(t.leadIn) > leadInMax {
-		ev := t.leadIn[0]
-		t.leadIn = t.leadIn[1:]
-		if t.onEvict != nil {
-			t.onEvict(ev, cc.startTick)
+	// Past leadInMax cases, or leadInMax probes, the oldest of that kind
+	// leaves the lead-in.
+	n := 0
+	for _, l := range t.leadIn {
+		if l.probe == cc.probe {
+			n++
 		}
 	}
+	if n <= leadInMax {
+		return
+	}
+	for i, ev := range t.leadIn {
+		if ev.probe == cc.probe {
+			t.leadIn = append(t.leadIn[:i], t.leadIn[i+1:]...)
+			if t.onEvict != nil {
+				t.onEvict(ev, cc.startTick)
+			}
+			return
+		}
+	}
+}
+
+func (ch *chain) add(cc chainCase) {
+	ch.cases = append(ch.cases, cc)
+	if cc.probe {
+		ch.probes++
+	}
+}
+
+// withdraw removes a probe added at tick for situation key, if it is still
+// in the active chain or the lead-in.
+func (t *chainTracker) withdraw(key uint64, tick int64) {
+	drop := func(cases []chainCase) ([]chainCase, bool) {
+		for i := len(cases) - 1; i >= 0; i-- {
+			if cc := cases[i]; cc.probe && cc.key == key && cc.startTick == tick {
+				return append(cases[:i], cases[i+1:]...), true
+			}
+		}
+		return cases, false
+	}
+	if t.active != nil {
+		var ok bool
+		if t.active.cases, ok = drop(t.active.cases); ok {
+			t.active.probes--
+			return
+		}
+	}
+	t.leadIn, _ = drop(t.leadIn)
+}
+
+// contest marks the latest play of a case still in a chain as contested.
+func (t *chainTracker) contest(caseID uint64) {
+	mark := func(cases []chainCase) bool {
+		for i := len(cases) - 1; i >= 0; i-- {
+			if cases[i].caseID == caseID && !cases[i].probe {
+				cases[i].contested = true
+				return true
+			}
+		}
+		return false
+	}
+	if t.active != nil && mark(t.active.cases) {
+		return
+	}
+	mark(t.leadIn)
+}
+
+// split gives each of a chain's entries its place in the backward credit.
+// Recorded and played cases count among themselves, as if there were no
+// probes: pos[i] is case i's position among them and n their number. For the
+// comparison with the base AI, played cases and probes count among
+// themselves, leaving out recorded cases, which repeat the base AI's
+// decisions when it is recorded as well: after[i] is how many of them follow
+// entry i.
+func (ch *chain) split() (pos, after []int, n int) {
+	pos = make([]int, len(ch.cases))
+	after = make([]int, len(ch.cases))
+	k := 0
+	for i := len(ch.cases) - 1; i >= 0; i-- {
+		if cc := &ch.cases[i]; cc.probe || cc.caseID != 0 {
+			after[i] = k
+			k++
+		}
+	}
+	for i := range ch.cases {
+		if !ch.cases[i].probe {
+			pos[i] = n
+			n++
+		}
+	}
+	return pos, after, n
 }
 
 func (t *chainTracker) start(s *Snapshot, self, en *CharSnap) {
@@ -171,7 +269,9 @@ func (t *chainTracker) start(s *Snapshot, self, en *CharSnap) {
 		firstHitTick:  -1,
 		timeFrac0:     s.World.TimeFrac(),
 	}
-	ch.cases = append(ch.cases, t.leadIn...)
+	for _, cc := range t.leadIn {
+		ch.add(cc)
+	}
 	t.leadIn = t.leadIn[:0]
 	t.active = ch
 }
@@ -214,7 +314,7 @@ func (t *chainTracker) step(s *Snapshot, tr *tracker) {
 		exchangeEnded := t.prevInExchange && !tr.inExchange
 		knockdownDone := en != nil && ch.sawDown && en.StateType == StLying && tick-ch.downTick >= otgWindow
 		horizon := (t.p.HorizonFrames > 0 && ch.frames >= t.p.HorizonFrames) ||
-			(t.p.HorizonCases > 0 && int32(len(ch.cases)) >= t.p.HorizonCases)
+			(t.p.HorizonCases > 0 && int32(len(ch.cases))-ch.probes >= t.p.HorizonCases)
 		switch {
 		case roundEnded:
 			t.resolve(s, self, en, true, advantageNow(self, en))

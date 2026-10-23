@@ -23,8 +23,23 @@
 // selector filters cases by hard constraints (round state, technique gates,
 // knowledge visibility, execution conditions, reach), keeps those within a
 // similarity band of the best match, ranks them by learned value, and plays
-// the best back. When nothing is close enough it declines and the engine's
-// own AI keeps control.
+// the best back. When nothing is close enough it declines, and the
+// character's own AI keeps control.
+//
+// # The base AI
+//
+// The character's own AI is the base AI, always (see baseline.go). The CBR
+// layer takes over only with a move that has proved better than that AI in
+// the same kind of situation: the move's results when the CBR layer played
+// it, graded like any chain (damage dealt, weighted by how the exchange
+// ended, minus damage taken), beat the AI's record there by the take-over
+// margin, a setting of Low, Medium or High. The adapter pauses the
+// character's AI only on the frames the CBR layer gives the input, so the AI
+// plays again as soon as the move is over. Now and then, in a new situation,
+// the CBR layer tries a move that has not proved itself yet, so that it can.
+// An older AI that switches itself on with a long command and then ignores
+// AILevel cannot be paused; when it acts during a move the CBR layer is
+// playing, the move is dropped and nothing counts against it.
 //
 // # Commands
 //
@@ -35,7 +50,8 @@
 // are recorded with the command's canonical inputs, supplied by the adapter
 // (see Motion). Attack states entered with no command at all mark the
 // character's AI as direct state change: its cases for the match are
-// discarded and the states it entered are kept as hypotheses to test.
+// discarded and the states it entered are kept as hypotheses, which the CBR
+// layer tests by exploration.
 //
 // # Difficulty
 //

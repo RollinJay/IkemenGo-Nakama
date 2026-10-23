@@ -1,7 +1,9 @@
 // Command cbrinspect prints a summary of a CBR store: what it holds, which
 // commands were reconstructed from AI play, how often played cases failed to
 // reproduce, the character AI's direct state changes kept as hypotheses,
-// and routes found beyond human precedent.
+// routes found beyond human precedent, the character's own AI's record by
+// situation (the baseline the CBR layer must beat to take over) and what
+// the CBR layer's own plays of each action achieved.
 //
 //	go run ./src/cbr/cmd/cbrinspect save/cbr/local/kfm-16a05657.cbr
 //
@@ -130,5 +132,54 @@ func main() {
 	for _, c := range cmds {
 		fmt.Printf("  state %d from %s, value %.2f over %.1f trials, chain result %s, damage %.0f%%\n",
 			c.MoveRef, sourceNames[c.Source], c.Value(p), c.Outcome.Trials, c.Completion.Result, 100*c.Completion.DamageDealt)
+	}
+
+	// Results are chain rewards: about a fraction of a life bar per exchange.
+	const show = 20
+	baseKeys := make([]uint64, 0, len(st.Baseline))
+	for k := range st.Baseline {
+		baseKeys = append(baseKeys, k)
+	}
+	sort.Slice(baseKeys, func(i, j int) bool {
+		a, b := st.Baseline[baseKeys[i]], st.Baseline[baseKeys[j]]
+		if a.Trials != b.Trials {
+			return a.Trials > b.Trials
+		}
+		return baseKeys[i] < baseKeys[j]
+	})
+	fmt.Printf("character's own AI, by situation (%d records, most results first):\n", len(baseKeys))
+	for i, k := range baseKeys {
+		if i == show {
+			fmt.Printf("  ... %d more\n", len(baseKeys)-show)
+			break
+		}
+		b := st.Baseline[k]
+		fmt.Printf("  %s: %.1f results, mean %+.3f\n", cbr.SituationString(k), b.Trials, b.ValueSum/b.Trials)
+	}
+	var played []uint64
+	for k, a := range st.Actions {
+		if a.PTrials > 0 {
+			played = append(played, k)
+		}
+	}
+	sort.Slice(played, func(i, j int) bool {
+		a, b := st.Actions[played[i]], st.Actions[played[j]]
+		if a.PTrials != b.PTrials {
+			return a.PTrials > b.PTrials
+		}
+		return played[i] < played[j]
+	})
+	fmt.Printf("actions the CBR layer played (%d, most plays first):\n", len(played))
+	for i, k := range played {
+		if i == show {
+			fmt.Printf("  ... %d more\n", len(played)-show)
+			break
+		}
+		a := st.Actions[k]
+		demo := ""
+		if a.Trials > 0 {
+			demo = fmt.Sprintf("; with demonstrations %.1f results, mean %+.3f", a.Trials, a.ValueSum/a.Trials)
+		}
+		fmt.Printf("  %s: %.1f plays, mean %+.3f%s\n", cbr.ActionString(k), a.PTrials, a.PSum/a.PTrials, demo)
 	}
 }

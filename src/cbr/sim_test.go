@@ -476,6 +476,27 @@ func (r *rushdown) next(s *sim, me int) InputBits {
 	}
 }
 
+// poker is a weak player: it walks in and throws out single jabs at
+// random, and never follows one up.
+type poker struct{ rng *rand.Rand }
+
+func (p *poker) next(s *sim, me int) InputBits {
+	c, o := s.ch[me], s.ch[1-me]
+	if !c.ctrl {
+		return 0
+	}
+	switch {
+	case absf(o.x-c.x) > 60:
+		return InF
+	case p.rng.Intn(6) == 0:
+		if c.input&InA != 0 {
+			return 0
+		}
+		return InA
+	}
+	return 0
+}
+
 // defender guards when the opponent attacks nearby, pokes back at times,
 // and drifts.
 type defender struct{ rng *rand.Rand }
@@ -507,8 +528,27 @@ func (d *defender) next(s *sim, me int) InputBits {
 }
 
 // runRound plays one round with the given controllers. A nil controller
-// means the engine drives that player through eng.Input.
+// means the engine drives that player through eng.Input, and the player
+// idles on frames the CBR layer declines.
 func runRound(s *sim, eng *Engine, ctl [2]controller, frames int) {
+	runRoundBase(s, eng, ctl, [2]controller{}, frames)
+}
+
+// contender is a base AI that the AILevel mask cannot pause, as an older AI
+// switched on by a long command: contend runs on the frames the CBR layer
+// gives the input, and may still change the character's state.
+type contender interface {
+	controller
+	contend(s *sim, me int)
+}
+
+// runRoundBase is runRound with a base AI for each player the engine
+// drives: base[i] plays player i on every frame the CBR layer declines, as
+// the character's own AI does, and is not called on frames the CBR layer
+// gives the input, as the AILevel mask pauses that AI (a contender still
+// contends there). It returns how many frames the CBR layer drove each
+// player.
+func runRoundBase(s *sim, eng *Engine, ctl, base [2]controller, frames int) (driven [2]int) {
 	if eng != nil {
 		eng.Frame(s.snapshot())
 	}
@@ -523,6 +563,12 @@ func runRound(s *sim, eng *Engine, ctl [2]controller, frames int) {
 			if btn, ok := eng.Input(i, s.ch[i].facingRight); ok {
 				in[i] = FromEngine(btn, s.ch[i].facingRight)
 				s.ch[i].cbr = true
+				driven[i]++
+				if c, ok := base[i].(contender); ok {
+					c.contend(s, i)
+				}
+			} else if base[i] != nil {
+				in[i] = base[i].next(s, i)
 			}
 		}
 		s.step(in)
@@ -536,6 +582,7 @@ func runRound(s *sim, eng *Engine, ctl [2]controller, frames int) {
 		}
 		eng.RoundEnd(s.snapshot())
 	}
+	return driven
 }
 
 // lowBlind guards high attacks but never guards low: an exploitable hole
@@ -619,6 +666,17 @@ func (c *stateChanger) next(s *sim, me int) InputBits {
 		ch.force = 1000
 	}
 	return c.jam.next(c.rng)
+}
+
+// switchedOn is a stateChanger that ignores the AILevel mask: it also
+// forces the special on frames the CBR layer gives the input.
+type switchedOn struct{ stateChanger }
+
+func (c *switchedOn) contend(s *sim, me int) {
+	ch, o := s.ch[me], s.ch[1-me]
+	if ch.ctrl && absf(o.x-ch.x) <= 75 && c.rng.Intn(6) == 0 {
+		ch.force = 1000
+	}
 }
 
 // twoPart is a human-like player who approaches and throws out the

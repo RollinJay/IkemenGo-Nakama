@@ -2,28 +2,50 @@
 -- mode whether to fight and train the CBR AI.
 -- Based on KDing's original CBR AI for IKEMEN GO (https://github.com/KDing0).
 --
--- The CBR AI (case-based reasoning) learns from the fights it sees and plays
--- CPU-controlled characters with what it learned; the engine side is the
--- "CBR layer". Files in external/mods load automatically; renaming this file
--- to -cbr.lua (any name starting with '-') disables the mod entirely. Learned
--- data is saved per character under save/cbr.
+-- The CBR AI (case-based reasoning) learns from the fights it sees: the
+-- situations, what the players did in them and how it turned out. The engine
+-- side is the "CBR layer". Files in external/mods load automatically;
+-- renaming this file to -cbr.lua (any name starting with '-') disables the
+-- mod entirely. Learned data is saved per character under save/cbr.
+--
+-- How it plays. A CPU-controlled character plays with its own AI as usual:
+-- the AI in the character's files, or the engine's AI for a character without
+-- one. That AI is the base and always plays. The CBR AI takes over only with
+-- a move that has proved better than that AI in the same kind of situation,
+-- by at least the take-over margin (TakeoverMargin below). While that move
+-- plays, the character's own AI pauses (its AILevel trigger reads 0); then it
+-- carries on. Moves are compared by their average result per exchange (an
+-- attack or combo and what came of it): damage dealt, weighted by how well
+-- the exchange ended, minus damage taken. Now and then (in about one in
+-- twenty situations new to it, up to a limit per round) the CBR AI tries a
+-- move that did well in the fights it learned from but has not proved itself
+-- yet, to find out whether it is better. Older character AI that turns itself
+-- on without the AILevel trigger (with commands no person can input) is not
+-- paused and keeps running; when it acts during a move the CBR AI is
+-- playing, that move is dropped without counting against it.
 --
 -- The main settings are in Options > Game Settings > CBR AI Settings: CBR AI,
--- Knowledge, Training Dummy, Learn From Replays and Ask Before Modes. All
--- eleven settings are in the [CBR] section of save/config.ini:
+-- Knowledge, Take-Over Margin, Training Dummy, Learn From Replays and Ask
+-- Before Modes. All twelve settings are in the [CBR] section of
+-- save/config.ini:
 --
 --   Enabled          turns the CBR layer on or off (CBR AI in the options).
---   DriveCPU         CPU-controlled characters play with the CBR layer. Where
---                    it has nothing close enough to the situation, the
---                    engine's AI plays instead.
+--   DriveCPU         the CBR AI may take over CPU-controlled characters, as
+--                    described above.
+--   TakeoverMargin   how much better, per exchange, a move must have proved
+--                    than the character's own AI before the CBR AI takes
+--                    over with it: 1 Low, 2 Medium or 3 High, roughly 1.5, 3
+--                    and 6 percent of a life bar (Take-Over Margin in the
+--                    options). Low takes over more often; High only with
+--                    clearly better moves.
 --   Execution        1-8, or 0 to follow each CPU's AI level (the Difficulty
 --                    option). Below 8, combo timing is perturbed and long
 --                    routes are valued less.
---   Knowledge        1-8: how much of what was learned the CPU may use.
+--   Knowledge        1-8: how much of what was learned the CBR AI may use.
 --                    Execution and Knowledge both at 8 unlock resets, OTG
 --                    relaunches and loops.
 --   Ambition         1-8, or 0 to follow Execution: how long and damaging the
---                    routes the CPU goes for are.
+--                    routes the CBR AI goes for are.
 --   RecordHumans     learn from people playing.
 --   RecordCPU        learn from CPU play (the engine AI and character AI).
 --   RecordReplays    also learn from replays: match replays played back and
@@ -32,22 +54,22 @@
 --   RecordInTraining also learn in training mode. Off by default: play
 --                    against a dummy that does not fight back would teach
 --                    that everything works.
---   DriveInTraining  also drive the training dummy when it is CPU-controlled
---                    (Training Dummy in the options).
+--   DriveInTraining  also let the CBR AI take over the training dummy when it
+--                    is CPU-controlled (Training Dummy in the options).
 --   AskBeforeMode    ask two questions before an offline mode with CPU
 --                    opponents (Ask Before Modes in the options; see below).
 --
 -- The settings are read again before every fight (the start.f_game hook), so
 -- a change applies from the next fight, without a restart. That covers fights
--- started from the menus, replays and watched lobby matches. Replays are never
--- driven, and neither is a match being saved as a replay (a local versus
--- fight, or a mode in replay.recordModes): its CPU players are the engine's
--- own AI, so that the replay reproduces the match. The CBR layer is inactive
--- during online matches. A quick match started from the command line, the
--- demo fights (title screen and attract mode) and the random test start their
--- fight directly instead of through start.f_game, so they skip this hook: they
--- keep whatever CBR state the last fight applied, which is off when no fight
--- has applied any yet.
+-- started from the menus, replays and watched lobby matches. The CBR AI never
+-- takes over in a replay, nor in a match being saved as a replay (a local
+-- versus fight, or a mode in replay.recordModes): its CPU players play with
+-- their own AI alone, so that the replay reproduces the match. The CBR layer
+-- is inactive during online matches. A quick match started from the command
+-- line, the demo fights (title screen and attract mode) and the random test
+-- start their fight directly instead of through start.f_game, so they skip
+-- this hook: they keep whatever CBR state the last fight applied, which is
+-- off when no fight has applied any yet.
 --
 -- The questions. With the CBR AI and AskBeforeMode on, picking an offline
 -- mode where people play against the CPU (arcade, team arcade, team co-op,
@@ -57,11 +79,12 @@
 -- up and down (or left and right) move it, a confirm button answers, and the
 -- menu's cancel button or Esc goes back to the main menu without starting
 -- the mode. The answers hold for the whole mode, continues included, until
--- the player is back at the main menu: the first decides whether the CBR
--- layer plays the CPU players (in place of DriveCPU), the second whether it
--- learns from the fights (RecordHumans, RecordCPU and RecordReplays still
--- choose whom it learns from). How well it plays stays as set in the options
--- (Execution, Knowledge, Ambition). Nothing is asked in training, watch, the
+-- the player is back at the main menu. The first decides whether the CBR AI
+-- may take over the CPU players (in place of DriveCPU; with No, they play
+-- with their own AI alone), the second whether it learns from the fights
+-- (RecordHumans, RecordCPU and RecordReplays still choose whom it learns
+-- from). How it plays stays as set in the options (TakeoverMargin,
+-- Execution, Knowledge, Ambition). Nothing is asked in training, watch, the
 -- versus modes, netplay, online play or replays, or with AskBeforeMode off;
 -- the settings then apply as they are.
 
@@ -70,6 +93,7 @@
 local t_settings = {
 	{'enabled', 'Enabled', true},
 	{'driveCPU', 'DriveCPU', true},
+	{'takeoverMargin', 'TakeoverMargin', 2},
 	{'execution', 'Execution', 0},
 	{'knowledge', 'Knowledge', 8},
 	{'ambition', 'Ambition', 0},
@@ -125,7 +149,7 @@ local function cbrApply()
 			cbrRecord(pn)
 		end
 		if drive then
-			cbrDrive(pn, cfg.execution, cfg.knowledge, cfg.ambition)
+			cbrDrive(pn, cfg.execution, cfg.knowledge, cfg.ambition, cfg.takeoverMargin)
 		end
 	end
 end

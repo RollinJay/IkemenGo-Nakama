@@ -207,7 +207,7 @@ func TestRetrievalFindsOriginatingCase(t *testing.T) {
 
 func TestDrivenPlayerPlaysAndLearns(t *testing.T) {
 	dir := t.TempDir()
-	eng := New(DefaultParams(), dir, 7)
+	eng := New(withoutBaseAI(), dir, 7)
 	recordRounds(t, eng, 6, 40)
 	st, _ := eng.Store("Rush")
 	before := st.total
@@ -568,7 +568,7 @@ func TestGuardingIsNotBeingHit(t *testing.T) {
 }
 
 func TestCBRDrivenFramesAreNotRecorded(t *testing.T) {
-	eng := New(DefaultParams(), t.TempDir(), 3)
+	eng := New(withoutBaseAI(), t.TempDir(), 3)
 	recordRounds(t, eng, 3, 70)
 	st, _ := eng.Store("Rush")
 	n := st.Len()
