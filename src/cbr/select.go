@@ -101,11 +101,35 @@ const (
 	// A case marked removed since the last index, or whose command keeps
 	// failing to come out when played.
 	RejUnreproducible = "unreproducible"
+	// A case whose command was found not to work in this spot (see Verdict).
+	RejCheat = "cheat"
+	// With the base AI on, the character is in a movement without control
+	// (see moveWithoutControl), and the case has no command that could be
+	// verified from there.
+	RejNoControl = "no_control"
 )
 
 // chooseWhy is choose, counting why candidates were rejected into why when
 // it is non-nil. With a gate and Params.BaseAI set, a candidate must also
 // be allowed to take over from the base AI (see gateFilter).
+//
+// A take-over from the base AI (a gate with the base AI on) is chosen in
+// this order: the hard filters and the confidence threshold first, then the
+// gate over every candidate left, and only then the similarity band and the
+// ranking, among the moves the gate let through. Applied first, the band
+// would let a closer case the gate turns down (a walk that matches the base
+// AI's walk, say) push a move that proved better here out of the choice. The
+// similarity after the gate leaves out the input history of cases begun with
+// control (see takeoverDist).
+//
+// While the character is in a movement without control (see
+// moveWithoutControl: a dash that takes control away, the start of a jump, a
+// landing), a take-over needs a command whose inputs were seen to bring its
+// move about from that very state (see Verdict): a dash cancel a person's
+// route allows, say. Every command case is tested there first, whatever its
+// source (see gateFilter), and a case without a command does not play there:
+// the base AI keeps the movement, and the choice is made again on the first
+// frame with control.
 func (d *driver) chooseWhy(cur *Feat, self *CharSnap, tick int64, why map[string]int, g *gate) (*Case, float32) {
 	rej := func(r string) {
 		if why != nil {
@@ -113,6 +137,8 @@ func (d *driver) chooseWhy(cur *Feat, self *CharSnap, tick int64, why map[string
 		}
 	}
 	p, st, lv := d.p, d.st, d.levels
+	takeover := g != nil && p.BaseAI
+	noCtrl := takeover && moveWithoutControl(self)
 	evMin := st.evidenceThreshold(p, lv.Knowledge)
 	lnN := math.Log(float64(st.total) + 1)
 	ambExp := ambitionExponent(lv.Ambition)
@@ -135,6 +161,17 @@ func (d *driver) chooseWhy(cur *Feat, self *CharSnap, tick int64, why map[string
 			}
 			if !execCompatible(c, self, cur) {
 				rej(RejExecCond)
+				continue
+			}
+			if noCtrl && (c.ExecFrame < 0 || c.Command == "") {
+				rej(RejNoControl)
+				continue
+			}
+			// A move whose command was found not to work here: cheating, or
+			// its inputs do not bring it about (see Verdict). With the base AI
+			// off, hypotheses keep their own test (see resolveHypothesisPlay).
+			if (noCtrl || c.mustVerify() && (p.BaseAI || c.Source == SrcCharacterAI)) && st.check(c, self) == verdictBlocked {
+				rej(RejCheat)
 				continue
 			}
 			if !p.gateOpen(c.Technique.Flags, lv) {
@@ -186,6 +223,9 @@ func (d *driver) chooseWhy(cur *Feat, self *CharSnap, tick int64, why map[string
 				rej(RejDistance)
 				continue
 			}
+			if takeover {
+				dist = p.takeoverDist(cur, c, dist)
+			}
 			if dist < bestDist {
 				bestDist = dist
 			}
@@ -195,9 +235,20 @@ func (d *driver) chooseWhy(cur *Feat, self *CharSnap, tick int64, why map[string
 	if len(picks) == 0 {
 		return nil, 0
 	}
+	// With the base AI on, only the candidates allowed to take over from it
+	// go on, whatever their similarity, and the band is the best of theirs.
+	if takeover {
+		g.self = self
+		if picks = d.gateFilter(picks, g, ambExp, rej); len(picks) == 0 {
+			return nil, 0
+		}
+		bestDist = float32(math.MaxFloat32)
+		for _, pk := range picks {
+			bestDist = min(bestDist, pk.dist)
+		}
+	}
 	// Stage two: among cases within the similarity band of the best match,
-	// rank by value, exploration and reuse, keeping with the base AI on only
-	// those allowed to take over from it.
+	// rank by value, exploration and reuse.
 	band := bestDist + p.SimilarityBand
 	human := false
 	for _, pk := range picks {
@@ -218,11 +269,6 @@ func (d *driver) chooseWhy(cur *Feat, self *CharSnap, tick int64, why map[string
 		kept = append(kept, pk)
 	}
 	picks = kept
-	if g != nil && p.BaseAI {
-		if picks = d.gateFilter(picks, g, ambExp, rej); len(picks) == 0 {
-			return nil, 0
-		}
-	}
 	for _, pk := range picks {
 		if pk.score < bestScore {
 			bestScore = pk.score
@@ -269,13 +315,36 @@ func (d *driver) scoreOpt(c *Case, dist float32, lnN, ambExp float64, tick int64
 	return s
 }
 
+// takeoverDist is the similarity a take-over from the base AI ranks case c
+// by (see chooseWhy), given its distance dist from the current state (see
+// distance): for a case begun with control, the distance without the input
+// history. The input just before a take-over is the base AI's (the
+// direction its walk holds, say), and a case begun with control plays the
+// same whatever input came before it (see driver.begin and carryOver), so
+// how closely that input matches the recorded player's says nothing of
+// whether the move fits here; where the characters are and what they do
+// does. A case begun mid-action goes on from the input before it (a motion
+// buffered through a move), so for it the input history still counts.
+func (p *Params) takeoverDist(cur *Feat, c *Case, dist float32) float32 {
+	if !c.StartCtrl {
+		return dist
+	}
+	h := p.W.InputDir*dirHistDiff(cur.InDir, c.Start.InDir) + p.W.InputBtn*btnHistDiff(cur.InBtn, c.Start.InBtn)
+	return max(dist-h, 0)
+}
+
 // currentScore re-scores the case being played against the current state,
 // for the better-case check. The reuse cost is left out: the case is in
-// use because it was chosen, not because it is being repeated.
+// use because it was chosen, not because it is being repeated. With the
+// base AI on, the distance is the one take-overs are ranked by (see
+// takeoverDist), as for the cases it is compared with.
 func (d *driver) currentScore(cur *Feat) float32 {
 	c := d.cur
 	lnN := math.Log(float64(d.st.total) + 1)
 	dist := d.p.distance(cur, &c.Start)
+	if d.p.BaseAI {
+		dist = d.p.takeoverDist(cur, c, dist)
+	}
 	s := d.scoreOpt(c, dist, lnN, ambitionExponent(d.levels.Ambition), 0, false)
 	// A case that no longer matches within the band of the new best is
 	// outranked regardless of value.

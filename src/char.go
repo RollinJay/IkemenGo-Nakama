@@ -6955,6 +6955,9 @@ func (c *Char) stateChange1(no int32, pn int) bool {
 		}
 	}
 
+	if sysCBR.watching {
+		cbrStateChanged(c)
+	}
 	c.stchtmp = true
 	return true
 }

@@ -65,12 +65,16 @@ func New(p *Params, dir string, seed int64) *Engine {
 // SetMotions gives the canonical input sequence of each of a character's
 // commands, by command name. The adapter synthesizes them from the
 // character's command definitions; recording from assisted sources and
-// hypothesis synthesis need them.
+// character AIs, hypothesis synthesis, and finding leftover input before a
+// move the CBR layer plays (see driver.carryOver) need them.
 func (e *Engine) SetMotions(char string, m map[string]Motion) {
 	e.motions[char] = m
 	for _, ps := range e.players {
 		if ps != nil && ps.char == char && ps.rec != nil {
 			ps.rec.motions = m
+		}
+		if ps != nil && ps.char == char && ps.drv != nil {
+			ps.drv.motions = m
 		}
 	}
 }
@@ -142,21 +146,22 @@ func (e *Engine) SetPlayer(n int, char, opponent string) error {
 	ps.ct = newChainTracker(e.p, n, &e.ids)
 	ps.ct.onFinal = func(rc *resolvedChain) { e.finalizeChain(ps, rc) }
 	// A case or probe that never joined an exchange resolves as neutral: a
-	// recorded case and the base AI's record take the neutral result, and so
+	// recorded case and the base AI's records take the neutral result, and so
 	// does a played case's record against the base AI, so the two stay
-	// comparable. A played case's value is left as it was.
+	// comparable; neither was credited with any share of an exchange's
+	// reward. A played case's value is left as it was.
 	ps.ct.onEvict = func(cc chainCase, tick int64) {
 		neutral := e.p.Situation[CompNeutral]
 		switch {
 		case cc.probe:
-			ps.st.addBaseline(e.p, cc.key, neutral, 0)
+			e.creditProbe(ps, &cc, neutral, 0)
 		case cc.rec != nil:
 			if ps.rec != nil {
 				ps.rec.finalizeLoose(cc.rec, tick)
 			}
 		case cc.caseID != 0 && !cc.contested:
-			if c := ps.st.Get(cc.caseID); c != nil {
-				e.p.applyPlayed(ps.st.action(c), neutral)
+			if c := ps.st.Get(cc.caseID); c != nil && countsAsPlay(&cc) {
+				ps.st.addPlay(e.p, c, cc.key, neutral, 0)
 			}
 		}
 	}
@@ -195,7 +200,13 @@ func (e *Engine) StopRecord(n int) {
 func (e *Engine) collect(ps *playerState) {
 	cases := ps.rec.take()
 	if ps.log != nil && ps.rec.source.assisted() {
-		ps.log.staged = append(ps.log.staged, cases...)
+		for _, c := range cases {
+			if c.Source == SrcCharacterAI {
+				ps.log.reach = append(ps.log.reach, c)
+			} else {
+				ps.log.staged = append(ps.log.staged, c)
+			}
+		}
 		return
 	}
 	ps.st.Admit(e.p, cases)
@@ -203,7 +214,7 @@ func (e *Engine) collect(ps *playerState) {
 
 // closeLog commits a slot's match log: staged cases and command-map
 // observations unless the source was flagged for direct state change, and
-// hypotheses either way.
+// hypotheses and the character AI's cases either way.
 func (e *Engine) closeLog(ps *playerState) {
 	l := ps.log
 	if l == nil {
@@ -224,16 +235,22 @@ func (e *Engine) closeLog(ps *playerState) {
 		// With the whole match observed, an assisted case whose command no
 		// longer wins for its state was credited to a coincidental command
 		// (the engine AI's cheat picking an unrelated command that frame).
+		// A case whose command the engine's label named (see openReach) has
+		// no active commands kept, and needs no such check.
 		motions := e.motions[ps.char]
 		for _, c := range l.staged {
-			if c.Command == "" {
+			active, ok := l.active[c.ID]
+			if c.Command == "" || !ok {
 				continue
 			}
-			if best, ok := ps.st.commandFor(c.MoveRef, l.active[c.ID], motions, c.ExecAttack, nil); !ok || best != c.Command {
+			if best, ok := ps.st.commandFor(c.MoveRef, active, motions, c.ExecAttack, nil); !ok || best != c.Command {
 				c.Removed = true
 			}
 		}
 		ps.st.Admit(e.p, l.staged)
+	}
+	if len(l.reach) > 0 {
+		ps.st.Admit(e.p, l.reach)
 	}
 	ps.st.Admit(e.p, l.hypo)
 }
@@ -246,6 +263,7 @@ func (e *Engine) Drive(n int, lv Levels) error {
 	}
 	ps.drv = newDriver(e.p, n, lv, e.rng.Int63(), ps.st, ps.ct)
 	ps.drv.opp = ps.opp
+	ps.drv.motions = e.motions[ps.char]
 	return nil
 }
 
@@ -303,6 +321,11 @@ func (e *Engine) Frame(s *Snapshot) {
 			ps.rec.step(s, f)
 		}
 		ps.ct.step(s, ps.tr)
+		if ps.observed && s.World.RoundState == 2 && me.Root.Entry.AIDecision() {
+			// The engine's check of a decision of the character's own AI: could
+			// a person's command have made it here (see Verdict)?
+			ps.st.noteMoment(&ps.lastSelf, &me.Root)
+		}
 		if ps.drv != nil {
 			ps.drv.observe(&me.Root)
 			e.watchDriven(ps, &me.Root, s.World.RoundState)
@@ -344,6 +367,11 @@ func lateStart(state int32, prev, self *CharSnap) bool {
 	return self.StateNo == state && prev.StateNo == state && self.StateTime == 1 && prev.Ctrl && !self.Ctrl
 }
 
+// labelled reports whether the engine labels the character's state changes
+// (CharSnap.Entry): it reports the character's route table, which it does
+// for a character it labels.
+func labelled(self *CharSnap) bool { return self.Routes != nil || self.Entry != EntryNone }
+
 // watchDriven watches the moves the CBR layer plays. An attack started from
 // control with no command active during one is the character's own AI
 // changing states directly although it was paused: an older AI that a long
@@ -356,11 +384,32 @@ func lateStart(state int32, prev, self *CharSnap) bool {
 // by the commands active then, and by who gave that frame's input. Made on
 // a frame the base AI played, it is the base AI's own action, which the CBR
 // layer began a move on top of before it showed: that move is dropped too,
-// since its input could not act, and nothing counts against the AI.
+// since its input could not act, and nothing counts against the AI. (Input
+// no longer begins a move on that frame, so this is only a safeguard.)
+//
+// When the engine labels the state changes (CharSnap.Entry), the label says
+// who made one, and the guesses above are not needed: on a frame the CBR
+// layer gave the input, a state change the character's own AI decided
+// (EntryReachable, EntryCheat or EntryUnknown) takes over from the move,
+// whatever the control, the move type or the state, a cancel out of the
+// move or a helper's redirected change that takes control away at once
+// included, and a change the CBR layer's input made (EntryInput) or that is
+// part of the move (EntryAuto) never does.
 func (e *Engine) watchDriven(ps *playerState, self *CharSnap, roundState int32) {
 	prev := &ps.lastSelf
 	d := ps.drv
-	if !ps.observed || !self.CmdKnown || roundState != 2 || !self.CBRDriven || d.cur == nil {
+	if !ps.observed || roundState != 2 || !self.CBRDriven || d.cur == nil {
+		return
+	}
+	switch {
+	case self.Entry.AIDecision():
+		d.contest()
+		ps.unexplained++
+		if ps.unexplained >= e.p.ChangeStateFlagCount {
+			ps.st.ChangeStateAI = true
+		}
+		return
+	case labelled(self) || !self.CmdKnown:
 		return
 	}
 	late := ps.late && lateStart(ps.lateState, prev, self)
@@ -417,6 +466,15 @@ func (e *Engine) Input(n int, facingRight bool) (btn EngineButtons, ok bool) {
 	if ps == nil || ps.drv == nil || !ps.observed {
 		return btn, false
 	}
+	if last := &ps.lastSelf; !last.CBRDriven && (ps.late || last.EntryHelper && last.Entry.AIDecision()) {
+		// The character's state was changed at the end of the base AI's frame,
+		// after the character's own code ran, by one of its helpers' AI (see
+		// lateChange; the label says so too, EntryHelper): the base AI's
+		// action shows on this frame, and a move begun now could not act. The
+		// CBR layer leaves the frame to the base AI, which keeps its record of
+		// the action.
+		return btn, false
+	}
 	b, ok := ps.drv.input(&ps.lastWorld, &ps.lastSelf, &ps.lastFeat)
 	if !ok {
 		return btn, false
@@ -426,9 +484,11 @@ func (e *Engine) Input(n int, facingRight bool) (btn EngineButtons, ok bool) {
 
 // finalizeChain credits a resolved chain to its cases: recorded cases take
 // their demonstrated result, played cases update their value and their
-// record against the base AI, and probes the base AI's record. A failure
-// caused by injected execution noise is kept out of the value, and a play
-// the character's own AI took over from counts for nothing.
+// record against the base AI in the situation they were played in, and
+// probes the base AI's records. A failure caused by injected execution noise
+// is kept out of the value, a play the character's own AI took over from
+// counts for nothing, and one whose command did not come out is not one of
+// the move's plays (its value still takes the result).
 func (e *Engine) finalizeChain(ps *playerState, rc *resolvedChain) {
 	pos, after, n := rc.ch.split()
 	r := e.p.reward(&rc.comp)
@@ -437,7 +497,7 @@ func (e *Engine) finalizeChain(ps *playerState, rc *resolvedChain) {
 		switch {
 		case cc.probe:
 			share := pow32(e.p.ComboGamma, after[i])
-			ps.st.addBaseline(e.p, cc.key, r*share, share)
+			e.creditProbe(ps, &cc, r*share, share)
 		case cc.rec != nil:
 			if ps.rec != nil {
 				ps.rec.finalizeCase(cc.rec, rc, pos[i], n)
@@ -457,12 +517,32 @@ func (e *Engine) finalizeChain(ps *playerState, rc *resolvedChain) {
 			a := ps.st.action(c)
 			e.p.applyOutcome(c, cr, ps.opp, rc.endTick)
 			e.p.applyAction(a, cr, ps.opp, true)
-			e.p.applyPlayed(a, r*pow32(e.p.ComboGamma, after[i]))
+			if countsAsPlay(&cc) {
+				share := pow32(e.p.ComboGamma, after[i])
+				ps.st.addPlay(e.p, c, cc.key, r*share, share)
+			}
 			ps.st.total++
 			ps.st.evDirty = true
 		}
 	}
 }
+
+// creditProbe credits a result r of the base AI, with the share share of
+// its exchange's reward, to the records of a probe: the situation's and
+// those of the moves that were on offer (see Store.Offered).
+func (e *Engine) creditProbe(ps *playerState, cc *chainCase, r, share float32) {
+	ps.st.addBaseline(e.p, cc.key, r, share)
+	for _, k := range cc.offers {
+		if k != 0 {
+			ps.st.addOffered(e.p, k, r, share)
+		}
+	}
+}
+
+// countsAsPlay reports whether a played case that was not contested is one
+// of its move's plays against the base AI: it was played with the base AI
+// on, in a known situation, and its command came out.
+func countsAsPlay(cc *chainCase) bool { return cc.key != 0 && !cc.failed }
 
 // RoundEnd resolves everything open, distributes the round's terminal
 // reward, and admits the round's recorded cases. Call it once when the
@@ -489,6 +569,11 @@ func (e *Engine) RoundEnd(s *Snapshot) {
 					switch {
 					case cc.probe:
 						ps.st.creditBaseline(cc.key, base)
+						for _, k := range cc.offers {
+							if k != 0 {
+								ps.st.creditOffered(k, base)
+							}
+						}
 					case cc.rec != nil:
 						if !cc.rec.Removed && cc.rec.Source != SrcTrial {
 							cc.rec.Outcome.ValueSum += credit
@@ -498,7 +583,9 @@ func (e *Engine) RoundEnd(s *Snapshot) {
 							a := ps.st.action(c)
 							applyCredit(c, credit, ps.opp)
 							e.p.applyAction(a, credit, ps.opp, false)
-							a.PSum += base
+							if countsAsPlay(&cc) {
+								ps.st.creditPlay(c, cc.key, base)
+							}
 						}
 					}
 				}
@@ -511,6 +598,7 @@ func (e *Engine) RoundEnd(s *Snapshot) {
 			ps.rec.skip = false
 			ps.rec.recent = nil
 			ps.rec.cmdFloor = 0
+			ps.rec.cheats = ps.rec.cheats[:0]
 		}
 		if ps.drv != nil {
 			ps.drv.roundEnd()

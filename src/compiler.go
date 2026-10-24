@@ -30,6 +30,9 @@ type CharCompiler struct {
 	stateNo          int32
 	zssMode          bool
 	currentFile      string
+	// cbr is what the compiler notes about state changes for the CBR AI's
+	// route table (cbr_routes.go).
+	cbr cbrRouteScan
 }
 
 func newCharCompiler() *CharCompiler {
@@ -1289,6 +1292,7 @@ func (c *CharCompiler) expValue(out *BytecodeExp, in *string,
 		c.token = c.tokenizer(in)
 		set := c.token == ":="
 		if set {
+			c.cbr.cur.assigns = true
 			c.token = c.tokenizer(in)
 			var be2 BytecodeExp
 			bv2, err := c.expEqne(&be2, in)
@@ -1643,9 +1647,11 @@ func (c *CharCompiler) expValue(out *BytecodeExp, in *string,
 		return bv, nil
 	case "!":
 		c.token = c.tokenizer(in)
+		mark := c.cbrMark()
 		if bv, err = c.expValue(&be1, in, false); err != nil {
 			return bvNone(), err
 		}
+		c.cbrNegate(mark)
 		if bv.IsNone() {
 			if rd {
 				//out.append(OC_rdreset)
@@ -1783,6 +1789,7 @@ func (c *CharCompiler) expValue(out *BytecodeExp, in *string,
 		}
 	case "ailevel":
 		out.append(OC_ailevel)
+		c.cbrNoteAILevel(*in)
 	case "alive":
 		out.append(OC_alive)
 	case "analog":
@@ -2035,18 +2042,22 @@ func (c *CharCompiler) expValue(out *BytecodeExp, in *string,
 			out.append(OC_ex_)
 			opc = OC_ex_selfcommand
 		}
-		if err := eqne(func() error {
-			if err := text(); err != nil {
-				return err
-			}
-			_, ok := c.cmdl.Names[c.token]
-			if !ok {
-				return Error("Command doesn't exist: " + c.token)
-			}
-			out.appendI32Op(opc, int32(sys.stringPool[c.playerNo].Add(c.token)))
-			return nil
-		}); err != nil {
+		// As eqne, also noting for the route table whether the command must
+		// be active (=) or not (!=)
+		not, err := c.checkEquality(in)
+		if err != nil {
 			return bvNone(), err
+		}
+		if err := text(); err != nil {
+			return bvNone(), err
+		}
+		if _, ok := c.cmdl.Names[c.token]; !ok {
+			return bvNone(), Error("Command doesn't exist: " + c.token)
+		}
+		out.appendI32Op(opc, int32(sys.stringPool[c.playerNo].Add(c.token)))
+		c.cbrNoteCommand(c.token, not)
+		if not {
+			out.append(OC_blnot)
 		}
 	case "const":
 		if err := c.checkOpeningParenthesis(in); err != nil {
@@ -3549,6 +3560,7 @@ func (c *CharCompiler) expValue(out *BytecodeExp, in *string,
 		out.append(be1...)
 	case "random":
 		out.append(OC_random)
+		c.cbr.cur.random = true
 	case "reversaldefattr":
 		hda := func() error {
 			if attr, err := c.trgAttr(in); err != nil {
@@ -4241,6 +4253,7 @@ func (c *CharCompiler) expValue(out *BytecodeExp, in *string,
 			bv = bv1
 		}
 	case "randomrange":
+		c.cbr.cur.random = true
 		if err := c.checkOpeningParenthesis(in); err != nil {
 			return bvNone(), err
 		}
@@ -4420,6 +4433,7 @@ func (c *CharCompiler) expValue(out *BytecodeExp, in *string,
 		}
 	case "ailevelf":
 		out.append(OC_ex_, OC_ex_ailevelf)
+		c.cbrNoteAILevel(*in)
 	case "airjumpcount":
 		out.append(OC_ex2_, OC_ex2_airjumpcount)
 	case "animelemvar":
@@ -4686,6 +4700,7 @@ func (c *CharCompiler) expValue(out *BytecodeExp, in *string,
 	case "incustomstate":
 		out.append(OC_ex_, OC_ex_incustomstate)
 	case "inputtime":
+		c.cbr.cur.rawInput = true
 		if err := c.checkOpeningParenthesisCS(in); err != nil {
 			return bvNone(), err
 		}
@@ -4949,6 +4964,7 @@ func (c *CharCompiler) expValue(out *BytecodeExp, in *string,
 			out.append(be2...)
 			out.append(OC_st_)
 			out.appendI32Op(OC_st_map, int32(sys.stringPool[c.playerNo].Add(strings.ToLower(m))))
+			c.cbr.cur.assigns = true
 		} else {
 			out.append(OC_ex_)
 			out.appendI32Op(OC_ex_maparray, int32(sys.stringPool[c.playerNo].Add(strings.ToLower(m))))
@@ -5327,6 +5343,7 @@ func (c *CharCompiler) expValue(out *BytecodeExp, in *string,
 				return bvNone(), Error(c.token + " is not defined")
 			}
 			out.append(OC_localvar, OpCode(vi))
+			c.cbr.cur.localVars = true
 		} else {
 			return bvNone(), Error("Invalid data: " + c.token)
 		}
@@ -5352,12 +5369,14 @@ func (c *CharCompiler) contiguousOperator(in *string) error {
 }
 
 func (c *CharCompiler) expPostNot(out *BytecodeExp, in *string) (BytecodeValue, error) {
+	mark := c.cbrMark()
 	bv, err := c.expValue(out, in, false)
 	if err != nil {
 		return bvNone(), err
 	}
 	if sys.ignoreMostErrors {
 		for c.token == "!" {
+			c.cbrNegate(mark)
 			c.reverseOrder = true
 			if bv.IsNone() {
 				out.append(OC_blnot)
@@ -6890,6 +6909,10 @@ func (c *CharCompiler) stateCompileCNS(states map[int32]StateBytecode, filename,
 			var triggerall []BytecodeExp
 			var trigger [][]BytecodeExp
 			var trexist []int8
+			// What each trigger line checks, kept alongside triggerall and
+			// trigger for the CBR AI's route table
+			var cbrAll []cbrExprScan
+			var cbrTrig [][]cbrExprScan
 
 			// Flag if following triggers can never be true because of triggerall = 0
 			// In which case the following triggers will still be parsed but not stored
@@ -6968,7 +6991,9 @@ func (c *CharCompiler) stateCompileCNS(states map[int32]StateBytecode, filename,
 						}
 
 						// Parse trigger conditions into a bytecode expression
+						prevScan := c.cbrBegin()
 						be, err := c.fullExpression(&data, VT_Bool)
+						scan := c.cbrEnd(prevScan)
 						if err != nil {
 							// Ignore the error if it happened in a trigger that is being skipped anyway
 							if missingIdx >= 0 && sys.ignoreMostErrors {
@@ -6980,12 +7005,14 @@ func (c *CharCompiler) stateCompileCNS(states map[int32]StateBytecode, filename,
 						// Handle triggerall
 						if isAll {
 							triggerall = append(triggerall, be)
+							cbrAll = append(cbrAll, scan)
 							break
 						}
 
 						// Add more entries to the trigger collection if needed
 						if len(trigger) < int(tn) {
 							trigger = append(trigger, make([][]BytecodeExp, int(tn)-len(trigger))...)
+							cbrTrig = append(cbrTrig, make([][]cbrExprScan, int(tn)-len(cbrTrig))...)
 						}
 						if len(trexist) < int(tn) {
 							trexist = append(trexist, make([]int8, int(tn)-len(trexist))...)
@@ -7002,6 +7029,7 @@ func (c *CharCompiler) stateCompileCNS(states map[int32]StateBytecode, filename,
 							}
 						} else if trexist[tidx] >= 0 {
 							trigger[tidx] = append(trigger[tidx], be)
+							cbrTrig[tidx] = append(cbrTrig[tidx], scan)
 							trexist[tidx] = 1
 						}
 					}
@@ -7089,10 +7117,13 @@ func (c *CharCompiler) stateCompileCNS(states map[int32]StateBytecode, filename,
 			c.block.trigger = texp
 
 			// For this sctrl type, call the function to construct the sctrl
+			prevScan := c.cbrBegin()
 			sctrl, err := scf(is, sc)
+			c.cbrNoteParams(sctrl, c.cbrEnd(prevScan))
 			if err != nil {
 				return errmes(err)
 			}
+			c.cbrNoteCNS(sctrl, triggerall, cbrAll, trigger, cbrTrig, trexist)
 
 			// Check if the triggers can ever be true before appending the new sctrl
 			appending := true
@@ -7458,7 +7489,10 @@ func (c *CharCompiler) subBlock(line *string, root bool,
 			return nil, err
 		}
 		otk := c.token
-		if bl.trigger, err = c.fullExpression(&expr, VT_Bool); err != nil {
+		prevScan := c.cbrBegin()
+		bl.trigger, err = c.fullExpression(&expr, VT_Bool)
+		c.cbrNoteBlock(bl.trigger, c.cbrEnd(prevScan))
+		if err != nil {
 			return nil, err
 		}
 		c.token = otk
@@ -7533,7 +7567,10 @@ func (c *CharCompiler) switchBlock(line *string, bl *StateBlock,
 			return err
 		}
 		otk := c.token
-		if sbl.trigger, err = c.fullExpression(expr, VT_Bool); err != nil {
+		prevScan := c.cbrBegin()
+		sbl.trigger, err = c.fullExpression(expr, VT_Bool)
+		c.cbrNoteBlock(sbl.trigger, c.cbrEnd(prevScan))
+		if err != nil {
 			return err
 		}
 		c.token = otk
@@ -7718,6 +7755,8 @@ func (c *CharCompiler) callFunc(line *string, root bool, ctrls *[]StateControlle
 	otk := c.token
 
 	// Parse arguments blindly until we hit ')'
+	prevScan := c.cbrBegin()
+	defer func() { c.cbrNoteBlock(cf.arg, c.cbrEnd(prevScan)) }()
 	tmp := expr
 	if c.tokenizer(&tmp) == ")" {
 		c.tokenizer(&expr) // Consume empty ')'
@@ -7795,6 +7834,7 @@ func (c *CharCompiler) letAssign(line *string, root bool,
 		otk = c.token
 		for i, n := range names {
 			var be BytecodeExp
+			prevScan := c.cbrBegin()
 			if i < len(names)-1 {
 				be, err = c.argExpression(&expr, VT_Undefined)
 				if err != nil {
@@ -7811,6 +7851,7 @@ func (c *CharCompiler) letAssign(line *string, root bool,
 					return err
 				}
 			}
+			c.cbrNoteBlock(be, c.cbrEnd(prevScan))
 			if n == "_" {
 				*ctrls = append(*ctrls, StateExpr(be))
 			} else {
@@ -7941,7 +7982,10 @@ func (c *CharCompiler) stateBlock(line *string, bl *StateBlock, root bool,
 						return err
 					}
 				}
-				if sctrl, err := scf(is, sc); err != nil {
+				prevScan := c.cbrBegin()
+				sctrl, err := scf(is, sc)
+				c.cbrNoteParams(sctrl, c.cbrEnd(prevScan))
+				if err != nil {
 					return err
 				} else {
 					*ctrls = append(*ctrls, sctrl)
@@ -8148,6 +8192,9 @@ func (c *CharCompiler) stateCompileZSS(states map[int32]StateBytecode, filename,
 func (c *CharCompiler) Compile(pn int, def string, constants map[string]float32) (map[int32]StateBytecode, error) {
 	c.playerNo = pn
 	states := make(map[int32]StateBytecode)
+	// The CBR AI's route table is built anew with the states
+	cbrClearRoutes(pn)
+	c.cbr = cbrRouteScan{}
 
 	// Load initial data from definition file
 	str, err := LoadText(def)
@@ -8394,6 +8441,8 @@ func (c *CharCompiler) Compile(pn int, def string, constants map[string]float32)
 	}
 	// Store functions in Global Info (static data), accessible to all instances
 	sys.cgi[pn].callFuncs = c.funcs
+	// List the character's state changes for the CBR AI (cbr_routes.go)
+	cbrBuildRoutes(pn, states, c.funcs, c.cmdl, &c.cbr)
 	return states, nil
 }
 

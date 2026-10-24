@@ -1,9 +1,13 @@
 package cbr
 
 import (
+	"compress/gzip"
+	"encoding/gob"
 	"fmt"
 	"math"
 	"math/rand"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -85,33 +89,156 @@ func overBaseAt(eng *Engine, n, seedBase int, lv Levels, margin int, base, opp o
 		eng.SetPlayer(1, "Guard", "Rush")
 		eng.Drive(0, lv)
 		eng.SetTakeoverMargin(0, margin)
-		ps := eng.players[0]
-		final := ps.ct.onFinal
-		ps.ct.onFinal = func(rc *resolvedChain) {
-			for _, cc := range rc.ch.cases {
-				switch {
-				case cc.probe:
-					dec.probes++
-					v := dec.by[coarseKey(cc.key)]
-					v[1]++
-					dec.by[coarseKey(cc.key)] = v
-				case cc.caseID != 0:
-					dec.plays++
-					if c := ps.st.Get(cc.caseID); c != nil {
-						k := coarseKey(situationOf(playKey(c), s.ch[0].ai))
-						v := dec.by[k]
-						v[0]++
-						dec.by[k] = v
-					}
-				}
-			}
-			final(rc)
-		}
+		dec.hook(eng.players[0])
 		runRoundBase(s, eng, [2]controller{nil, opp(rand.New(rand.NewSource(int64(seedBase + r))))},
 			[2]controller{base(rand.New(rand.NewSource(int64(seedBase + 500 + r))))}, 3600)
 		out = append(out, result(s))
 	}
 	return out, dec
+}
+
+// hook counts the decisions of the player's chains as they resolve: the
+// base AI's probes by the coarse situation they were made in, the CBR
+// layer's plays by the coarse situation they were played in.
+func (d *decisions) hook(ps *playerState) {
+	final := ps.ct.onFinal
+	ps.ct.onFinal = func(rc *resolvedChain) {
+		for _, cc := range rc.ch.cases {
+			switch {
+			case cc.probe:
+				d.probes++
+				v := d.by[coarseKey(cc.key)]
+				v[1]++
+				d.by[coarseKey(cc.key)] = v
+			case cc.caseID != 0:
+				d.plays++
+				if cc.key != 0 {
+					v := d.by[coarseKey(cc.key)]
+					v[0]++
+					d.by[coarseKey(cc.key)] = v
+				}
+			}
+		}
+		final(rc)
+	}
+}
+
+// playID is a play of the CBR layer's: its case and the start tick of its
+// chain entry.
+type playID struct {
+	caseID uint64
+	start  int64
+}
+
+// playShadow is the tests' own account of what the CBR layer's plays of each
+// move achieved in each situation they were begun in, kept apart from the
+// store so that the gate's records can be checked against it. The harness
+// notes where each play began (see began) and which plays' commands did not
+// come out (see ended); the results come from the chains as they resolve, by
+// the rule the package documents: a play is credited with its exchange's
+// reward less a factor of ComboGamma for each move the CBR layer played
+// after it in the exchange, and that factor is its share of the exchange; a
+// play that never led into an exchange is a neutral result with no share.
+// Plays the character's own AI took over from are left out.
+type playShadow struct {
+	p      *Params
+	where  map[playID]uint64 // the situation a play was begun in (see baselineKey)
+	failed map[playID]bool
+	rec    map[uint64]*PlayStat // by playKey
+	// The play being watched, and its case's failed executions when it began.
+	cur   playID
+	fails int32
+}
+
+func newPlayShadow(p *Params) *playShadow {
+	return &playShadow{p: p, where: map[playID]uint64{}, failed: map[playID]bool{}, rec: map[uint64]*PlayStat{}}
+}
+
+// hook credits the player's plays from its chains as they resolve or leave
+// the lead-in. Call it after SetPlayer, before the round.
+func (sh *playShadow) hook(ps *playerState) {
+	final, evict := ps.ct.onFinal, ps.ct.onEvict
+	ps.ct.onFinal = func(rc *resolvedChain) {
+		r := sh.p.reward(&rc.comp)
+		later := 0 // the CBR layer's plays after entry i
+		for i := len(rc.ch.cases) - 1; i >= 0; i-- {
+			cc := rc.ch.cases[i]
+			if cc.probe || cc.rec != nil || cc.caseID == 0 {
+				continue
+			}
+			share := pow32(sh.p.ComboGamma, later)
+			sh.credit(ps, cc, r*share, share)
+			later++
+		}
+		final(rc)
+	}
+	ps.ct.onEvict = func(cc chainCase, tick int64) {
+		if !cc.probe && cc.rec == nil && cc.caseID != 0 {
+			sh.credit(ps, cc, sh.p.Situation[CompNeutral], 0)
+		}
+		evict(cc, tick)
+	}
+}
+
+func (sh *playShadow) credit(ps *playerState, cc chainCase, r, share float32) {
+	id := playID{cc.caseID, cc.startTick}
+	sit, ok := sh.where[id]
+	c := ps.st.Get(cc.caseID)
+	if !ok || c == nil || cc.contested || sh.failed[id] {
+		return
+	}
+	k := playKey(c, sit)
+	s := sh.rec[k]
+	if s == nil {
+		s = &PlayStat{}
+		sh.rec[k] = s
+	}
+	s.Trials = s.Trials*sh.p.Decay + 1
+	s.Sum = s.Sum*sh.p.Decay + r
+	s.Shares = s.Shares*sh.p.Decay + share
+}
+
+// began notes, on the frame the CBR layer began playing c, the situation it
+// began in, from the frame the driver chose on, and finds the play's chain
+// entry. It returns that situation.
+func (sh *playShadow) began(ps *playerState, c *Case) uint64 {
+	sh.ended(ps)
+	sit := baselineKey(&ps.lastFeat, ps.lastSelf.Ctrl, ps.lastSelf.AILevel)
+	find := func(cases []chainCase) bool {
+		for i := len(cases) - 1; i >= 0; i-- {
+			if cc := cases[i]; !cc.probe && cc.rec == nil && cc.caseID == c.ID {
+				sh.cur = playID{c.ID, cc.startTick}
+				return true
+			}
+		}
+		return false
+	}
+	if ps.ct.active == nil || !find(ps.ct.active.cases) {
+		find(ps.ct.leadIn)
+	}
+	sh.where[sh.cur] = sit
+	sh.fails = c.Outcome.ExecFails
+	return sit
+}
+
+// ended notes, once the play being watched is over, whether its command did
+// not come out. Call it on every frame the CBR layer is not playing it.
+func (sh *playShadow) ended(ps *playerState) {
+	if sh.cur.caseID == 0 {
+		return
+	}
+	if c := ps.st.Get(sh.cur.caseID); c != nil && c.Outcome.ExecFails > sh.fails {
+		sh.failed[sh.cur] = true
+	}
+	sh.cur = playID{}
+}
+
+// record returns the shadow's record of a move's plays (see playKey).
+func (sh *playShadow) record(k uint64) PlayStat {
+	if s := sh.rec[k]; s != nil {
+		return *s
+	}
+	return PlayStat{}
 }
 
 // recordAs records player 0 played by ctl against the defender as a
@@ -164,32 +291,36 @@ func TestTakeoverWhenBetter(t *testing.T) {
 		t.Fatalf("the CBR layer should take over on many more follow-ups after learning: %.0f%% from %.0f%%",
 			100*ad.share(comboSit), 100*bd.share(comboSit))
 	}
-	// The cancel proved itself: the CBR layer's own plays of it beat the
-	// base AI's record in that situation by more than the margin.
+	// The cancel proved itself: the CBR layer's own plays of it in the
+	// follow-ups it was played in beat the base AI's record there by more
+	// than the margin.
 	st, _ := eng.Store("Rush")
 	p := eng.Params()
+	cancel := uint64(1000) << 1 // moveKey of a command case into state 1000
 	found := false
-	seen := map[uint64]bool{}
-	for _, c := range st.Cases {
-		k := playKey(c)
-		a := st.playRecord(c)
-		cancel := c.Kind == KindCommand && c.MoveRef == 1000 && !c.StartCtrl
-		if !cancel || seen[k] || a.Trials < p.decayed(p.TakeoverMinPlays)-1e-3 {
+	for k, a := range st.Played {
+		if k>>sitBits != cancel || k&(1<<11) != 0 || !p.proves(*a) {
 			continue
 		}
-		seen[k], found = true, true
-		key := situationOf(k, 0)
+		found = true
+		key := k & sitMask
 		b, n := st.baseline(p, key)
-		t.Logf("%s: %.1f plays, mean %.3f against the base AI's %.3f over %.1f results", PlayString(k), a.Trials, a.Sum/a.Trials, b, n)
-		if a.Sum/a.Trials < b+p.TakeoverMargin {
-			t.Fatalf("the cancel's plays (%.3f) should beat the base AI (%.3f)", a.Sum/a.Trials, b)
+		cmp := st.against(p, k, p.TakeoverMargin)
+		ob, known := cmp.bases[1].b, cmp.n == 2
+		o := st.Offered[k]
+		t.Logf("%s: %.1f plays, mean %.3f, %.1f exchanges' worth, against the base AI's %.3f over %.1f results there and %.3f where the cancel was on offer (%+v)",
+			PlayString(k), a.Trials, a.Sum/a.Trials, a.Shares, b, n, ob, o)
+		if a.Sum/a.Trials < cmp.strictest().b+p.TakeoverMargin {
+			t.Fatalf("the cancel's plays (%.3f) should beat the base AI (%.3f there, %.3f where it was on offer)", a.Sum/a.Trials, b, ob)
 		}
 		// What the cancel was compared with is the base AI's own record of
-		// the follow-ups, which holds enough results to count, shrunk toward
-		// the coarser records as Store.baseline says.
+		// the follow-ups where the cancel was on offer, which holds enough
+		// results to count, shrunk toward the situation's record, itself
+		// shrunk toward the coarser records as Store.baseline says.
 		rec := st.Baseline[key]
-		if rec == nil || rec.Trials < p.decayed(p.BaselineMinTrials)-1e-3 {
-			t.Fatalf("the base AI's record of the follow-ups should hold at least %v results: %+v", p.BaselineMinTrials, rec)
+		if rec == nil || o == nil || !known || o.Trials < p.decayed(p.BaselineMinTrials)-1e-3 {
+			t.Fatalf("the base AI's record of the follow-ups where the cancel was on offer should hold at least %v results: %+v (situation %+v)",
+				p.BaselineMinTrials, o, rec)
 		}
 		want := p.BaselineDefault
 		for _, k := range []uint64{baseAll, coarseKey(key), key} {
@@ -197,22 +328,15 @@ func TestTakeoverWhenBetter(t *testing.T) {
 				want = (p.BaselineShrink*want + r.ValueSum) / (p.BaselineShrink + r.Trials)
 			}
 		}
-		if !near(b, want) || n != rec.Trials || rec.ValueSum/rec.Trials <= p.BaselineDefault {
-			t.Fatalf("the comparison must use the base AI's record (mean %.3f over %.1f): got %.3f over %.1f, want %.3f",
-				rec.ValueSum/rec.Trials, rec.Trials, b, n, want)
+		want = (p.BaselineShrink*want + o.ValueSum) / (p.BaselineShrink + o.Trials)
+		if !near(ob, want) || n != rec.Trials || o.ValueSum/o.Trials <= p.BaselineDefault {
+			t.Fatalf("the comparison must use the base AI's record where the cancel was on offer (mean %.3f over %.1f): got %.3f, want %.3f",
+				o.ValueSum/o.Trials, o.Trials, ob, want)
 		}
 	}
 	if !found {
 		t.Fatal("the cancel into the special was never proved")
 	}
-}
-
-// situationOf is the baseline situation a played-record key describes (see
-// playKey), for a base AI at the given AI level.
-func situationOf(play uint64, aiLevel float32) uint64 {
-	const fields = 0xf | 7<<4 | 3<<8 | 1<<11 // band, enemy state, context, control
-	return baseFine | play&fields | aiBand(aiLevel)<<13 |
-		play>>48&7<<baseSelfShift | play>>51&3<<baseStunShift
 }
 
 // TestBaseKeptWhenBetter: the base AI is the player who cancels, and the
@@ -258,20 +382,47 @@ func gateFixture(p *Params) (d *driver, c *Case, cur *Feat, self *CharSnap, key 
 	return d, c, &f, self, baselineKey(&f, true, 8)
 }
 
-// setPlayed gives the case's move n plays by the CBR layer from the case's
-// stance, with the given mean result.
+// setPlayed gives the case's move n plays by the CBR layer in the situation
+// the case was recorded in, for a base AI at AI level 8, with the given mean
+// result, each play a decision that ended its exchange.
 func setPlayed(p *Params, st *Store, c *Case, n, mean float32) {
-	a := st.played(c)
+	setPlayedAt(p, st, c, baselineKey(&c.Start, c.StartCtrl, 8), n, mean)
+}
+
+// setPlayedAt is setPlayed in situation sit.
+func setPlayedAt(p *Params, st *Store, c *Case, sit uint64, n, mean float32) {
+	a := st.played(playKey(c, sit))
 	a.Trials = p.decayed(n)
 	a.Sum = a.Trials * mean
+	a.Shares = a.Trials
 }
 
 // setBase gives a situation, its coarser one and the store n results of the
 // base AI with the given mean, each a decision that ended its exchange (so
-// the margin applies in full).
+// the margin applies in full), with every move of the store's cases on offer
+// at each (see Store.Offered).
 func setBase(st *Store, key uint64, n, mean float32) {
+	setBaseShares(st, key, n, mean, n)
+}
+
+// setBaseShares is setBase with the results credited with shares shares of
+// their exchanges' rewards between them.
+func setBaseShares(st *Store, key uint64, n, mean, shares float32) {
 	for _, k := range []uint64{key, coarseKey(key), baseAll} {
-		st.Baseline[k] = &BaselineStat{Trials: n, ValueSum: n * mean, Shares: n}
+		st.Baseline[k] = &BaselineStat{Trials: n, ValueSum: n * mean, Shares: shares}
+	}
+	for _, c := range st.Cases {
+		st.Offered[playKey(c, key)] = &BaselineStat{Trials: n, ValueSum: n * mean, Shares: shares}
+	}
+}
+
+// probeAt credits one result r of the base AI in situation key, with share
+// share of its exchange's reward, as a probe with the moves of the given
+// cases on offer is credited (see Engine.creditProbe).
+func probeAt(p *Params, st *Store, key uint64, r, share float32, offers ...*Case) {
+	st.addBaseline(p, key, r, share)
+	for _, c := range offers {
+		st.addOffered(p, playKey(c, key), r, share)
 	}
 }
 
@@ -498,12 +649,17 @@ func TestProbesCreditBaseline(t *testing.T) {
 	ps.st.Admit(p, []*Case{c})
 	k1 := baselineKey(&Feat{Enemy: CharFeat{Present: true, RelX: 50}}, true, 4)
 	k2 := baselineKey(&Feat{Enemy: CharFeat{Present: true, RelX: 50, HitStun: 5}}, false, 4)
+	// The situation the played case was played in, and the key of its record
+	// there.
+	kp := baselineKey(&Feat{Enemy: CharFeat{Present: true, RelX: 90}}, true, 4)
+	pk := playKey(c, kp)
 	// A recorded case (the base AI's decision, recorded too) does not count
 	// among the decisions compared with the base AI, and neither does a
 	// probe: only the CBR layer's played cases after an entry reduce its
-	// share.
+	// share. The first probe had the move on offer.
 	rc := &resolvedChain{
-		ch:   &chain{cases: []chainCase{{probe: true, key: k1}, {rec: &Case{}}, {caseID: 99}, {probe: true, key: k2}}, probes: 2},
+		ch: &chain{cases: []chainCase{{probe: true, key: k1, offers: [offerMax]uint64{playKey(c, k1)}}, {rec: &Case{}},
+			{caseID: 99, key: kp}, {probe: true, key: k2}}, probes: 2},
 		comp: Completion{Result: CompKnockdown, Quality: p.quality(CompKnockdown), DamageDealt: 0.2},
 	}
 	r, g := p.reward(&rc.comp), p.ComboGamma
@@ -515,14 +671,17 @@ func TestProbesCreditBaseline(t *testing.T) {
 	if b := st.Baseline[k1]; b == nil || !near(b.ValueSum, r*g) || !near(b.Shares, g) {
 		t.Fatalf("a probe with one played case after it takes gamma: %+v", b)
 	}
+	if b := st.Offered[playKey(c, k1)]; b == nil || b.Trials != 1 || !near(b.ValueSum, r*g) || !near(b.Shares, g) || len(st.Offered) != 1 {
+		t.Fatalf("the probe's result goes to the record of the move on offer too, and only there: %+v (%d records)", b, len(st.Offered))
+	}
 	if b := st.Baseline[baseAll]; b == nil || b.Trials < 1.99 || !near(b.Shares, g*p.Decay+1) {
 		t.Fatalf("every probe counts in the store-wide record: %+v", b)
 	}
 	if b := st.Baseline[coarseKey(k1)]; b == nil || b.Trials != 1 {
 		t.Fatalf("and in its coarser situation: %+v", b)
 	}
-	if a := st.playRecord(c); a.Trials != 1 || !near(a.Sum, r) {
-		t.Fatalf("the played case's record against the base AI leaves out the probe after it: %+v", a)
+	if a := st.playRecord(pk); a.Trials != 1 || !near(a.Sum, r) || !near(a.Shares, 1) || len(st.Played) != 1 {
+		t.Fatalf("the played case's record against the base AI, where it was played, leaves out the probe after it: %+v (%d records)", a, len(st.Played))
 	}
 	if c.Outcome.Trials != 1 || !near(c.Outcome.ValueSum, r) {
 		t.Fatalf("probes leave the played case's value as it was: %+v", c.Outcome)
@@ -536,10 +695,10 @@ func TestProbesCreditBaseline(t *testing.T) {
 	// costs a factor of gamma.
 	k3 := baselineKey(&Feat{Enemy: CharFeat{Present: true, RelX: 130}}, true, 4)
 	k4 := baselineKey(&Feat{Enemy: CharFeat{Present: true, RelX: 170}}, true, 4)
-	before := st.playRecord(c)
+	before := st.playRecord(pk)
 	eng.finalizeChain(ps, &resolvedChain{
-		ch: &chain{cases: []chainCase{{probe: true, key: k3}, {probe: true}, {caseID: 99}, {probe: true}, {probe: true},
-			{probe: true, key: k4}, {caseID: 99}, {caseID: 99}}, probes: 5},
+		ch: &chain{cases: []chainCase{{probe: true, key: k3}, {probe: true}, {caseID: 99, key: kp}, {probe: true}, {probe: true},
+			{probe: true, key: k4}, {caseID: 99, key: kp}, {caseID: 99, key: kp}}, probes: 5},
 		comp: rc.comp,
 	})
 	if b := st.Baseline[k3]; b == nil || !near(b.ValueSum, r*g*g*g) {
@@ -548,25 +707,56 @@ func TestProbesCreditBaseline(t *testing.T) {
 	if b := st.Baseline[k4]; b == nil || !near(b.ValueSum, r*g*g) {
 		t.Fatalf("two played cases after a probe: gamma squared: %+v", b)
 	}
-	if got, want := st.playRecord(c).Sum, ((before.Sum*p.Decay+r*g*g)*p.Decay+r*g)*p.Decay+r; !near(got, want) {
+	if got, want := st.playRecord(pk).Sum, ((before.Sum*p.Decay+r*g*g)*p.Decay+r*g)*p.Decay+r; !near(got, want) {
 		t.Fatalf("plays take gamma per played case after them, probes left out: %v, want %v", got, want)
+	}
+	if got, want := st.playRecord(pk).Shares, ((before.Shares*p.Decay+g*g)*p.Decay+g)*p.Decay+1; !near(got, want) {
+		t.Fatalf("plays are credited with their shares too: %v, want %v", got, want)
+	}
+
+	// A play is kept under the situation it was played in: the same move
+	// played elsewhere has a record of its own.
+	kq := baselineKey(&Feat{Enemy: CharFeat{Present: true, RelX: 300}}, true, 4)
+	before = st.playRecord(pk)
+	eng.finalizeChain(ps, &resolvedChain{ch: &chain{cases: []chainCase{{caseID: 99, key: kq}}}, comp: rc.comp})
+	if a := st.playRecord(playKey(c, kq)); a.Trials != 1 || !near(a.Sum, r) || st.playRecord(pk) != before {
+		t.Fatalf("a play elsewhere is kept apart: %+v there, %+v here (was %+v)", a, st.playRecord(pk), before)
+	}
+
+	// A play whose command did not come out is not one of the move's plays,
+	// whether it led into an exchange or not, and its case's value still
+	// takes the result.
+	before, trials := st.playRecord(pk), c.Outcome.Trials
+	eng.finalizeChain(ps, &resolvedChain{ch: &chain{cases: []chainCase{{caseID: 99, key: kp, failed: true}}}, comp: rc.comp})
+	ps.ct.onEvict(chainCase{caseID: 99, key: kp, failed: true}, 1)
+	if a := st.playRecord(pk); a != before || c.Outcome.Trials <= trials {
+		t.Fatalf("a failed play is left out of the move's plays (%+v, was %+v) but not out of its value (%v trials, was %v)", a, before, c.Outcome.Trials, trials)
+	}
+	// Nor is a play made with the base AI off, in no situation.
+	eng.finalizeChain(ps, &resolvedChain{ch: &chain{cases: []chainCase{{caseID: 99}}}, comp: rc.comp})
+	if _, ok := st.Played[playKey(c, 0)]; ok || st.playRecord(pk) != before {
+		t.Fatal("a play in no situation is compared with nothing")
 	}
 
 	// A probe or a played case that never joined an exchange resolves as
 	// neutral, both counted; a contested play counts for nothing. Neither
 	// was credited with any share of an exchange's reward.
-	ps.ct.onEvict(chainCase{probe: true, key: k2}, 1)
+	ps.ct.onEvict(chainCase{probe: true, key: k2, offers: [offerMax]uint64{playKey(c, k2)}}, 1)
 	if b := st.Baseline[k2]; b.Trials < 1.99 || !near(b.ValueSum, r*p.Decay+p.Situation[CompNeutral]) || !near(b.Shares, p.Decay) {
 		t.Fatalf("an evicted probe is a neutral result: %+v", b)
 	}
-	before = st.playRecord(c)
-	ps.ct.onEvict(chainCase{caseID: 99}, 1)
-	if a := st.playRecord(c); !near(a.Trials, before.Trials*p.Decay+1) || !near(a.Sum, before.Sum*p.Decay+p.Situation[CompNeutral]) {
+	if b := st.Offered[playKey(c, k2)]; b == nil || b.Trials != 1 || b.ValueSum != p.Situation[CompNeutral] || b.Shares != 0 {
+		t.Fatalf("for the moves on offer too: %+v", b)
+	}
+	before = st.playRecord(pk)
+	ps.ct.onEvict(chainCase{caseID: 99, key: kp}, 1)
+	if a := st.playRecord(pk); !near(a.Trials, before.Trials*p.Decay+1) || !near(a.Sum, before.Sum*p.Decay+p.Situation[CompNeutral]) ||
+		!near(a.Shares, before.Shares*p.Decay) {
 		t.Fatalf("an evicted play is a neutral result: %+v after %+v", a, before)
 	}
-	before = st.playRecord(c)
-	ps.ct.onEvict(chainCase{caseID: 99, contested: true}, 1)
-	if a := st.playRecord(c); a != before {
+	before = st.playRecord(pk)
+	ps.ct.onEvict(chainCase{caseID: 99, key: kp, contested: true}, 1)
+	if a := st.playRecord(pk); a != before {
 		t.Fatal("a contested play counts for nothing")
 	}
 
@@ -726,8 +916,8 @@ func TestContestedPlayIsDropped(t *testing.T) {
 	if c.Outcome.Aborts != 0 || c.Outcome.ExecFails != 0 {
 		t.Fatalf("nothing counts against a contested play: %+v", c.Outcome)
 	}
-	if c.Outcome.Trials != 0 || st.action(c).PTrials != 0 {
-		t.Fatalf("a contested play's result is not credited: %+v %+v", c.Outcome, st.action(c))
+	if c.Outcome.Trials != 0 || len(st.Played) != 0 {
+		t.Fatalf("a contested play's result is not credited: %+v, %d play records", c.Outcome, len(st.Played))
 	}
 	if !st.ChangeStateAI {
 		t.Fatal("repeated forced attacks mark the AI as direct state change")
@@ -773,10 +963,11 @@ func TestSwitchedOnAIIsNotHeldAgainstMoves(t *testing.T) {
 	}
 }
 
-// TestBaselinePersists: the base AI's record and the CBR layer's own plays,
-// by stance, are saved; a store saved before they existed loads with them
-// empty, and one that kept them in the older layout, with situations that
-// mixed what is now kept apart, loads with them cleared.
+// TestBaselinePersists: the base AI's records and the CBR layer's own plays,
+// by situation, are saved; a store saved before they existed loads with them
+// empty, and one that kept them in an older layout, with situations that
+// mixed what is now kept apart, loads with them cleared and its cases and
+// their values kept.
 func TestBaselinePersists(t *testing.T) {
 	dir := t.TempDir()
 	p := DefaultParams()
@@ -785,9 +976,9 @@ func TestBaselinePersists(t *testing.T) {
 	st.Admit(p, []*Case{c})
 	k := baselineKey(&Feat{}, true, 5)
 	st.addBaseline(p, k, 0.25, 0.5)
-	st.addPlay(p, c, 0.5)
-	st.contestPlay(p, c)
-	p.applyPlayed(st.action(c), 0.4)
+	st.addOffered(p, playKey(c, k), 0.2, 0.5)
+	st.addPlay(p, c, k, 0.5, 0.75)
+	st.contestPlay(p, c, k)
 	if err := SaveStore(LocalPath(dir, "x"), st); err != nil {
 		t.Fatal(err)
 	}
@@ -798,15 +989,15 @@ func TestBaselinePersists(t *testing.T) {
 	if b := got.Baseline[k]; b == nil || b.Trials != 1 || b.ValueSum != 0.25 || b.Shares != 0.5 || len(got.Baseline) != 3 {
 		t.Fatalf("baseline after load: %+v (%d entries)", b, len(got.Baseline))
 	}
-	if a := got.Played[playKey(c)]; a == nil || *a != (PlayStat{Trials: 1, Sum: 0.5, Contests: 1}) || len(got.Played) != 1 {
+	if b := got.Offered[playKey(c, k)]; b == nil || *b != (BaselineStat{Trials: 1, ValueSum: 0.2, Shares: 0.5}) || len(got.Offered) != 1 {
+		t.Fatalf("on-offer record after load: %+v (%d entries)", b, len(got.Offered))
+	}
+	if a := got.Played[playKey(c, k)]; a == nil || *a != (PlayStat{Trials: 1, Sum: 0.5, Shares: 0.75, Contests: 1}) || len(got.Played) != 1 {
 		t.Fatalf("played record after load: %+v (%d entries)", a, len(got.Played))
 	}
-	if a := got.Actions[actionKey(c)]; a == nil || a.PTrials != 1 || a.PSum != 0.4 {
-		t.Fatalf("plays of the action from any stance after load: %+v", a)
-	}
 
-	// A store from before the base AI's record: both records load empty.
-	st.Baseline, st.Played = nil, nil
+	// A store from before the base AI's records: they load empty.
+	st.Baseline, st.Offered, st.Played = nil, nil, nil
 	if err := SaveStore(LocalPath(dir, "old"), st); err != nil {
 		t.Fatal(err)
 	}
@@ -814,32 +1005,71 @@ func TestBaselinePersists(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if old.Baseline == nil || len(old.Baseline) != 0 || old.Played == nil || len(old.Played) != 0 {
-		t.Fatal("an older store loads with an empty baseline and no plays")
+	if old.Baseline == nil || len(old.Baseline) != 0 || old.Offered == nil || len(old.Offered) != 0 || old.Played == nil || len(old.Played) != 0 {
+		t.Fatal("an older store loads with empty records of the base AI and no plays")
 	}
 
-	// A store in the older layout (no BaseFormat): its records were kept by
-	// situations without the stance, so they are dropped, and what it
-	// learned otherwise is kept.
-	st.Baseline, st.Played, st.BaseFormat = map[uint64]*BaselineStat{}, map[uint64]*PlayStat{}, 0
-	st.addBaseline(p, k, 0.25, 0.5)
-	st.addPlay(p, c, 0.5)
-	st.action(c).Trials, st.action(c).ValueSum = 2, 0.3
-	if err := SaveStore(LocalPath(dir, "older"), st); err != nil {
+	// Stores in the older layouts: 0 (no BaseFormat) kept the situations
+	// without the stance, 1 kept the plays by the situation their case was
+	// recorded in, and by the action from any stance (fields an ActionStat
+	// no longer has). Their records are dropped, and what they learned
+	// otherwise is kept.
+	type oldAction struct {
+		Trials, ValueSum, PTrials, PSum float32
+	}
+	type oldStore struct {
+		Char       string
+		Cases      []*Case
+		Actions    map[uint64]*oldAction
+		Baseline   map[uint64]*BaselineStat
+		Played     map[uint64]*PlayStat
+		BaseFormat int
+	}
+	for _, format := range []int{0, 1} {
+		path := LocalPath(dir, fmt.Sprint("format", format))
+		saveRaw(t, path, &oldStore{Char: "x", Cases: []*Case{c}, BaseFormat: format,
+			Actions:  map[uint64]*oldAction{actionKey(c): {Trials: 2, ValueSum: 0.3, PTrials: 4, PSum: 0.4}},
+			Baseline: map[uint64]*BaselineStat{k: {Trials: 1, ValueSum: 0.25}},
+			Played:   map[uint64]*PlayStat{actionKey(c): {Trials: 4, Sum: 0.4}}})
+		older, err := LoadStore(path, "x")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(older.Baseline) != 0 || len(older.Offered) != 0 || len(older.Played) != 0 || older.BaseFormat != baseFormat {
+			t.Fatalf("format %d: records in an older layout must be dropped: %d, %d, %d, format %d",
+				format, len(older.Baseline), len(older.Offered), len(older.Played), older.BaseFormat)
+		}
+		if a := older.Actions[actionKey(c)]; a == nil || a.Trials != 2 || a.ValueSum != 0.3 {
+			t.Fatalf("format %d: the action's value is kept: %+v", format, a)
+		}
+		if older.Len() != 1 {
+			t.Fatalf("format %d: the cases are kept", format)
+		}
+	}
+}
+
+// saveRaw writes v as a store file, behind the store header, as SaveStore
+// does: for stores in a layout the package no longer writes.
+func saveRaw(t *testing.T, path string, v any) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	older, err := LoadStore(LocalPath(dir, "older"), "older")
+	f, err := os.Create(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(older.Baseline) != 0 || len(older.Played) != 0 || older.BaseFormat != baseFormat {
-		t.Fatalf("records in the older layout must be dropped: %d, %d, format %d", len(older.Baseline), len(older.Played), older.BaseFormat)
+	defer f.Close()
+	zw := gzip.NewWriter(f)
+	enc := gob.NewEncoder(zw)
+	if err := enc.Encode(storeHeader{storeMagic, StoreVersion}); err != nil {
+		t.Fatal(err)
 	}
-	if a := older.Actions[actionKey(c)]; a == nil || a.PTrials != 0 || a.PSum != 0 || a.Trials != 2 || a.ValueSum != 0.3 {
-		t.Fatalf("plays of the action are dropped, its value kept: %+v", a)
+	if err := enc.Encode(v); err != nil {
+		t.Fatal(err)
 	}
-	if older.Len() != 1 {
-		t.Fatal("the cases are kept")
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -884,10 +1114,10 @@ func TestAirMovesMeetTheAirRecord(t *testing.T) {
 	// over although the base AI does better in the air.
 	d, jump, jab := fixture()
 	for i := 0; i < 80; i++ {
-		d.st.addBaseline(p, gk, 0, 1)
+		probeAt(p, d.st, gk, 0, 1, jab)
 	}
 	for i := 0; i < 20; i++ {
-		d.st.addBaseline(p, ak, 0.12, 1)
+		probeAt(p, d.st, ak, 0.12, 1, jump)
 	}
 	if b, n := d.st.baseline(p, ak); b < 0.1 || n < 19 {
 		t.Fatalf("the air situation's record is the base AI's air play: mean %.3f over %.1f", b, n)
@@ -902,9 +1132,9 @@ func TestAirMovesMeetTheAirRecord(t *testing.T) {
 	// With ground results only, the air situation has no record of its own:
 	// the base AI's ground play does not count as its results there, so the
 	// margin doubles (0.045 is under 0.06) until it has enough air results.
-	d, jump, _ = fixture()
+	d, jump, jab = fixture()
 	for i := 0; i < 100; i++ {
-		d.st.addBaseline(p, gk, 0, 1)
+		probeAt(p, d.st, gk, 0, 1, jab)
 	}
 	if _, n := d.st.baseline(p, ak); n != 0 {
 		t.Fatalf("ground results counted in the air: %v", n)
@@ -913,7 +1143,7 @@ func TestAirMovesMeetTheAirRecord(t *testing.T) {
 		t.Fatal("against no air record, the margin doubles")
 	}
 	for i := 0; i < 5; i++ {
-		d.st.addBaseline(p, ak, 0, 1)
+		probeAt(p, d.st, ak, 0, 1, jump)
 	}
 	if got, _ := d.chooseWhy(&air, inAir, 1, nil, &gate{key: ak}); got != jump {
 		t.Fatal("against an air record as good as the ground one, the air move takes over")
@@ -980,9 +1210,11 @@ func TestBackoffEndsWhenTheSituationChanges(t *testing.T) {
 			next.Enemy.Move, next.Enemy.HitboxActive = MtAttack, true
 		}
 		// Where the enemy attacks (or, without the change, once the base
-		// AI's record here turns bad), the base AI does badly and the move
-		// has proved better.
-		setBase(d.st, baselineKey(&next, true, 8), 10, -0.2)
+		// AI's record here turns bad), the base AI does badly and the move's
+		// own plays there proved it better.
+		nk := baselineKey(&next, true, 8)
+		setBase(d.st, nk, 10, -0.2)
+		setPlayedAt(p, d.st, c, nk, 3, 0)
 		for w.Tick = 1; w.Tick < 20; w.Tick++ {
 			if _, ok := d.input(w, self, &next); ok {
 				return w.Tick
@@ -1231,9 +1463,7 @@ func TestMarginIsPerExchange(t *testing.T) {
 	// average, the margin is half as large, 0.015, and an exchange's worth of
 	// plays is two plays, so the shrinking counts twice as many: the nine
 	// plays shrink to 0.021, above the margin.
-	for _, k := range []uint64{key, coarseKey(key), baseAll} {
-		d.st.Baseline[k].Shares = 500
-	}
+	setBaseShares(d.st, key, 1000, 0, 500)
 	if sh := d.st.baselineShare(p, key); sh < 0.5 || sh > 0.51 {
 		t.Fatalf("share %v, want about 0.5", sh)
 	}
@@ -1355,7 +1585,7 @@ func TestLeadInIsTheSameForBothLayers(t *testing.T) {
 		for i := 0; i <= 10; i++ {
 			cc := chainCase{probe: true, key: keys(i), startTick: int64(20 * i)}
 			if i == walk {
-				cc = chainCase{caseID: 99, startTick: int64(20 * i)}
+				cc = chainCase{caseID: 99, startTick: int64(20 * i), key: k}
 			}
 			ps.ct.addCase(cc)
 		}
@@ -1365,7 +1595,7 @@ func TestLeadInIsTheSameForBothLayers(t *testing.T) {
 		}
 		ps.ct.leadIn = ps.ct.leadIn[:0]
 		eng.finalizeChain(ps, &resolvedChain{ch: ch, comp: comp})
-		return ps.st.playRecord(c).Sum, ps.st.Baseline
+		return ps.st.playRecord(playKey(c, k)).Sum, ps.st.Baseline
 	}
 	same := func(int) uint64 { return k }
 
@@ -1438,6 +1668,422 @@ func TestLeadInIsTheSameForBothLayers(t *testing.T) {
 	}
 }
 
+// TestLeadInCountsAPlayAsTheBaseAIsDecisions: a walk the CBR layer plays,
+// crossing distance bands, counts in the lead-in for as many decisions as
+// the base AI's identical walk makes (one in each new situation it has
+// control in), so the walk's start is credited as the base AI's first
+// decision of the walk is, however many decisions follow it before the
+// exchange: with the exchange's reward when it is still in the lead-in, as
+// neutral when it has left it. And a decision of the base AI's before the
+// walk leaves the lead-in as it would after the base AI's own walk. Here
+// the base AI first decides at 250 px, then a 30-frame walk forward crosses
+// from 230 to 140 px (bands 200-239, 160-199 and 120-159), then the base AI
+// makes a few more decisions, and the exchange follows.
+func TestLeadInCountsAPlayAsTheBaseAIsDecisions(t *testing.T) {
+	at := func(x float32) Feat {
+		return Feat{RoundState: 2, Self: CharFeat{Present: true, State: StStand, Ctrl: true}, Enemy: CharFeat{Present: true, RelX: x, State: StStand}}
+	}
+	comp := Completion{Result: CompKnockdown, Quality: DefaultParams().quality(CompKnockdown), DamageDealt: 0.2}
+	// run plays the decision before the walk, the walk and then extra
+	// decisions of the base AI, and returns whether the walk's start is
+	// still in the lead-in when the exchange starts (the CBR layer's play of
+	// it when played is set, else the base AI's first decision of its own
+	// walk), whether the decision before it is, and what the walk's start is
+	// credited with.
+	run := func(played bool, extra int) (bool, bool, float32) {
+		p := DefaultParams()
+		p.Decay, p.TakeoverExplore, p.BaseExplore = 1, 0, 0 // plain sums, no exploration
+		eng := New(p, t.TempDir(), 1)
+		eng.SetPlayer(0, "A", "B")
+		eng.Drive(0, Levels{Execution: 8, Knowledge: 8})
+		ps := eng.players[0]
+		d, st := ps.drv, ps.st
+		walk := &Case{ID: 1, Source: SrcHumanLocal, Kind: KindMovement, ExecFrame: -1, Inputs: make([]InputBits, 30),
+			StartStateType: StStand, StartCtrl: true, StartMoveType: MtIdle, Start: at(230), Outcome: Outcome{Trials: 1, ValueSum: 0.5}}
+		for i := range walk.Inputs {
+			walk.Inputs[i] = InF
+		}
+		st.Admit(p, []*Case{walk})
+		start := at(230)
+		x := baselineKey(&start, true, 8)
+		setBase(st, x, 10, 0)
+		if played {
+			setPlayedAt(p, st, walk, x, 10, 0.1) // proved better where the walk starts, and only there
+		}
+		w := &WorldSnap{RoundState: 2}
+		self := CharSnap{StateType: StStand, MoveType: MtIdle, Ctrl: true, AILevel: 8}
+		pre := at(250)
+		if _, ok := d.input(w, &self, &pre); ok {
+			t.Fatal("setup: before the walk, at 250 px, the base AI decides")
+		}
+		for f := 1; f <= 31; f++ {
+			w.Tick = int64(f)
+			cur := at(230 - 3*float32(f-1))
+			if f > 1 {
+				self.StateNo = 20 // walking
+			}
+			_, ok := d.input(w, &self, &cur)
+			if want := played && f <= 30; ok != want {
+				t.Fatalf("frame %d: the CBR layer gave the input %v, want %v", f, ok, want)
+			}
+		}
+		// The base AI's further decisions, each in a situation of its own.
+		for i := 0; i < extra; i++ {
+			w.Tick++
+			cur := at(140)
+			self.StateNo = int32(100 + i)
+			d.input(w, &self, &cur)
+		}
+		first, before := false, false // the walk's start and the decision before it are still in the lead-in
+		for _, cc := range ps.ct.leadIn {
+			first = first || cc.startTick == 2 && cc.probe != played
+			before = before || cc.startTick == 1
+		}
+		ch := &chain{}
+		for _, cc := range ps.ct.leadIn {
+			ch.add(cc)
+		}
+		ps.ct.leadIn = ps.ct.leadIn[:0]
+		was := st.playRecord(playKey(walk, x)).Sum
+		eng.finalizeChain(ps, &resolvedChain{ch: ch, comp: comp})
+		return first, before, st.playRecord(playKey(walk, x)).Sum - was
+	}
+	r := DefaultParams().reward(&comp)
+	credited := 0
+	for extra := 0; extra <= 5; extra++ {
+		cbr, cbrBefore, got := run(true, extra)
+		base, baseBefore, _ := run(false, extra)
+		t.Logf("%d decisions after the walk: the CBR layer's walk leads into the exchange %v (credited %.4f), the base AI's %v; the decision before it %v and %v",
+			extra, cbr, got, base, cbrBefore, baseBefore)
+		if cbr != base || cbrBefore != baseBefore {
+			t.Fatalf("%d decisions after the walk: the CBR layer's walk leads into the exchange %v, the base AI's identical walk %v; the decision before them %v and %v",
+				extra, cbr, base, cbrBefore, baseBefore)
+		}
+		if want := map[bool]float32{true: r, false: 0}[cbr]; !near(got, want) {
+			t.Fatalf("%d decisions after the walk: the walk is credited %v, want %v", extra, got, want)
+		}
+		if base {
+			credited++
+		}
+	}
+	if credited == 0 || credited == 6 {
+		t.Fatalf("setup: the walk should lead into the exchange with few decisions after it, and not with many (%d of 6)", credited)
+	}
+}
+
+// TestPlaysAreCreditedWhereTheyWereMade: through the engine, a play is
+// credited under the decision situation it was played in, whatever
+// situation its case was recorded in, and its move proves nothing anywhere
+// else. A step back recorded with the enemy 40-79 px away is played with
+// the enemy 150 px away; the drift back in the air, the same movement, is
+// never played.
+func TestPlaysAreCreditedWhereTheyWereMade(t *testing.T) {
+	p := DefaultParams()
+	p.TakeoverExplore, p.TakeoverExplorePromising, p.BaseExplore = 1, 1, 0
+	eng := New(p, t.TempDir(), 1)
+	st, _ := eng.Store("A")
+	ground := Feat{RoundState: 2, Self: CharFeat{Present: true, State: StStand, Ctrl: true}, Enemy: CharFeat{Present: true, RelX: 60, State: StStand, Ctrl: true}}
+	air := ground
+	air.Self.State, air.Self.RelY = StAir, -40
+	walkBack := &Case{ID: 1, Source: SrcHumanLocal, Kind: KindMovement, ExecFrame: -1, MoveRef: 21, Inputs: []InputBits{InB, InB, InB},
+		StartStateType: StStand, StartCtrl: true, StartMoveType: MtIdle, Start: ground, Outcome: Outcome{Trials: 1, ValueSum: 0.05}}
+	drift := &Case{ID: 2, Source: SrcHumanLocal, Kind: KindMovement, ExecFrame: -1, MoveRef: 50, Inputs: []InputBits{InB, InB, InB},
+		StartStateType: StAir, StartCtrl: true, StartMoveType: MtIdle, Start: air, Outcome: Outcome{Trials: 1, ValueSum: 0.05}}
+	st.Admit(p, []*Case{walkBack, drift})
+	eng.SetPlayer(0, "A", "B")
+	eng.Drive(0, Levels{Execution: 8, Knowledge: 8})
+	ps := eng.players[0]
+	ff := &frameFeeder{eng: eng}
+	standing := CharSnap{StateType: StStand, MoveType: MtIdle, Ctrl: true, AILevel: 8}
+	ff.frame(standing)
+	played := baselineKey(&ps.lastFeat, true, 8)
+	if _, ok := eng.Input(0, true); !ok || ps.drv.cur != walkBack {
+		t.Fatal("setup: the step back is tried")
+	}
+	for i := 0; i < 5; i++ {
+		f := standing
+		f.StateNo, f.CBRDriven = 21, true
+		ff.frame(f)
+		eng.Input(0, true)
+	}
+	ff.end()
+	recorded := baselineKey(&ground, true, 8)
+	if recorded == played {
+		t.Fatal("setup: the step back is played in another situation than it was recorded in")
+	}
+	if rec := st.playRecord(playKey(walkBack, played)); rec.Trials != 1 || len(st.Played) != 1 {
+		t.Fatalf("the play is credited where it was made (%s): %+v, %d records", SituationString(played), rec, len(st.Played))
+	}
+	if rec := st.playRecord(playKey(walkBack, recorded)); rec.Trials != 0 {
+		t.Fatalf("nothing is credited where the case was recorded: %+v", rec)
+	}
+	// Five plays of the step back on the ground, each the last decision of
+	// its exchange, all credited through the engine: on the ground they
+	// prove it, in the air they prove nothing about the drift.
+	c := Completion{Result: CompKnockdown, Quality: p.quality(CompKnockdown), DamageDealt: 0.2}
+	for i := 0; i < 5; i++ {
+		eng.finalizeChain(ps, &resolvedChain{ch: &chain{cases: []chainCase{{caseID: 1, key: played}}}, comp: c})
+	}
+	ak := baselineKey(&air, true, 8)
+	for i := 0; i < 50; i++ {
+		probeAt(p, st, ak, 0, 1, drift)
+	}
+	setBase(st, played, 50, 0)
+	d := newDriver(p, 0, Levels{Execution: 8, Knowledge: 8}, 1, st, newChainTracker(p, 0, new(uint64)))
+	there := ground
+	there.Enemy.RelX = 150
+	if got, _ := d.chooseWhy(&there, &standing, 1, nil, &gate{key: played}); got != walkBack {
+		t.Fatal("where its plays were made, the step back proved better")
+	}
+	inAir := &CharSnap{StateType: StAir, MoveType: MtIdle, Ctrl: true, AILevel: 8, StateNo: 50}
+	if got, _ := d.chooseWhy(&air, inAir, 1, nil, nil); got != drift {
+		t.Fatal("setup: the drift matches in the air")
+	}
+	if got, _ := d.chooseWhy(&air, inAir, 1, nil, &gate{key: ak}); got != nil {
+		t.Fatalf("the drift, never played, must not take over in the air on the step back's ground plays (%+v)", st.playRecord(playKey(drift, ak)))
+	}
+}
+
+// TestPlaysProveNothingElsewhere: a move's plays prove it only in the
+// situation they were made in. Holding still, recorded and played ten times
+// with the enemy 40-79 px away, takes over there once the base AI does
+// worse there, but not in the other distance bands where it also matches,
+// however badly the base AI does in them, since it was never played there.
+func TestPlaysProveNothingElsewhere(t *testing.T) {
+	p := DefaultParams()
+	rec := Feat{RoundState: 2, Self: CharFeat{Present: true, State: StStand}, Enemy: CharFeat{Present: true, RelX: 60, State: StStand}}
+	still := &Case{ID: 1, Source: SrcHumanLocal, Kind: KindMovement, ExecFrame: -1, MoveRef: 0,
+		Inputs: []InputBits{0, 0, 0}, StartStateType: StStand, StartCtrl: true, StartMoveType: MtIdle, Start: rec}
+	still.Outcome = Outcome{Trials: 1, ValueSum: 0.06}
+	st := NewStore("x")
+	st.Admit(p, []*Case{still})
+	d := newDriver(p, 0, Levels{Execution: 8, Knowledge: 8}, 1, st, newChainTracker(p, 0, new(uint64)))
+	self := &CharSnap{StateType: StStand, MoveType: MtIdle, Ctrl: true, AILevel: 8}
+	// Ten plays at 0.06, as well as the base AI does where they were made.
+	setPlayed(p, st, still, 10, 0.06)
+	recKey := baselineKey(&rec, true, 8)
+	setBase(st, recKey, 100, 0.06)
+	if got, _ := d.chooseWhy(&rec, self, 1, nil, &gate{key: recKey}); got != nil {
+		t.Fatal("setup: where it was recorded and played, the move is no better")
+	}
+	others := 0
+	for _, x := range []float32{90, 100, 140, 200, 300} {
+		cur := rec
+		cur.Enemy.RelX = x
+		if got, _ := d.chooseWhy(&cur, self, 1, nil, nil); got != still {
+			t.Logf("RelX %v: the case does not match without the gate", x)
+			continue
+		}
+		others++
+		key := baselineKey(&cur, true, 8)
+		// The base AI's record in the band is 0, with the move on offer in all
+		// of its results.
+		setBase(st, key, 100, 0)
+		got, _ := d.chooseWhy(&cur, self, 1, nil, &gate{key: key})
+		if got != nil {
+			t.Errorf("RelX %v: the move took over on plays made in another distance band, never played here (%s)", x, SituationString(key))
+		}
+	}
+	if others < 3 {
+		t.Fatalf("setup: the case should match in other bands (%d)", others)
+	}
+	// Where its plays were made, once the base AI does worse there, it takes
+	// over.
+	setBase(st, recKey, 100, 0)
+	if got, _ := d.chooseWhy(&rec, self, 1, nil, &gate{key: recKey}); got != still {
+		t.Fatal("where its plays were made and beat the base AI, the move takes over")
+	}
+}
+
+// TestFailedPlaysAreNotTheMovesPlays: through the engine, a play whose
+// command did not come out (the character did something else) is not one of
+// the move's plays: its record against the base AI does not count it, while
+// the case notes the failure. A play whose command came out counts.
+func TestFailedPlaysAreNotTheMovesPlays(t *testing.T) {
+	p := DefaultParams()
+	p.TakeoverExplore, p.TakeoverExplorePromising, p.BaseExplore = 1, 1, 0
+	start := Feat{RoundState: 2, Enemy: CharFeat{Present: true, RelX: 150, State: StStand, Ctrl: true, Move: MtIdle, LifeFrac: 1}, TimeFrac: -1}
+	play := func(came bool) (*Store, *Case, uint64) {
+		eng := New(p, t.TempDir(), 1)
+		st, _ := eng.Store("A")
+		c := &Case{ID: 1, Source: SrcHumanLocal, Kind: KindCommand, ExecFrame: 0, MoveRef: 200, ExecAttack: true, ExecClass: StStand,
+			Inputs: []InputBits{InA, 0, 0}, StartStateType: StStand, StartCtrl: true, StartMoveType: MtIdle, Start: start,
+			Outcome: Outcome{Trials: 1, ValueSum: 0.2}}
+		st.Admit(p, []*Case{c})
+		eng.SetPlayer(0, "A", "B")
+		eng.Drive(0, Levels{Execution: 8, Knowledge: 8})
+		ps := eng.players[0]
+		ff := &frameFeeder{eng: eng}
+		standing := CharSnap{StateType: StStand, MoveType: MtIdle, Ctrl: true, AILevel: 8}
+		ff.frame(standing)
+		sit := baselineKey(&ps.lastFeat, true, 8)
+		if _, ok := eng.Input(0, true); !ok || ps.drv.cur != c {
+			t.Fatal("setup: the jab is tried")
+		}
+		for i := 0; i < 12; i++ {
+			f := standing
+			if came {
+				f = CharSnap{StateNo: 200, StateTime: int32(i + 1), StateType: StStand, MoveType: MtAttack, AILevel: 8}
+			}
+			f.CBRDriven = ps.drv.cur != nil
+			ff.frame(f)
+			eng.Input(0, true)
+		}
+		ff.end()
+		return st, c, playKey(c, sit)
+	}
+	st, c, k := play(false)
+	if c.Outcome.ExecFails != 1 || c.Outcome.Plays != 1 {
+		t.Fatalf("setup: the jab's command did not come out: %+v", c.Outcome)
+	}
+	if rec := st.playRecord(k); rec.Trials != 0 {
+		t.Fatalf("a play whose command did not come out is not one of the move's plays: %+v", rec)
+	}
+	st, c, k = play(true)
+	if c.Outcome.ExecFails != 0 {
+		t.Fatalf("setup: the jab's command came out: %+v", c.Outcome)
+	}
+	if rec := st.playRecord(k); rec.Trials != 1 {
+		t.Fatalf("a play whose command came out is one of the move's plays: %+v", rec)
+	}
+}
+
+// TestComparedWhereTheMoveWasOnOffer: a move is compared with the base AI's
+// results where it was on offer, as well as with the situation's. In a
+// follow-up, the base AI's record of the situation holds mostly hits where
+// no cancel starts (worth 0), because where the cancel was on offer and the
+// CBR layer played it, the base AI's result is missing; where the cancel was
+// on offer and left to the base AI, the base AI cancels too (worth 0.1). The
+// cancel's plays, worth 0.1, are no better than that, and do not take over.
+// Until the record where it was on offer holds BaselineMinTrials results,
+// the situation's record is used alone at twice the margin. The other way
+// round, a move on offer only at moments where the base AI does badly, but
+// played wherever it matches, must still beat the base AI's record of the
+// situation as a whole.
+func TestComparedWhereTheMoveWasOnOffer(t *testing.T) {
+	p := DefaultParams()
+	d, c, cur, self, key := gateFixture(p)
+	k := playKey(c, key)
+	setPlayed(p, d.st, c, 10, 0.1)
+	for i := 0; i < 100; i++ {
+		probeAt(p, d.st, key, 0, 1) // hits where no cancel starts
+	}
+	// With the record where it was on offer still thin, the situation's
+	// record decides, at twice the margin: 0.074 beats 0.06.
+	for i := 0; i < 4; i++ {
+		probeAt(p, d.st, key, 0.1, 1, c)
+	}
+	sb, smargin, _, _ := d.st.bar(p, key, d.margin)
+	if cmp := d.st.against(p, k, d.margin); cmp.n != 1 || cmp.bases[0].b != sb || !near(cmp.bases[0].margin, 2*smargin) {
+		t.Fatalf("a thin record where the move was on offer: the situation's alone (%.4f, margin %.4f), got %+v", sb, smargin, cmp)
+	}
+	if got, _ := d.chooseWhy(cur, self, 1, nil, &gate{key: key}); got != c {
+		t.Fatal("setup: against the situation's record the cancel takes over")
+	}
+	// Once it holds enough results, the base AI's results where the cancel
+	// was on offer count too, shrunk toward the situation's mean, at the
+	// setting's margin.
+	probeAt(p, d.st, key, 0.1, 1, c)
+	o := d.st.Offered[k]
+	sb, smargin, _, _ = d.st.bar(p, key, d.margin)
+	cmp := d.st.against(p, k, d.margin)
+	want := (p.BaselineShrink*sb + o.ValueSum) / (p.BaselineShrink + o.Trials)
+	if x := cmp.bases[1]; cmp.n != 2 || cmp.bases[0].b != sb || cmp.bases[0].margin != smargin || !near(x.b, want) || !near(x.margin, d.margin*x.share) || !cmp.known {
+		t.Fatalf("the records compared with: %+v; want the situation's (%.4f, margin %.4f) and where the move was on offer %.4f", cmp, sb, smargin, want)
+	}
+	for i := 0; i < 20; i++ {
+		probeAt(p, d.st, key, 0.1, 1, c)
+	}
+	if got, _ := d.chooseWhy(cur, self, 1, nil, &gate{key: key}); got != nil {
+		t.Fatalf("the cancel is no better than the base AI where it was on offer (%+v), yet it took over", d.st.against(p, k, d.margin))
+	}
+	// Where the base AI does worse while the cancel is on offer, it does.
+	for i := 0; i < 200; i++ {
+		probeAt(p, d.st, key, 0, 1, c)
+	}
+	if got, _ := d.chooseWhy(cur, self, 1, nil, &gate{key: key}); got != c {
+		t.Fatal("the cancel beats the base AI where it was on offer and takes over")
+	}
+
+	// The base AI does well in the situation (0.2), but the move was on
+	// offer only at its bad moments (0): beating those is not enough.
+	d, c, cur, self, key = gateFixture(p)
+	k = playKey(c, key)
+	setPlayed(p, d.st, c, 10, 0.1)
+	for i := 0; i < 100; i++ {
+		probeAt(p, d.st, key, 0.2, 1)
+	}
+	for i := 0; i < 20; i++ {
+		probeAt(p, d.st, key, 0, 1, c)
+	}
+	cmp = d.st.against(p, k, d.margin)
+	if x := cmp.bases[1]; cmp.n != 2 || p.advantage(d.st.playRecord(k), x.b, x.share) <= x.margin {
+		t.Fatalf("setup: the move beats the base AI where it was on offer: %+v", cmp)
+	}
+	if got, _ := d.chooseWhy(cur, self, 1, nil, &gate{key: key}); got != nil {
+		t.Fatalf("the move must also beat the base AI's record of the situation (%+v)", cmp)
+	}
+}
+
+// TestOffersAreTheClosestMoves: the moves on offer at a decision are the
+// closest that match within the similarity band, one entry for each move,
+// closest first, at most offerMax of them. When the base AI keeps control,
+// its decision's probe carries them, so that its result counts for them
+// (see Store.Offered); and only they may take over, so that a move is
+// played at the same kind of moments as those its record of the base AI
+// comes from.
+func TestOffersAreTheClosestMoves(t *testing.T) {
+	p := DefaultParams()
+	p.TakeoverExplore, p.BaseExplore = 0, 0
+	d, c, cur, self, key := gateFixture(p)
+	at := func(id uint64, move int32, x float32) *Case {
+		k := *c
+		k.ID, k.MoveRef = id, move
+		k.Start.Enemy.RelX = x
+		return &k
+	}
+	// The fixture's jab matches exactly; a second jab, then offerMax other
+	// moves, match less and less closely. They are stored farthest first, so
+	// that the order on offer is the matches' and not the store's.
+	jab2 := at(2, 200, 61)
+	more := []*Case{jab2}
+	for i := 0; i < offerMax; i++ {
+		more = append(more, at(uint64(3+i), int32(1000+i), 62+float32(i)))
+	}
+	var stored []*Case
+	for i := len(more) - 1; i >= 0; i-- {
+		stored = append(stored, more[i])
+	}
+	d.st.Admit(p, stored)
+	if d.decide(cur, self, 1) != nil || len(d.ct.leadIn) != 1 {
+		t.Fatal("setup: nothing has proved better, so the base AI keeps control with a probe")
+	}
+	want := [offerMax]uint64{playKey(c, key)}
+	for i := 1; i < offerMax; i++ {
+		want[i] = playKey(more[i], key)
+	}
+	if got := d.ct.leadIn[0].offers; got != want {
+		t.Fatalf("the probe's moves on offer: %x, want the jab and the next %d moves, closest first: %x", got, offerMax-1, want)
+	}
+	if playKey(jab2, key) != want[0] {
+		t.Fatal("setup: the two jabs are one move")
+	}
+	// The farthest move, not on offer, does not take over, however well it
+	// did; once closer moves are gone, it is on offer and does.
+	far := more[offerMax]
+	setBase(d.st, key, 10, 0)
+	setPlayed(p, d.st, far, 10, 0.5)
+	why := map[string]int{}
+	if got, _ := d.chooseWhy(cur, self, 1, why, &gate{key: key}); got != nil || why[RejNotOnOffer] != 1 {
+		t.Fatalf("a move that is not on offer must not take over: %v, %v", got, why)
+	}
+	more[1].Removed = true
+	d.st.compact()
+	if got, _ := d.chooseWhy(cur, self, 1, nil, &gate{key: key}); got != far {
+		t.Fatal("on offer, the move that proved better takes over")
+	}
+}
+
 // TestHitAndGuardAreApart: being hit and guarding are different situations
 // for the base AI's record, and a move recorded while guarding is compared
 // with what the base AI does while guarding. Doing nothing in blockstun is
@@ -1480,7 +2126,7 @@ func TestHitAndGuardAreApart(t *testing.T) {
 		st.addBaseline(p, hk, -0.079, 1)
 	}
 	for i := 0; i < 12; i++ {
-		st.addBaseline(p, gk, -0.007, 1)
+		probeAt(p, st, gk, -0.007, 1, still)
 	}
 	d := newDriver(p, 0, Levels{Execution: 8, Knowledge: 8}, 1, st, newChainTracker(p, 0, new(uint64)))
 	guarding := &CharSnap{StateNo: 150, StateTime: 3, StateType: StStand, MoveType: MtHit, BlockStun: 10, AILevel: 8}
@@ -1498,10 +2144,10 @@ func TestHitAndGuardAreApart(t *testing.T) {
 	mixed.Admit(p, []*Case{still})
 	setPlayed(p, mixed, still, 16, 0)
 	for i := 0; i < 32; i++ {
-		mixed.addBaseline(p, gk, -0.079, 1)
+		probeAt(p, mixed, gk, -0.079, 1, still)
 	}
 	for i := 0; i < 12; i++ {
-		mixed.addBaseline(p, gk, -0.007, 1)
+		probeAt(p, mixed, gk, -0.007, 1, still)
 	}
 	dm := newDriver(p, 0, Levels{Execution: 8, Knowledge: 8}, 1, mixed, newChainTracker(p, 0, new(uint64)))
 	if got, _ := dm.chooseWhy(&guard, guarding, 1, nil, &gate{key: gk}); got != still {
@@ -1509,9 +2155,9 @@ func TestHitAndGuardAreApart(t *testing.T) {
 	}
 
 	// A move recorded while guarding is not considered while being hit, and
-	// the other way round: its plays are kept by the stance it was recorded
-	// in.
-	if playKey(still) == playKey(&Case{Kind: KindMovement, Inputs: still.Inputs, StartStateType: StStand, Start: hit}) {
+	// the other way round; its plays are kept by the situation they were
+	// made in, which says which of the two it was.
+	if playKey(still, gk) == playKey(still, hk) {
 		t.Fatal("plays while guarding and while being hit must be kept apart")
 	}
 	why := map[string]int{}
@@ -1521,9 +2167,10 @@ func TestHitAndGuardAreApart(t *testing.T) {
 }
 
 // TestMovesAreKeptByStance: the CBR layer's plays of a move are kept by the
-// stance it is played from. A step back on the ground and a drift back in
-// the air are the same movement, but the drift has never been played: the
-// walk's plays prove nothing about it.
+// situation they were made in, which holds the stance they were played from.
+// A step back on the ground and a drift back in the air are the same
+// movement, but the drift has never been played: the walk's plays prove
+// nothing about it.
 func TestMovesAreKeptByStance(t *testing.T) {
 	p := DefaultParams()
 	ground := Feat{RoundState: 2, Self: CharFeat{Present: true, State: StStand}, Enemy: CharFeat{Present: true, RelX: 60, State: StStand}}
@@ -1537,22 +2184,21 @@ func TestMovesAreKeptByStance(t *testing.T) {
 	drift.Outcome = Outcome{Trials: 1, ValueSum: 0.05}
 	st := NewStore("x")
 	st.Admit(p, []*Case{walkBack, drift})
-	if actionKey(walkBack) != actionKey(drift) || playKey(walkBack) == playKey(drift) {
-		t.Fatal("setup: the same action, kept apart by stance")
-	}
-	if !strings.HasSuffix(PlayString(playKey(drift)), "self airborne") || !strings.HasPrefix(PlayString(playKey(drift)), "movement back,") {
-		t.Fatalf("PlayString: %q", PlayString(playKey(drift)))
-	}
-	// Five plays of the walk averaging 0.06; on the ground the base AI does
-	// as well, in the air its record is 0.
-	st.addPlay(p, walkBack, 0.06)
-	for i := 1; i < 5; i++ {
-		st.addPlay(p, walkBack, 0.06)
-	}
 	gk, ak := baselineKey(&ground, true, 8), baselineKey(&air, true, 8)
+	if actionKey(walkBack) != actionKey(drift) || moveKey(walkBack) != moveKey(drift) || playKey(walkBack, gk) == playKey(drift, ak) {
+		t.Fatal("setup: the same action and move, kept apart by the situation")
+	}
+	if ps := PlayString(playKey(drift, ak)); !strings.HasPrefix(ps, "movement back: self airborne, standing enemy 40-79 px ahead,") {
+		t.Fatalf("PlayString: %q", ps)
+	}
+	// Five plays of the walk on the ground averaging 0.06; on the ground the
+	// base AI does as well, in the air its record is 0.
+	for i := 0; i < 5; i++ {
+		st.addPlay(p, walkBack, gk, 0.06, 1)
+	}
 	setBase(st, gk, 100, 0.06)
 	for i := 0; i < 50; i++ {
-		st.addBaseline(p, ak, 0, 1)
+		probeAt(p, st, ak, 0, 1, drift)
 	}
 	d := newDriver(p, 0, Levels{Execution: 8, Knowledge: 8}, 1, st, newChainTracker(p, 0, new(uint64)))
 	inAir := &CharSnap{StateType: StAir, MoveType: MtIdle, Ctrl: true, AILevel: 8, StateNo: 50}
@@ -1563,7 +2209,7 @@ func TestMovesAreKeptByStance(t *testing.T) {
 	if got, _ := d.chooseWhy(&ground, onGround, 1, nil, &gate{key: gk}); got != nil {
 		t.Fatal("on the ground the walk is no better than the base AI")
 	}
-	if rec := st.playRecord(drift); rec.Trials != 0 {
+	if rec := st.playRecord(playKey(drift, ak)); rec.Trials != 0 {
 		t.Fatalf("the drift has not been played: %+v", rec)
 	}
 	if got, _ := d.chooseWhy(&air, inAir, 1, nil, &gate{key: ak}); got != nil {
@@ -1592,34 +2238,71 @@ func TestMovesAreKeptByStance(t *testing.T) {
 // TestOneExchangeProvesNothingInNeutral: where the base AI's decisions
 // seldom lead into an exchange (here 2% of an exchange's reward on
 // average), the evidence is counted in exchanges: ten plays, one of which
-// led into an exchange worth 0.05, are a fifth of an exchange's worth, and
-// do not prove a move at Medium or High.
+// led into an exchange worth 0.05, are one exchange's worth, under the
+// TakeoverMinPlays exchanges a move needs to prove itself, and prove nothing
+// at any setting.
 func TestOneExchangeProvesNothingInNeutral(t *testing.T) {
 	p := DefaultParams()
 	d, c, cur, self, key := gateFixture(p)
-	for _, k := range []uint64{key, coarseKey(key), baseAll} {
-		d.st.Baseline[k] = &BaselineStat{Trials: 200, ValueSum: 0, Shares: 4}
-	}
+	setBaseShares(d.st, key, 200, 0, 4)
 	for i := 0; i < 10; i++ {
-		r := float32(0)
+		r, share := float32(0), float32(0)
 		if i == 4 {
-			r = 0.05
+			r, share = 0.05, 1
 		}
-		d.st.addPlay(p, c, r)
+		d.st.addPlay(p, c, key, r, share)
 	}
 	share := d.st.baselineShare(p, key)
 	if share < 0.019 || share > 0.021 {
 		t.Fatalf("setup: share %v, want about 0.02", share)
 	}
-	rec := d.st.playRecord(c)
+	rec := d.st.playRecord(playKey(c, key))
 	for lvl := 1; lvl <= 3; lvl++ {
 		d.margin = p.takeoverMargin(lvl)
 		got, _ := d.chooseWhy(cur, self, 1, nil, &gate{key: key})
-		_, margin, _, _ := d.st.bar(p, key, d.margin)
-		t.Logf("setting %d: margin %.3f per exchange, %.5f per decision; advantage %.5f (plays shrunk as plays, as before: %.5f); takes over: %v",
-			lvl, d.margin, margin, p.advantage(rec, 0, share), rec.Sum/(p.TakeoverShrink+rec.Trials), got == c)
-		if lvl >= 2 && got != nil {
+		margin := d.st.against(p, playKey(c, key), d.margin).bases[0].margin
+		t.Logf("setting %d: margin %.3f per exchange, %.5f per decision; %.2f exchanges' worth of plays; advantage %.5f (plays shrunk as plays: %.5f); takes over: %v",
+			lvl, d.margin, margin, rec.Shares, p.advantage(rec, 0, share), rec.Sum/(p.TakeoverShrink+rec.Trials), got == c)
+		if got != nil {
 			t.Fatalf("setting %d: one exchange among ten plays in neutral must not prove a move", lvl)
+		}
+	}
+}
+
+// TestOneBigExchangeProvesNothing: one exchange the size of a knockdown
+// among a few plays in neutral does not prove a move at any setting, however
+// far it beats the base AI's results there (which are 0, at 2% of an
+// exchange each): the plays have been credited with one exchange's worth.
+// Three such exchanges among ten plays are a real edge, and prove it. (The
+// shares decay with recency like the plays, so here the three are the
+// latest plays.)
+func TestOneBigExchangeProvesNothing(t *testing.T) {
+	p := DefaultParams()
+	comp := Completion{Result: CompKnockdown, Quality: p.quality(CompKnockdown), DamageDealt: 0.2}
+	big := p.reward(&comp)
+	for _, tc := range []struct {
+		plays, exchanges int
+		proves           bool
+	}{{3, 1, false}, {10, 1, false}, {10, 3, true}} {
+		d, c, cur, self, key := gateFixture(p)
+		setBaseShares(d.st, key, 200, 0, 4)
+		for i := 0; i < tc.plays; i++ {
+			r, share := float32(0), float32(0)
+			if i >= tc.plays-tc.exchanges {
+				r, share = big, 1
+			}
+			d.st.addPlay(p, c, key, r, share)
+		}
+		rec := d.st.playRecord(playKey(c, key))
+		for lvl := 1; lvl <= 3; lvl++ {
+			d.margin = p.takeoverMargin(lvl)
+			got, _ := d.chooseWhy(cur, self, 1, nil, &gate{key: key})
+			x := d.st.against(p, playKey(c, key), d.margin).bases[0]
+			t.Logf("%d plays, %d exchanges worth %.3f each (knockdown, 0.2 damage); setting %d: advantage %.5f, margin %.5f; takes over: %v",
+				tc.plays, tc.exchanges, big, lvl, p.advantage(rec, x.b, x.share), x.margin, got == c)
+			if (got == c) != tc.proves {
+				t.Fatalf("%d plays with %d exchanges worth %.3f, setting %d: took over %v, want %v", tc.plays, tc.exchanges, big, lvl, got == c, tc.proves)
+			}
 		}
 	}
 }
@@ -1635,7 +2318,7 @@ func TestContestedMovesAreNotTriedAgain(t *testing.T) {
 	d, c, cur, self, key := gateFixture(p)
 	setBase(d.st, key, 10, 0)
 	contest := func() {
-		d.cur = c
+		d.cur, d.curKey = c, key
 		d.contest()
 		d.waitCtrl = false
 	}
@@ -1645,7 +2328,7 @@ func TestContestedMovesAreNotTriedAgain(t *testing.T) {
 		}
 		contest()
 	}
-	if rec := d.st.playRecord(c); rec.Trials != 0 || rec.Contests < p.TakeoverContestMax-0.1 {
+	if rec := d.st.playRecord(playKey(c, key)); rec.Trials != 0 || rec.Contests < p.TakeoverContestMax-0.1 {
 		t.Fatalf("contested plays are noted and count for nothing: %+v", rec)
 	}
 	if got, _ := d.chooseWhy(cur, self, 1, nil, &gate{key: key, explore: true, promising: true}); got != nil {
@@ -1663,8 +2346,8 @@ func TestContestedMovesAreNotTriedAgain(t *testing.T) {
 	}
 	// With the base AI off nothing is noted.
 	q := withoutBaseAI()
-	d, c, _, _, _ = gateFixture(q)
-	d.cur = c
+	d, c, _, _, key = gateFixture(q)
+	d.cur, d.curKey = c, key
 	d.contest()
 	if len(d.st.Played) != 0 {
 		t.Fatal("with the base AI off, contests are not noted")

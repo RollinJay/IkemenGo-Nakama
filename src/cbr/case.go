@@ -14,6 +14,13 @@ const (
 	SrcAuthoredAI
 	SrcEngineAI
 	SrcSynthesized
+	// SrcCharacterAI is a decision of a character's own AI that changed the
+	// state directly (a ChangeState gated on the AI level, say), where the
+	// engine found that a person's command would have made the same change
+	// at that moment (EntryReachable). The case holds that command's
+	// canonical inputs and the result the AI got with the move. It is
+	// tested before it may take over (see Verdict in command.go).
+	SrcCharacterAI
 )
 
 // IsHuman reports whether the source is a person's play.
@@ -23,6 +30,14 @@ func (s Source) IsHuman() bool {
 		return true
 	}
 	return false
+}
+
+// mustVerify reports whether a case's command must be seen to work in a
+// spot before the case may take over there (see Verdict): nobody was seen
+// to input it, as for a decision of the character's AI that changed the
+// state directly (SrcCharacterAI) and a hypothesis (SrcSynthesized).
+func (c *Case) mustVerify() bool {
+	return c.Source == SrcCharacterAI || c.Source == SrcSynthesized
 }
 
 // assisted reports whether the source can activate commands without the

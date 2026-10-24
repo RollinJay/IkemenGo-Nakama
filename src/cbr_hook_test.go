@@ -10,7 +10,7 @@ import (
 
 // cbrTestRuntime gives the CBR layer an engine and an offline match in
 // which it may drive, and restores everything when the test ends.
-func cbrTestRuntime(t *testing.T) *cbr.Engine {
+func cbrTestRuntime(t testing.TB) *cbr.Engine {
 	t.Helper()
 	saved := sysCBR
 	rb, net, rf, armed := sys.rollback.session, sys.netConnection, sys.replayFile, localReplay.armed
@@ -492,5 +492,113 @@ func TestCBRBuiltInMovesKeepTheAIsFlags(t *testing.T) {
 			t.Fatalf("flag %#x: the built-in moves saw flags %#x", f, flags)
 		}
 		end(false, 0)
+	}
+}
+
+// TestCBRBackWalkAfterDrivenFrames: on the second frame the character's own
+// AI plays after the CBR layer's, a back walk the AI gets without the CBR
+// layer (standing guard switched off by the AI, an attack near, the engine
+// AI's jam holding back) still comes out. The engine's walk reads
+// NoStandGuard a frame late (Char.prevNoStandGuard), so the guard flags are
+// given back with the move flags on the first base frame.
+func TestCBRBackWalkAfterDrivenFrames(t *testing.T) {
+	cbrTestRuntime(t)
+	savedChars, savedAI, savedLevel, savedIntro := sys.chars, sys.aiInput, sys.aiLevel, sys.intro
+	savedCgi, savedIgnore, savedRound := sys.cgi[0], sys.ignoreMostErrors, sys.fightScreen.round
+	t.Cleanup(func() {
+		sys.chars, sys.aiInput, sys.aiLevel, sys.intro = savedChars, savedAI, savedLevel, savedIntro
+		sys.cgi[0], sys.ignoreMostErrors, sys.fightScreen.round = savedCgi, savedIgnore, savedRound
+	})
+	sys.fightScreen.round = &FightScreenRound{}
+	root := &Char{controller: -1, minus: 3, localcoord: 320, localscl: 1, life: 1000}
+	root.cmd = []CommandList{*NewCommandList(NewInputBuffer())}
+	root.keyctrl[0] = true
+	sys.chars = [len(sys.chars)][]*Char{{root}}
+	sys.cgi[0].mugenver, sys.cgi[0].ikemenver = [2]uint16{1, 1}, [3]uint16{0, 1}
+	sys.intro = 0
+	sys.aiLevel[0] = 8
+	sys.ignoreMostErrors = true
+	s := &sysCBR.slots[0]
+	s.active = true // the engine has no player 0, so it declines every frame
+	root.inguarddist = true
+	// frame runs a frame's start with the jam holding back, standing with
+	// control, and its end: the AI asserts NoStandGuard on its own frames,
+	// and the engine works out guarding from the flags.
+	frame := func(driven bool) int32 {
+		root.ss.no, root.ss.prevno, root.ss.time, root.ss.stateType = 0, 0, 10, ST_S
+		root.setSCF(SCF_ctrl)
+		sys.aiInput[0] = AiInput{dir: 6, dirt: 30}
+		root.cmd[0].Buffer.Reset()
+		root.cmd[0].InputUpdate(root, -1)
+		root.actionPrepare()
+		got := root.ss.no
+		if !driven {
+			root.assertFlag |= ASF_nostandguard
+		}
+		if root.asf(ASF_nostandguard) {
+			root.unsetSCF(SCF_guard)
+		} else {
+			root.setSCF(SCF_guard)
+		}
+		s.driven = driven
+		cbrEndFrame()
+		return got
+	}
+	var alone []int32
+	for i := 0; i < 6; i++ {
+		alone = append(alone, frame(false))
+	}
+	if alone[5] != 20 {
+		t.Fatalf("setup: the AI alone walks back, got %v", alone)
+	}
+	var with []int32
+	for _, d := range []bool{false, false, false, true, false, false, false} {
+		with = append(with, frame(d))
+	}
+	for i := 4; i < len(with); i++ {
+		if with[i] != 20 {
+			t.Fatalf("base frame %d after the CBR layer's: state %d, the AI alone walks back (states %v)", i-3, with[i], with)
+		}
+	}
+}
+
+// TestCBRSnapshotEntry: the label of a watched root's state change is in
+// the snapshot of the frame it was made on, and only that frame; the route
+// table pointer is on every frame, for the root and its helpers alike.
+func TestCBRSnapshotEntry(t *testing.T) {
+	w := cbrCompileWorld(t, cbrTestNegOne, cbrTestStates, false)
+	c := w.root
+	c.teamside = 0
+	h := &Char{id: 57, playerNo: 0, helperIndex: 1, teamside: 0}
+	sys.chars[0] = append(sys.chars[0], h)
+	snap := func() *cbr.PlayerSnap {
+		cbrBuildSnapshot(&sysCBR.snap)
+		return &sysCBR.snap.Players[0]
+	}
+	w.enter(0)
+	c.cnsvar[1] = 1
+	w.frame()
+	w.run(-1)
+	p := snap()
+	if p.Root.Entry != cbr.EntryReachable || p.Root.EntryCommand != "x" || p.Root.EntryHelper || p.Root.StateNo != 200 {
+		t.Fatalf("frame of the change: %v %q helper %v state %d", p.Root.Entry, p.Root.EntryCommand, p.Root.EntryHelper, p.Root.StateNo)
+	}
+	routes := p.Root.Routes
+	if routes == nil || len(p.Helpers) != 1 || p.Helpers[0].Routes != routes || p.Helpers[0].Entry != cbr.EntryNone {
+		t.Fatalf("route table: root %p helpers %+v", routes, p.Helpers)
+	}
+	cbrEndFrame()
+	p = snap()
+	if p.Root.Entry != cbr.EntryNone || p.Root.EntryCommand != "" || p.Root.Routes != routes {
+		t.Fatalf("next frame: %v %q, routes %p (was %p)", p.Root.Entry, p.Root.EntryCommand, p.Root.Routes, routes)
+	}
+	// Another root in the slot (a Turns member) does not get the label.
+	w.enter(0)
+	c.cnsvar[1] = 1
+	w.frame()
+	w.run(-1)
+	w.slot.entryID = 99
+	if p = snap(); p.Root.Entry != cbr.EntryNone {
+		t.Fatalf("label for another character: %v", p.Root.Entry)
 	}
 }

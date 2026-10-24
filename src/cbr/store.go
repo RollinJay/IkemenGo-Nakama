@@ -1,6 +1,9 @@
 package cbr
 
-import "sort"
+import (
+	"fmt"
+	"sort"
+)
 
 // Store is one character's learned data: cases plus the models built from
 // them. One store serves every difficulty setting; gating happens at
@@ -22,25 +25,38 @@ type Store struct {
 	CmdStates map[int32]map[string]float32
 	// ChangeStateAI is set once this character's own AI has been seen
 	// entering attack states with no command active, in recorded play or
-	// during a move the CBR layer played. It is a record for inspection: the
-	// AI's recorded cases are discarded for the match it was seen in (the
-	// states it entered are kept as hypotheses), and how the character is
-	// driven does not change.
+	// during a move the CBR layer played. It is a record for inspection: how
+	// the character is driven does not change. Without the engine's labels
+	// (CharSnap.Entry), the AI's recorded cases are discarded for the match
+	// it was seen in (the states it entered are kept as hypotheses); with
+	// them, its decisions are recorded as cases of the character's AI, or
+	// not at all where no person's command could have made them (see
+	// command.go).
 	ChangeStateAI bool
 	Hypotheses    map[int32]*Hypothesis
+	// Verdicts is what is known, spot by spot, of whether a person's command
+	// brings a state about (see Verdict): from the engine's checks of the
+	// character's AI's own decisions and from the CBR layer's plays.
+	Verdicts map[VerdictKey]*Verdict
 	// Baseline is the base AI's record by situation (see baseline.go): what
 	// the character's own AI achieves where the CBR layer leaves it in
 	// control, for comparison with the CBR layer's own plays.
 	Baseline map[uint64]*BaselineStat
+	// Offered is the part of the base AI's record where a move was on offer:
+	// by situation and move (see playKey), the base AI's results at the
+	// decisions where the CBR layer could have played the move and left the
+	// base AI in control instead (see Store.against).
+	Offered map[uint64]*BaselineStat
 	// Played is the other side of that comparison: what the CBR layer's own
-	// plays of each move achieved, by the move and the stance it is played
-	// from (see playKey).
+	// plays of each move achieved, by the move and the situation each play
+	// was made in (see playKey).
 	Played map[uint64]*PlayStat
-	// BaseFormat is the layout Baseline and Played are kept in (see
+	// BaseFormat is the layout Baseline, Offered and Played are kept in (see
 	// baseFormat). Records kept in an older layout are dropped on load.
 	BaseFormat int
 
 	global       *globalModels
+	need         map[needKey]int32 // see powerNeed; built from Verdicts
 	dirtyRemoved bool
 	touched      bool // used since the last save
 	byID         map[uint64]*Case
@@ -69,7 +85,9 @@ func NewStore(char string) *Store {
 		Actions:     map[uint64]*ActionStat{},
 		CmdStates:   map[int32]map[string]float32{},
 		Hypotheses:  map[int32]*Hypothesis{},
+		Verdicts:    map[VerdictKey]*Verdict{},
 		Baseline:    map[uint64]*BaselineStat{},
+		Offered:     map[uint64]*BaselineStat{},
 		Played:      map[uint64]*PlayStat{},
 		BaseFormat:  baseFormat,
 	}
@@ -94,45 +112,59 @@ func (s *Store) compact() {
 }
 
 // ActionStat is the pooled outcome record of one action in one situation.
-// PTrials and PSum are the results of the CBR layer's own plays of the
-// action from any stance, credited by Params.applyPlayed. The comparison
-// with the base AI reads the plays kept by stance instead (see PlayStat), and
-// falls back to these only for a move with none of those.
 type ActionStat struct {
 	Trials   float32
 	ValueSum float32
 	ByOpp    map[string]OppStat
-	PTrials  float32
-	PSum     float32
 }
 
-// PlayStat is what the CBR layer's own plays of a move achieved, alone,
-// without demonstrations: how many plays, the sum of their results, both
-// decayed like the rest and never shrunk toward a prior, and how many plays
-// the character's own AI took over from (see driver.contest), which count
-// for nothing else. It is what a move has proved against the base AI (see
-// baseline.go).
+// PlayStat is what the CBR layer's own plays of a move in one situation
+// achieved, alone, without demonstrations: how many plays, the sum of their
+// results, the sum of the shares of their exchanges' rewards they were
+// credited with (as for the base AI, see BaselineStat), all decayed like the
+// rest and never shrunk toward a prior, and how many plays the character's
+// own AI took over from (see driver.contest), which count for nothing else.
+// It is what a move has proved against the base AI there (see baseline.go).
 type PlayStat struct {
 	Trials   float32
 	Sum      float32
+	Shares   float32
 	Contests float32
 }
 
-// playKey identifies the record of the CBR layer's plays of a case's move:
-// its action (see actionKey) and the stance it is played from, which is the
-// one it was recorded in (see gateFilter): the character's own state type,
-// and whether it is being hit or guarding (see selfStun). The action alone
-// does not say it: a step back on the ground and a drift back in the air are
-// the same movement, and the same button can start the same move standing
-// or from a crouch. The stance takes bits 48 to 52, above the move.
-func playKey(c *Case) uint64 {
-	return actionKey(c) | uint64(c.StartStateType&7)<<48 | selfStun(&c.Start)<<51
+// The records of a move in a situation (Store.Played and Store.Offered) are
+// kept under one key: the situation (see baselineKey) in the low sitBits
+// bits, the move (see moveKey) above it.
+const (
+	sitBits        = 22
+	sitMask uint64 = 1<<sitBits - 1
+)
+
+// moveKey is the move a case plays, as actionKey describes it without the
+// situation: bit 0 is set for movement, and bits 1 to 32 hold the state it
+// executes, or for movement its direction class (see movementClass).
+func moveKey(c *Case) uint64 {
+	if c.Kind == KindMovement {
+		return uint64(uint32(int32(-1-movementClass(c))))<<1 | 1
+	}
+	return uint64(uint32(c.MoveRef)) << 1
 }
 
-// played returns the record of the CBR layer's plays of a case's move,
-// creating it.
-func (s *Store) played(c *Case) *PlayStat {
-	k := playKey(c)
+// playKey identifies the records of a case's move in situation sit (see
+// baselineKey): the situation a play of it was made in, or the one it is on
+// offer in. The situation says everything the comparison with the base AI
+// needs: the character's stance, the distance band, the enemy's state and
+// what it is doing, control and the AI level. A move's plays prove nothing
+// about it anywhere else: holding still where the enemy is close says
+// nothing of holding still far away, nor a step back on the ground of a
+// drift back in the air.
+func playKey(c *Case, sit uint64) uint64 {
+	return sit&sitMask | moveKey(c)<<sitBits
+}
+
+// played returns the record of the CBR layer's plays of a move in a
+// situation (see playKey), creating it.
+func (s *Store) played(k uint64) *PlayStat {
 	r := s.Played[k]
 	if r == nil {
 		r = &PlayStat{}
@@ -141,46 +173,72 @@ func (s *Store) played(c *Case) *PlayStat {
 	return r
 }
 
-// playRecord returns what the CBR layer's plays of a case's move achieved,
-// for the comparison with the base AI. A move with no plays kept by stance
-// takes the plays credited to its action as a whole (ActionStat.PTrials and
-// PSum), if any.
-func (s *Store) playRecord(c *Case) PlayStat {
-	var r PlayStat
-	if pr := s.Played[playKey(c)]; pr != nil {
-		r = *pr
+// playRecord returns what the CBR layer's plays of a move in a situation
+// (see playKey) achieved, for the comparison with the base AI.
+func (s *Store) playRecord(k uint64) PlayStat {
+	if pr := s.Played[k]; pr != nil {
+		return *pr
 	}
-	if r.Trials == 0 {
-		if a := s.Actions[actionKey(c)]; a != nil {
-			r.Trials, r.Sum = a.PTrials, a.PSum
-		}
-	}
-	return r
+	return PlayStat{}
 }
 
-// addPlay records one result r of the CBR layer's own play of a case.
-func (s *Store) addPlay(p *Params, c *Case, r float32) {
-	pr := s.played(c)
+// addPlay records one result r of the CBR layer's own play of a case in
+// situation sit, credited with the share share of its exchange's reward.
+func (s *Store) addPlay(p *Params, c *Case, sit uint64, r, share float32) {
+	pr := s.played(playKey(c, sit))
 	pr.Trials = pr.Trials*p.Decay + 1
 	pr.Sum = pr.Sum*p.Decay + r
+	pr.Shares = pr.Shares*p.Decay + share
 }
 
-// creditPlay adds credit to the record of a case's plays without counting a
-// new play, for the round's terminal reward.
-func (s *Store) creditPlay(c *Case, r float32) {
-	s.played(c).Sum += r
+// creditPlay adds credit to the record of a case's plays in situation sit
+// without counting a new play, for the round's terminal reward.
+func (s *Store) creditPlay(c *Case, sit uint64, r float32) {
+	s.played(playKey(c, sit)).Sum += r
 }
 
 // contestPlay notes that the character's own AI took over from a play of a
-// case, decayed like a play.
-func (s *Store) contestPlay(p *Params, c *Case) {
-	pr := s.played(c)
+// case in situation sit, decayed like a play.
+func (s *Store) contestPlay(p *Params, c *Case, sit uint64) {
+	pr := s.played(playKey(c, sit))
 	pr.Contests = pr.Contests*p.Decay + 1
 }
 
-// PlayString describes a played-record key (see playKey), for inspection.
+// addOffered records one result r of the base AI, credited with the share
+// share of its exchange's reward, into the record of a move it was on offer
+// with (see Store.Offered), keyed as playKey.
+func (s *Store) addOffered(p *Params, k uint64, r, share float32) {
+	b := s.Offered[k]
+	if b == nil {
+		b = &BaselineStat{}
+		s.Offered[k] = b
+	}
+	b.Trials = b.Trials*p.Decay + 1
+	b.ValueSum = b.ValueSum*p.Decay + r
+	b.Shares = b.Shares*p.Decay + share
+}
+
+// creditOffered adds credit to an on-offer record without counting a new
+// result, for the round's terminal reward.
+func (s *Store) creditOffered(k uint64, r float32) {
+	if b := s.Offered[k]; b != nil {
+		b.ValueSum += r
+	}
+}
+
+// PlayString describes a key of the records of a move in a situation (see
+// playKey), for inspection.
 func PlayString(k uint64) string {
-	return ActionString(k&(1<<48-1)) + ", " + stanceString(k>>48&7, k>>51&3)
+	return MoveString(k>>sitBits) + ": " + SituationString(k&sitMask)
+}
+
+// MoveString describes a move (see moveKey), for inspection.
+func MoveString(m uint64) string {
+	move := int32(uint32(m >> 1))
+	if m&1 != 0 {
+		return "movement " + [...]string{"neutral", "forward", "back", "up", "down"}[min(max(int(-1-move), 0), 4)]
+	}
+	return fmt.Sprintf("move %d", move)
 }
 
 const actionBandPx = 40
@@ -482,6 +540,7 @@ func (s *Store) Prune(p *Params) int {
 		SrcAuthoredAI:  {8, 0},
 		SrcEngineAI:    {20, 0.2},
 		SrcSynthesized: {8, 0},
+		SrcCharacterAI: {8, 0},
 	}
 	var nonHuman, human []*Case
 	for _, c := range s.Cases {

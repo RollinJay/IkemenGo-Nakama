@@ -19,21 +19,55 @@
 -- sees its AILevel trigger read 0); then it carries on. Moves are compared
 -- by their average result per exchange (an attack or combo and what came of
 -- it): damage dealt, weighted by how well the exchange ended, minus damage
--- taken. Now and then the CBR AI tries a move it has not proved yet, to find
--- out whether it is better: at about one in twenty of the moments it could
--- try one (counting one each time the situation changes), more often for a
--- move that looks promising, and a few times a round at most. An AI that
--- keeps itself switched on in a variable (one a long command turns on, or
--- one that notes AILevel once and then only checks its variable), or that
--- never reads AILevel, cannot be paused and keeps running; when such an AI
--- starts an attack during a move the CBR AI is playing, that move is usually
--- dropped without counting against it.
+-- taken. They are compared situation by situation. A situation is the
+-- distance between the characters, how each of them stands (standing,
+-- crouching, in the air, lying down), whether either is being hit or
+-- guarding, whether the enemy is attacking, whether the character has
+-- control, and the CPU's AI level; a play of the CBR AI counts only in the
+-- situation it was made in, against how the base AI does there. A move
+-- needs a few plays, and a few exchanges between them, before it can prove
+-- anything, so one lucky exchange proves nothing.
+--
+-- The CBR AI can take over during and after movement too: while the base AI
+-- walks, runs or jumps, the CBR AI looks again every couple of frames, so a
+-- move that proved better from some distance can take over as the character
+-- comes into that distance. During a movement that takes control away (a
+-- dash, the start of a jump, a landing), only a command the CBR AI has seen
+-- working from that very point may take over; otherwise it waits until the
+-- character has control again.
+--
+-- Now and then the CBR AI tries a move it has not proved yet, to find out
+-- whether it is better: at about one in twenty of the moments it could try
+-- one (counting one each time the situation changes), more often for a move
+-- that looks promising, and a few times a round at most. An AI that keeps
+-- itself switched on in a variable (one a long command turns on, or one that
+-- notes AILevel once and then only checks its variable), or that never reads
+-- AILevel, cannot be paused and keeps running; when such an AI changes what
+-- the character does during a move the CBR AI is playing (an attack, a
+-- cancel, a dash or a jump), that move is usually dropped without counting
+-- against it.
 --
 -- Where its moves come from. The CBR AI learns moves from people playing the
--- character, and from CPU play by the engine's AI or by a character AI that
--- inputs commands. From a character AI that changes states directly (the
--- most common kind) it learns only how well that AI does, so with such an AI
--- it takes over only once people have played the character.
+-- character, and from CPU play: by the engine's AI, by a character AI that
+-- inputs commands, and by a character AI that changes states directly (the
+-- most common kind). Such an AI skips the input a person needs, so each of
+-- its moves is checked. The game reads from the character's files which
+-- moves a person's command can bring about, and at the moment the AI made a
+-- move it checks whether that command would have worked right then. A move
+-- that only a direct state change could have made then (cheating, as a
+-- person cannot do it) is never learned, nor is any move learned from the
+-- exchange it was part of. The CBR AI then tests each move learned this way
+-- by inputting its command itself in a similar spot (with control, or out
+-- of the same move, as when the AI made it; standing, crouching or in the
+-- air as then; with enough power), and takes over with it only where the
+-- move came out. That takes at most a couple of extra test plays a round,
+-- on top of the rare tries above, until the move is settled in each spot
+-- that comes up: it came out there, or three tries or checks there found it
+-- not working. The CBR AI only ever inputs commands, so a move that only a
+-- direct state change can reach is never used. A move the game cannot check
+-- (one whose target state is worked out while the game runs, say) is
+-- learned only once a command has been seen bringing it about, and is then
+-- tested the same way.
 --
 -- The main settings are in Options > Game Settings > CBR AI Settings: CBR AI,
 -- Knowledge, Take-Over Margin, Training Dummy, Learn From Replays and Ask
@@ -62,11 +96,12 @@
 --   Ambition         1-8, or 0 to follow Execution: how long and damaging the
 --                    routes the CBR AI goes for are.
 --   RecordHumans     learn from people playing.
---   RecordCPU        learn from CPU play (the engine AI, and a character AI
---                    that inputs commands). Whatever RecordHumans and
---                    RecordCPU say, while the CBR AI may take over it keeps
---                    track of how the base AI does and how the moves it
---                    plays do, since that is what it compares; the two
+--   RecordCPU        learn from CPU play (the engine AI, and a character AI,
+--                    whether it inputs commands or changes states directly;
+--                    see "Where its moves come from"). Whatever RecordHumans
+--                    and RecordCPU say, while the CBR AI may take over it
+--                    keeps track of how the base AI does and how the moves
+--                    it plays do, since that is what it compares; the two
 --                    choose which play it learns new moves from.
 --   RecordReplays    also learn from replays: match replays played back and
 --                    lobby matches watched live, each of those learned once

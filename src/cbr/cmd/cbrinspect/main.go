@@ -1,10 +1,13 @@
 // Command cbrinspect prints a summary of a CBR store: what it holds, which
 // commands were reconstructed from AI play, how often played cases failed to
 // reproduce, the character AI's direct state changes kept as hypotheses,
-// routes found beyond human precedent, the character's own AI's record by
-// situation (the baseline the CBR layer must beat to take over) and what
-// the CBR layer's own plays of each move achieved, by the stance they were
-// played from.
+// whether each command was found to work where the character AI's direct
+// state changes used it (verdicts by spot: the engine's checks at the
+// moment of each change, and the CBR layer's test plays), routes found
+// beyond human precedent, the character's own AI's record by
+// situation (the baseline the CBR layer must beat to take over), its record
+// where each move was on offer, and what the CBR layer's own plays of each
+// move achieved, by the situation they were played in.
 //
 //	go run ./src/cbr/cmd/cbrinspect save/cbr/local/kfm-16a05657.cbr
 //
@@ -28,6 +31,7 @@ var sourceNames = map[cbr.Source]string{
 	cbr.SrcUnknown: "unknown", cbr.SrcHumanLocal: "human", cbr.SrcHumanLobby: "lobby",
 	cbr.SrcRanked: "ranked", cbr.SrcRankedTop: "ranked_top", cbr.SrcTrial: "trial",
 	cbr.SrcAuthoredAI: "authored", cbr.SrcEngineAI: "engine", cbr.SrcSynthesized: "hypothesis",
+	cbr.SrcCharacterAI: "character AI",
 }
 
 type count struct {
@@ -118,6 +122,42 @@ func main() {
 			fmt.Printf("  state %d: seen %d, command %q, played %d, came out %d: %s\n", s, h.Seen, h.Command, h.Attempts, h.Successes, status)
 		}
 	}
+	// Whether each command works where the character AI's direct state
+	// changes used it, spot by spot: at the moment of each change the engine
+	// checked whether a person's command would have made it, and the CBR
+	// layer's plays tested the command's inputs.
+	if len(st.Verdicts) > 0 {
+		keys := make([]cbr.VerdictKey, 0, len(st.Verdicts))
+		for k := range st.Verdicts {
+			keys = append(keys, k)
+		}
+		sort.Slice(keys, func(i, j int) bool {
+			a, b := keys[i], keys[j]
+			if a.State != b.State {
+				return a.State < b.State
+			}
+			if a.Command != b.Command {
+				return a.Command < b.Command
+			}
+			if a.From != b.From {
+				return a.From < b.From
+			}
+			return a.Stance < b.Stance
+		})
+		fmt.Printf("commands by spot (%d):\n", len(keys))
+		for i, k := range keys {
+			if i == 40 {
+				fmt.Printf("  ... %d more\n", len(keys)-40)
+				break
+			}
+			v := st.Verdicts[k]
+			from := "with control"
+			if k.From >= 0 {
+				from = fmt.Sprintf("from state %d", k.From)
+			}
+			fmt.Printf("  state %d by %q, %s, %s: %s\n", k.State, k.Command, from, stance(k.Stance), verdictLine(v))
+		}
+	}
 	// Best-valued command cases, as a quick look at what the store prefers.
 	var cmds []*cbr.Case
 	for _, c := range st.Cases {
@@ -160,8 +200,30 @@ func main() {
 		b := st.Baseline[k]
 		fmt.Printf("  %s: %.1f results, mean %+.3f, share %.2f\n", cbr.SituationString(k), b.Trials, b.ValueSum/b.Trials, b.Shares/b.Trials)
 	}
-	// The CBR layer's own plays, by move and the stance they are played
-	// from: what each move has proved against the character's own AI.
+	// The base AI's results where a move was on offer, by situation and
+	// move: what a move is compared with once there are enough of them.
+	offered := make([]uint64, 0, len(st.Offered))
+	for k := range st.Offered {
+		offered = append(offered, k)
+	}
+	sort.Slice(offered, func(i, j int) bool {
+		a, b := st.Offered[offered[i]], st.Offered[offered[j]]
+		if a.Trials != b.Trials {
+			return a.Trials > b.Trials
+		}
+		return offered[i] < offered[j]
+	})
+	fmt.Printf("character's own AI where a move was on offer (%d records, most results first):\n", len(offered))
+	for i, k := range offered {
+		if i == show {
+			fmt.Printf("  ... %d more\n", len(offered)-show)
+			break
+		}
+		b := st.Offered[k]
+		fmt.Printf("  %s: %.1f results, mean %+.3f, share %.2f\n", cbr.PlayString(k), b.Trials, b.ValueSum/b.Trials, b.Shares/b.Trials)
+	}
+	// The CBR layer's own plays, by move and the situation they were played
+	// in: what each move has proved against the character's own AI there.
 	var played []uint64
 	for k, a := range st.Played {
 		if a.Trials > 0 || a.Contests > 0 {
@@ -175,7 +237,7 @@ func main() {
 		}
 		return played[i] < played[j]
 	})
-	fmt.Printf("moves the CBR layer played, by stance (%d, most plays first):\n", len(played))
+	fmt.Printf("moves the CBR layer played, by situation (%d, most plays first):\n", len(played))
 	for i, k := range played {
 		if i == show {
 			fmt.Printf("  ... %d more\n", len(played)-show)
@@ -184,43 +246,47 @@ func main() {
 		a := st.Played[k]
 		mean := ""
 		if a.Trials > 0 {
-			mean = fmt.Sprintf(", mean %+.3f", a.Sum/a.Trials)
+			mean = fmt.Sprintf(", mean %+.3f, %.1f exchanges' worth", a.Sum/a.Trials, a.Shares)
 		}
 		contests := ""
 		if a.Contests > 0 {
 			contests = fmt.Sprintf("; the character's own AI took over from %.1f plays", a.Contests)
 		}
-		demo := ""
-		if d := st.Actions[k&(1<<48-1)]; d != nil && d.Trials > 0 {
-			demo = fmt.Sprintf("; with demonstrations %.1f results, mean %+.3f", d.Trials, d.ValueSum/d.Trials)
-		}
-		fmt.Printf("  %s: %.1f plays%s%s%s\n", cbr.PlayString(k), a.Trials, mean, contests, demo)
+		fmt.Printf("  %s: %.1f plays%s%s\n", cbr.PlayString(k), a.Trials, mean, contests)
 	}
-	// Plays credited to an action as a whole, from any stance (see
-	// cbr.ActionStat).
-	var pooled []uint64
-	for k, a := range st.Actions {
-		if a.PTrials > 0 {
-			pooled = append(pooled, k)
-		}
+}
+
+func stance(st cbr.StateType) string {
+	switch st {
+	case cbr.StStand:
+		return "standing"
+	case cbr.StCrouch:
+		return "crouching"
+	case cbr.StAir:
+		return "in the air"
+	case cbr.StLying:
+		return "lying"
 	}
-	if len(pooled) == 0 {
-		return
-	}
-	sort.Slice(pooled, func(i, j int) bool {
-		a, b := st.Actions[pooled[i]], st.Actions[pooled[j]]
-		if a.PTrials != b.PTrials {
-			return a.PTrials > b.PTrials
+	return "unknown stance"
+}
+
+// verdictLine describes what is known of a command in a spot.
+func verdictLine(v *cbr.Verdict) string {
+	s := ""
+	if v.Reachable > 0 || v.Cheat > 0 {
+		s = fmt.Sprintf("the character AI's changes: %d a person's command could have made", v.Reachable)
+		if v.Reachable > 0 {
+			s += fmt.Sprintf(" (from power %d)", v.ReachPower)
 		}
-		return pooled[i] < pooled[j]
-	})
-	fmt.Printf("actions the CBR layer played, from any stance (%d, most plays first):\n", len(pooled))
-	for i, k := range pooled {
-		if i == show {
-			fmt.Printf("  ... %d more\n", len(pooled)-show)
-			break
-		}
-		a := st.Actions[k]
-		fmt.Printf("  %s: %.1f plays, mean %+.3f\n", cbr.ActionString(k), a.PTrials, a.PSum/a.PTrials)
+		s += fmt.Sprintf(", %d none could; ", v.Cheat)
 	}
+	s += fmt.Sprintf("the CBR layer's plays: %d came out", v.Successes)
+	if v.Successes > 0 {
+		s += fmt.Sprintf(" (from power %d)", v.OKPower)
+	}
+	s += fmt.Sprintf(", %d failed", v.Fails)
+	if n := min(int(v.Fails+v.Cheat), 3); n == 3 {
+		s += fmt.Sprintf("; found not to work up to power %d", v.FailTop[2])
+	}
+	return s
 }

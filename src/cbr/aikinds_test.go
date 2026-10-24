@@ -16,7 +16,9 @@ import (
 //   - the base AI plays on the frames the CBR layer leaves to it, which are
 //     nearly all of them, and starts about as many attacks as alone;
 //   - every take-over that is not exploration is with a move whose own plays
-//     by the CBR layer beat the base AI's record in that situation, and
+//     by the CBR layer in the situation it takes over in beat the base AI's
+//     record there, as the test counts those plays from the chains (see
+//     playShadow), apart from the store's records the gate reads; and
 //     exploration stays within its cap;
 //   - learning is not corrupted: the base AI's record fills, also from AIs
 //     that act only through the command cheat or not at all, driving creates
@@ -30,11 +32,12 @@ import (
 //     breaks), not a loss of a few tens a round. Then the same rounds and as
 //     many more are played again with exploration off, so that only moves
 //     proved better take over: there the result may be worse by only 10 a
-//     round plus two and a half standard errors, which catches a gate that
+//     round plus one and a half standard errors, which catches a gate that
 //     takes over with moves that are not really better, or a kind whose
 //     take-overs do worse than their record says. Rounds without a take-over
 //     play out exactly as alone, so the standard error there comes only from
-//     the rounds the CBR layer changed;
+//     the rounds the CBR layer changed (with nothing taking over it is 0,
+//     and so must the difference be);
 //   - nothing idles: the frames on which the character has control and gets
 //     no input do not grow.
 
@@ -142,25 +145,29 @@ func (ks *kindStats) add(o *kindStats) {
 	ks.dirFirstMove += o.dirFirstMove
 }
 
-// provedBetter reports whether the CBR layer's own plays of a case's action
-// beat the base AI's record in the situation it is chosen in: at least
-// TakeoverMinPlays of them, with a mean above the base AI's mean there. The
-// gate asks for more (an advantage above the margin), so every take-over
-// that is not exploration must pass.
-func provedBetter(eng *Engine, ps *playerState, c *Case) bool {
+// provedBetter reports whether the CBR layer's own plays of a case's move in
+// situation sit, where it was just begun, beat the base AI's record there,
+// counting those plays as the test does from the chains (see playShadow):
+// at least TakeoverMinPlays of them, credited with at least as many
+// exchanges' worth between them, with a mean above the base AI's means that
+// the gate compares with (see Store.against). The gate asks for more (an
+// advantage above the margin), so every take-over that is not exploration
+// must pass.
+func provedBetter(eng *Engine, ps *playerState, sh *playShadow, c *Case, sit uint64) bool {
 	p := eng.p
-	a := ps.st.Actions[actionKey(c)]
-	if a == nil || a.PTrials < p.decayed(p.TakeoverMinPlays)-1e-3 {
+	k := playKey(c, sit)
+	a := sh.record(k)
+	if n := p.decayed(p.TakeoverMinPlays) - 1e-3; a.Trials < n || a.Shares < n {
 		return false
 	}
-	b, _ := ps.st.baseline(p, baselineKey(&ps.lastFeat, ps.lastSelf.Ctrl, ps.lastSelf.AILevel))
-	return a.PSum/a.PTrials > b
+	return a.Sum/a.Trials > ps.st.against(p, k, ps.drv.margin).strictest().b
 }
 
 // kindRound plays round r of player 0 with the kind's base AI against the
-// defender, on the seeds overBase uses: driven by eng over the base AI, or
-// with the base AI alone when eng is nil.
-func kindRound(eng *Engine, k aiKind, r, seedBase int, ks *kindStats) roundResult {
+// defender, on the seeds overBase uses: driven by eng over the base AI, with
+// the CBR layer's plays counted by sh, or with the base AI alone when eng is
+// nil.
+func kindRound(eng *Engine, k aiKind, r, seedBase int, ks *kindStats, sh *playShadow) roundResult {
 	s := newSim(3600)
 	s.cmdLayer = true
 	opp := &defender{rng: rand.New(rand.NewSource(int64(seedBase + r)))}
@@ -193,6 +200,7 @@ func kindRound(eng *Engine, k aiKind, r, seedBase int, ks *kindStats) roundResul
 			count(cc)
 			evict(cc, tick)
 		}
+		sh.hook(ps)
 		eng.Frame(s.snapshot())
 	}
 	ks.rounds++
@@ -209,11 +217,12 @@ func kindRound(eng *Engine, k aiKind, r, seedBase int, ks *kindStats) roundResul
 				me.cbr = true
 				if d := ps.drv; d.cur != nil && (d.cur != lastCur || d.cur.Outcome.Plays != lastPlays) {
 					ks.takeovers++
+					sit := sh.began(ps, d.cur)
 					switch {
 					case int(d.explores) > explored:
 						ks.explored++
 						explored = int(d.explores)
-					case !provedBetter(eng, ps, d.cur):
+					case !provedBetter(eng, ps, sh, d.cur, sit):
 						ks.unproven++
 					}
 					lastCur, lastPlays = d.cur, d.cur.Outcome.Plays
@@ -230,6 +239,8 @@ func kindRound(eng *Engine, k aiKind, r, seedBase int, ks *kindStats) roundResul
 				if c, ok := base.(contender); ok {
 					c.contend(s, 0)
 				}
+			} else {
+				sh.ended(ps)
 			}
 		}
 		if !me.cbr && base != nil {
@@ -262,6 +273,7 @@ func kindRound(eng *Engine, k aiKind, r, seedBase int, ks *kindStats) roundResul
 			s.roundSt = 3
 		}
 		eng.RoundEnd(s.snapshot())
+		sh.ended(ps)
 	}
 	ks.maxExplored = max(ks.maxExplored, explored)
 	if sc, ok := base.(*switchCode); ok && sc.onTick != 0 {
@@ -319,7 +331,7 @@ func baselineTrials(st *Store) float32 {
 // file. The result is compared round by round on the same seeds, and may be
 // worse than the base AI's alone by 30 per round plus two and a half
 // standard errors of that difference; played again over twice as many rounds
-// with exploration off, by 10 per round plus two and a half standard errors.
+// with exploration off, by 10 per round plus one and a half standard errors.
 func TestEveryKindOfCharacterAI(t *testing.T) {
 	if testing.Short() {
 		t.Skip("slow")
@@ -334,19 +346,20 @@ func TestEveryKindOfCharacterAI(t *testing.T) {
 			recordWith(t, eng, SrcHumanLocal, recorded, 40, func(r *rand.Rand) controller { return &rushdown{rng: r} })
 			st, _ := eng.Store("Rush")
 			cases := st.Len()
+			sh := newPlayShadow(p)
 
 			var alone, learning, with kindStats
 			diff := make([]roundResult, eval)
 			var aloneRes, withRes []roundResult
 			for r := 0; r < eval; r++ {
-				aloneRes = append(aloneRes, kindRound(nil, k, r, 7000, &alone))
+				aloneRes = append(aloneRes, kindRound(nil, k, r, 7000, &alone, nil))
 			}
 			before := totals(st)
 			for r := 0; r < learn; r++ {
-				kindRound(eng, k, r, 9000, &learning)
+				kindRound(eng, k, r, 9000, &learning, sh)
 			}
 			for r := 0; r < eval; r++ {
-				withRes = append(withRes, kindRound(eng, k, r, 7000, &with))
+				withRes = append(withRes, kindRound(eng, k, r, 7000, &with, sh))
 				diff[r].net = withRes[r].net - aloneRes[r].net
 			}
 			pt := totals(st).sub(before)
@@ -361,12 +374,12 @@ func TestEveryKindOfCharacterAI(t *testing.T) {
 			var aloneMore, off kindStats
 			aloneOff := append([]roundResult(nil), aloneRes...)
 			for r := eval; r < evalOff; r++ {
-				aloneOff = append(aloneOff, kindRound(nil, k, r, 7000, &aloneMore))
+				aloneOff = append(aloneOff, kindRound(nil, k, r, 7000, &aloneMore, nil))
 			}
 			p.TakeoverExplore, p.TakeoverExplorePromising = 0, 0
 			diffOff := make([]roundResult, evalOff)
 			for r := 0; r < evalOff; r++ {
-				diffOff[r].net = kindRound(eng, k, r, 7000, &off).net - aloneOff[r].net
+				diffOff[r].net = kindRound(eng, k, r, 7000, &off, sh).net - aloneOff[r].net
 			}
 			gainOff, seOff, _ := summarize(diffOff)
 
@@ -424,7 +437,7 @@ func TestEveryKindOfCharacterAI(t *testing.T) {
 			if gain < -30-2.5*se {
 				t.Errorf("the CBR layer made the base AI worse: %+.0f a round (standard error %.0f)", gain, se)
 			}
-			if gainOff < -10-2.5*seOff {
+			if gainOff < -10-1.5*seOff {
 				t.Errorf("with exploration off, the moves proved better made the base AI worse: %+.0f a round (standard error %.0f)", gainOff, seOff)
 			}
 			if pct(with.still, with.frames) > pct(alone.still, alone.frames)+2 {
@@ -538,7 +551,9 @@ func TestHelperRedirectIsSeen(t *testing.T) {
 	// begins, so that its first frame completes no command. play feeds the
 	// frames, asking the CBR layer for input before those marked CBRDriven.
 	start := Feat{RoundState: 2, Enemy: CharFeat{Present: true, RelX: 150, State: StStand, Ctrl: true, Move: MtIdle, LifeFrac: 1}, TimeFrac: -1}
-	play := func(name string, frames ...CharSnap) (*playerState, *Case) {
+	// driven counts the frames the CBR layer gave the input in the last play.
+	driven := 0
+	playAny := func(frames ...CharSnap) (*playerState, *Case) {
 		p := withoutBaseAI()
 		eng := New(p, t.TempDir(), 1)
 		st, _ := eng.Store("A")
@@ -548,32 +563,74 @@ func TestHelperRedirectIsSeen(t *testing.T) {
 		eng.SetPlayer(0, "A", "B")
 		eng.Drive(0, Levels{Execution: 8, Knowledge: 8})
 		ff := &frameFeeder{eng: eng}
+		driven = 0
 		for _, f := range frames {
 			if f.CBRDriven {
 				_, f.CBRDriven = eng.Input(0, true)
 			}
+			if f.CBRDriven {
+				driven++
+			}
 			ff.frame(f)
 		}
+		return eng.players[0], c
+	}
+	play := func(name string, frames ...CharSnap) (*playerState, *Case) {
+		ps, c := playAny(frames...)
 		if c.Outcome.Plays == 0 {
 			t.Fatalf("%s: setup: the jab should be played", name)
 		}
-		return eng.players[0], c
+		return ps, c
 	}
 	asked := func(f CharSnap) CharSnap {
 		f.CBRDriven = true
 		return f
 	}
-	// The base AI's helper moves the root on the base AI's frame, and the
-	// CBR layer begins the jab on the next, which shows the attack: the
-	// jab's input cannot act.
-	ps, c := play("base AI first", standing, redirected, asked(attack(1)), asked(attack(2)), asked(attack(3)),
+	// The base AI's helper moves the root on the base AI's frame, and its
+	// attack shows on the next: the CBR layer does not begin the jab there,
+	// where its input could not act, and leaves the frames to the base AI
+	// (round 3 began the jab and dropped it as taken over).
+	ps, c := playAny(standing, redirected, asked(attack(1)), asked(attack(2)), asked(attack(3)),
 		asked(attack(4)), asked(attack(5)), asked(attack(6)), asked(attack(7)), asked(attack(8)))
-	if ps.drv.cur != nil || !ps.drv.waitCtrl || ps.unexplained != 0 {
-		t.Fatalf("base AI first: the jab is dropped and nothing counts against the AI: playing %v, waiting %v, unexplained %d",
-			ps.drv.cur != nil, ps.drv.waitCtrl, ps.unexplained)
+	if c.Outcome.Plays != 0 || driven != 0 || ps.drv.cur != nil || ps.unexplained != 0 {
+		t.Fatalf("base AI first: the jab is not begun on the base AI's action: %d plays, %d driven frames, playing %v, unexplained %d",
+			c.Outcome.Plays, driven, ps.drv.cur != nil, ps.unexplained)
 	}
 	if c.Outcome.ExecFails != 0 || c.Outcome.Aborts != 0 {
 		t.Fatalf("base AI first: nothing counts against the jab: %d failed, %d aborted", c.Outcome.ExecFails, c.Outcome.Aborts)
+	}
+	// With the engine's labels the same holds, also where the change does
+	// not look late (made in hitpause, say): its label says a helper made it.
+	routes := &RouteTable{Person: map[int32][]string{200: {"x"}, 230: {"y"}}}
+	labelled := func(f CharSnap, k EntryKind, helper bool) CharSnap {
+		f.Entry, f.EntryHelper, f.Routes = k, helper, routes
+		if k == EntryReachable {
+			f.EntryCommand = "y"
+		}
+		return f
+	}
+	pausedChange := labelled(redirected, EntryReachable, true)
+	pausedChange.HitPause = 1
+	for name, change := range map[string]CharSnap{
+		"labelled helper change":             labelled(redirected, EntryReachable, true),
+		"labelled helper change in hitpause": pausedChange,
+	} {
+		ps, c = playAny(labelled(standing, EntryNone, false), change, asked(labelled(attack(1), EntryNone, false)),
+			asked(labelled(attack(2), EntryNone, false)), asked(labelled(attack(3), EntryNone, false)))
+		if c.Outcome.Plays != 0 || driven != 0 {
+			t.Fatalf("%s: the jab is not begun on the base AI's action: %d plays, %d driven frames", name, c.Outcome.Plays, driven)
+		}
+	}
+	// A helper's change the base AI makes during the jab is caught by its
+	// label, even when it takes control away at once (ctrl = 0), which looks
+	// like no late change.
+	ctrlZero := labelled(redirected, EntryReachable, true)
+	ctrlZero.Ctrl = false
+	ps, c = play("labelled, during the jab, ctrl = 0", labelled(standing, EntryNone, false), asked(ctrlZero),
+		asked(labelled(attack(1), EntryNone, false)), asked(labelled(attack(2), EntryNone, false)))
+	if ps.drv.cur != nil || !ps.drv.waitCtrl || ps.unexplained != 1 || c.Outcome.ExecFails != 0 {
+		t.Fatalf("labelled, during the jab, ctrl = 0: dropped as the AI's: playing %v, waiting %v, unexplained %d, failed %d",
+			ps.drv.cur != nil, ps.drv.waitCtrl, ps.unexplained, c.Outcome.ExecFails)
 	}
 	// A helper moves the root on the jab's first frame, with no command
 	// active: the AI was not paused, as for a root's own attack.

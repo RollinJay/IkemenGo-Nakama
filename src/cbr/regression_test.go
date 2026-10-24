@@ -341,15 +341,15 @@ func TestFreshPressOnlyWhenRecordedFresh(t *testing.T) {
 	}
 	d := newDriver(p, 0, Levels{Execution: 8, Knowledge: 8}, 1, st, newChainTracker(p, 0, new(uint64)))
 	self := &CharSnap{Input: InF | InA, Ctrl: true, StateType: StStand}
-	d.begin(mk(true, 0), self, 1)
+	d.begin(mk(true, 0), self, 1, 0)
 	if d.shift != 1 {
 		t.Fatal("keys held now but not at the recorded decision must be released first")
 	}
-	d.begin(mk(true, InF|InA), self, 2)
+	d.begin(mk(true, InF|InA), self, 2, 0)
 	if d.shift != 0 {
 		t.Fatal("keys held at the recorded decision stay held")
 	}
-	d.begin(mk(false, 0), self, 3)
+	d.begin(mk(false, 0), self, 3, 0)
 	if d.shift != 0 {
 		t.Fatal("a case begun mid-action is played as recorded")
 	}

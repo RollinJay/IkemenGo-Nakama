@@ -4,14 +4,21 @@ package main
 // touches both the engine and the CBR package: it fills cbr.Snapshot from
 // engine state once per logical frame, routes AI input through the CBR
 // layer, reports command activity, synthesizes each command's canonical
-// inputs, and exposes the Lua API. The engine calls it from six places:
+// inputs, and exposes the Lua API. The engine calls it from these places:
 //
-//   system.go  action():          cbrFrame() after globalCollision/globalTick
-//   system.go  runMatch():        defer cbrMatchEnd()
-//   input.go   InputUpdate:       cbrInput() in the AI branch
-//   script.go  systemScriptInit:  cbrRegisterLua(l)
-//   char.go    command():         cbrSuppressAICheat() in the AI cheat test
-//   char.go    actionPrepare():   cbrPrepareAILevel() after the AssertSpecial reset
+//   system.go    action():           cbrFrame() after globalCollision/globalTick
+//   system.go    runMatch():         defer cbrMatchEnd()
+//   input.go     InputUpdate:        cbrInput() in the AI branch
+//   script.go    systemScriptInit:   cbrRegisterLua(l)
+//   char.go      command():          cbrSuppressAICheat() in the AI cheat test
+//   char.go      actionPrepare():    cbrPrepareAILevel() after the AssertSpecial reset
+//   char.go      stateChange1():     cbrStateChanged() while sysCBR.watching
+//   bytecode.go  ChangeState and SelfState Run: cbrBeginChange()/cbrEndChange()
+//                around the change, while sysCBR.watching
+//
+// and the route table's: compiler.go notes what conditions check and calls
+// cbrBuildRoutes at the end of CharCompiler.Compile, and the command and
+// AILevel triggers in bytecode.go read cbrCheck (cbr_routes.go).
 //
 // The character's own AI is the base, always. The CBR layer takes over only
 // with a move that has proved better than that AI in the same kind of
@@ -41,23 +48,24 @@ package main
 //     AILevel (IsHomeTeam, TeamSide or a variable instead). Such an AI acts
 //     on top of the CBR layer's input.
 //
-// When an AI that is not paused starts an attack from control during a move
-// the CBR layer is playing, with no command active, the move is dropped
-// (contested): it counts as neither an abort nor a failed execution, gets
-// no credit, and the CBR layer waits for control to return before choosing
-// again. An attack a helper starts with a redirected ChangeState shows a
-// frame after its state number does (see lateChange in package cbr); it is
-// judged by the commands active on the frame the helper made it, and when
-// the base AI made it on its own frame just before the CBR layer began a
-// move, that move is dropped the same way, and nothing counts against the
-// AI either. Nothing else such an AI does during a move is detected, so the
-// move is credited with it: a cancel without control, an attack on a frame
-// a command is active (the CBR layer's own button press, say), or a state
-// that is not an attack (a dash or a jump). When that keeps the move's own
-// command from coming out, the play counts as a failed execution, and a
-// case whose command fails three times, in more than half its plays, is not
-// played again. An AI that switches off the moves people input while it is
-// on makes every command the CBR layer inputs fail that way.
+// When an AI that is not paused changes the character's state during a move
+// the CBR layer is playing, and the change's label (below) says the AI
+// decided it, the move is dropped (contested): it counts as neither an
+// abort nor a failed execution, gets no credit, and the CBR layer waits for
+// control to return before choosing again. That covers any such change,
+// whatever the control or the move type: an attack from control, a cancel
+// out of the move, a dash or a jump, and a helper's redirected ChangeState
+// (see Engine.watchDriven in package cbr). When the base AI's helper made a
+// change on the base AI's own frame, the CBR layer begins no move on the
+// next frame, where that change's action shows. Without the labels (an
+// engine that does not give them), only an attack started from control with
+// no command active is told apart, as is a helper's that keeps control and
+// move type for a frame (see lateChange). When an AI's action that is not
+// told apart keeps the move's own command from coming out, the play counts
+// as a failed execution, and a case whose command fails three times, in
+// more than half its plays, is not played again. An AI that switches off the
+// moves people input while it is on makes every command the CBR layer
+// inputs fail that way.
 //
 // The NoAILevel flag that pauses the AI is cleared again as soon as the
 // frame's code has run (cbrFrame), and when the character's next frame
@@ -73,38 +81,83 @@ package main
 // only while AILevel reads above 0 and leaves the engine AI's jam on (as the
 // stock ZSS Kung Fu Man's does) gets no random walk, jump or guard there.
 //
+// Each state change of a root the CBR layer watches (one it records or
+// drives, offline) is labelled for the frame's snapshot (CharSnap.Entry): a
+// person's command (Input), part of the move (Auto), or a decision of the
+// character's AI that a person's command could have made at that moment
+// (Reachable, with the command), that none could (Cheat), or that could not
+// be checked (Unknown). A ChangeState or SelfState labels the change just
+// before it makes it, a helper's redirected one included (EntryHelper), and
+// the moment check evaluates the person routes into the same state then
+// (cbr_routes.go); a change the engine makes itself is labelled in
+// Char.stateChange1 (cbrEngineEntry). Labelling changes nothing in the game.
+// Package cbr learns from the labels (see command.go there): a Reachable
+// decision of a character AI that changes states directly becomes a case
+// played with the command's inputs, which takes over only once the CBR
+// layer's own plays of it (test plays, see Params.VerifyPerRound) have
+// shown the command working in that spot; a Cheat decision never becomes
+// one, nor does anything in its exchange, and it counts against the
+// person's commands into that state there.
+//
 // Limits:
 //
 //   - Mid-move cancels: an AI that is not paused and changes the character's
-//     state during a move the CBR layer plays, without control in between
-//     and with no command active, looks the same as the move's own change
-//     into a later part, so the play is credited with what the AI did, or
-//     counts as a failed execution when the AI keeps the move's command from
-//     coming out (see TestMidMoveTakeOverIsCreditedToTheMove in package cbr).
+//     state during a move the CBR layer plays, without control in between,
+//     is caught by the change's label, except where the label is Auto: a
+//     change from a positive state's own code with no command and no AI
+//     level, such as an AI latched in a variable cancelling from there
+//     (cbr_routes.go). Then, as without labels, it looks the same as the
+//     move's own change into a later part, so the play is credited with what
+//     the AI did, or counts as a failed execution when the AI keeps the
+//     move's command from coming out (see
+//     TestMidMoveTakeOverIsCreditedToTheMove in package cbr).
 //   - Helper-only attacks: an attack only a helper makes while the root goes
 //     on with what it does (a striker, a projectile a helper fires) counts in
 //     the result of whatever decision is under way, but is not itself
 //     recorded as a decision of the base AI, nor seen as one that takes over
 //     from a move the CBR layer plays; only changes of the root's state are.
-//   - Helpers' state changes: one a helper makes with a redirected
-//     ChangeState is seen only when the new state takes control away on its
-//     first frame, the frame right after the state number changed (not
-//     across hitpause or a pause), and when nothing else changed the state
-//     first (the root's own built-in walk on that frame, say). The same
-//     pattern from something other than a helper, such as an opponent's
-//     TargetState into a state that is not a hit state, counts as the
-//     character's own action, as it does when the opponent's code runs
-//     before the character's.
+//   - Helpers' state changes: package cbr counts one a helper makes with a
+//     redirected ChangeState in the base AI's record only when the new state
+//     takes control away on its first frame, the frame right after the state
+//     number changed (not across hitpause or a pause), and when nothing else
+//     changed the state first (the root's own built-in walk on that frame,
+//     say); its label (EntryHelper) catches it whatever the new state does
+//     when it takes over from a move the CBR layer plays, or comes just
+//     before one. TargetState never looks like this, as it takes control
+//     away at once. The same pattern from something other than the
+//     character's own helper (another character's ChangeState redirected to
+//     it) counts as the character's own action, as it does when that code
+//     runs before the character's, though its label is Auto.
 //   - First CBR frame: on the first frame of a move the CBR layer plays, the
 //     engine still reads the flags the AI asserted on its last frame, so the
 //     AI's NoWalk, NoJump, NoCrouch or NoHardcodedKeys holds back the move's
 //     own walk, jump or crouch for that frame, which then starts a frame
 //     late. Flags the character set are never cleared. In the simulator's
 //     runs of every kind of AI (aikinds_test.go), a third to a half of the
-//     take-overs from control began by holding such a direction, and all of
-//     those were commands that begin with down (a quarter circle, a
-//     crouching kick), whose command still comes out; none was a walk or a
-//     jump.
+//     take-overs from control began by holding such a direction, all of them
+//     commands that begin with down, whose command still comes out; in the
+//     game, with the stock ZSS Kung Fu Man's AI, the AI's last flags held
+//     back the CBR layer's walk in 13 and its crouch in 14 of 56 take-overs
+//     from control, each by one frame.
+//   - Leftover input: when the CBR layer takes over right after the AI held
+//     a direction, that direction is still in the command buffer, and with
+//     the CBR layer's own input it can complete another command than the
+//     move's. In the game, after the stock ZSS Kung Fu Man's AI walked
+//     forward, the quarter circle of the strong palm came out as the Kung Fu
+//     Upper (forward, down, down-forward, which the command file checks
+//     first) in 10 of 16 plays. So before a move begun with control, the CBR
+//     layer matches its commands' motions (cbrMotions) against the input
+//     just before and holds neutral until that input could no longer
+//     complete another command's motion with the move's own, for a command
+//     time of up to 15 frames (Params.MaxMotionFrames); that takes at most
+//     16 frames. With the engine's own command matcher and Kung Fu Man's
+//     Upper and palm commands, it held 13 frames after a walk forward, and
+//     the palm came out. A command whose time is longer can still come out
+//     instead; such a failure, when the move began right after leftover
+//     input and something else came out, counts neither against the move
+//     nor against its command's spot. Only the commands' canonical motions
+//     are matched, not their exact conditions (a held or released step, a
+//     ">" step), so a release may be longer or shorter than needed.
 //   - An AI that resets itself whenever AILevel reads 0 starts over after
 //     each take-over.
 //   - Code meant for a person (gated on AILevel reading 0) runs on the CBR
@@ -154,6 +207,16 @@ type cbrSlot struct {
 	btn       [14]bool
 	wasDriven bool
 	aiFlags   AssertSpecialFlag
+
+	// watched is set for the round once the CBR layer observes the slot's
+	// root (it records or drives it), and routes is the root's route table
+	// (cbr_routes.go). entry labels the root's last state change, made on
+	// frame entryFrame (sysCBR.frame) to the character entryID.
+	watched    bool
+	routes     *cbrRouteSet
+	entry      cbrEntry
+	entryFrame uint64
+	entryID    int32
 }
 
 // cbrMoveFlags are the AssertSpecial flags that switch off the engine's
@@ -206,6 +269,21 @@ type cbrRuntime struct {
 	// masked holds the characters whose NoAILevel flag the adapter set, with
 	// their IDs (see cbrPrepareAILevel).
 	masked map[*Char]int32
+	// watching is set while some slot is watched, so that ChangeState,
+	// SelfState and Char.stateChange1 call the adapter; frame counts the
+	// frames the adapter has seen, for the state change labels. pending is
+	// the label of the state change a controller is making (cbrBeginChange).
+	watching bool
+	frame    uint64
+	pending  cbrPending
+}
+
+// cbrPending is the label a ChangeState or SelfState worked out for the
+// state change it is making to root.
+type cbrPending struct {
+	root  *Char
+	entry cbrEntry
+	set   bool
 }
 
 var sysCBR cbrRuntime
@@ -477,6 +555,82 @@ func cbrUnmaskAll() {
 	clear(sysCBR.masked)
 }
 
+// cbrWatchedRoot returns the slot of c when c is a root character the CBR
+// layer watches this round, or nil.
+func cbrWatchedRoot(c *Char) *cbrSlot {
+	if c == nil || c.helperIndex != 0 {
+		return nil
+	}
+	s := cbrRootSlot(c)
+	if s == nil || !s.watched || s.routes == nil || !cbrLive() {
+		return nil
+	}
+	if pn := c.playerNo; len(sys.chars[pn]) == 0 || sys.chars[pn][0] != c {
+		return nil
+	}
+	return s
+}
+
+// cbrBeginChange is called by ChangeState and SelfState just before they
+// change crun's state to v, the controller (identified by key, its code)
+// being run by c: crun itself, or a helper redirecting to it. When crun is a
+// root the CBR layer watches, it labels the change now, before anything of
+// it is made (cbrRouteSet.classify), for cbrStateChanged. It returns the
+// label of an outer change still being made, for cbrEndChange.
+func cbrBeginChange(c, crun *Char, key *byte, v int32) cbrPending {
+	prev := sysCBR.pending
+	sysCBR.pending = cbrPending{}
+	if s := cbrWatchedRoot(crun); s != nil {
+		sysCBR.pending = cbrPending{
+			root:  crun,
+			entry: s.routes.classify(c, crun, key, Max(0, v)),
+			set:   true,
+		}
+	}
+	return prev
+}
+
+// cbrEndChange ends a change cbrBeginChange began.
+func cbrEndChange(prev cbrPending) {
+	sysCBR.pending = prev
+}
+
+// cbrStateChanged is called by Char.stateChange1 each time a character's
+// state changes, while the adapter watches some root. For a watched root it
+// keeps the change's label for the frame's snapshot: the controller's, or,
+// for a change the engine made itself, cbrEngineEntry's. When a decision
+// entered a move and the new state's own code changes the state again in
+// the same frame with no decision (a follow-up), the decision's label stays.
+func cbrStateChanged(c *Char) {
+	s := cbrWatchedRoot(c)
+	if s == nil {
+		return
+	}
+	p := &sysCBR.pending
+	ctrl := p.set && p.root == c
+	var e cbrEntry
+	if ctrl {
+		e, p.set = p.entry, false
+	} else {
+		e = cbrEngineEntry(c)
+	}
+	if ctrl && e.kind == cbr.EntryAuto && !e.helper && s.entryFrame == sysCBR.frame &&
+		s.entryID == c.id && s.entry.kind != cbr.EntryAuto && s.entry.kind != cbr.EntryNone {
+		return
+	}
+	s.entry, s.entryFrame, s.entryID = e, sysCBR.frame, c.id
+}
+
+// cbrWatchAny works out sysCBR.watching from the slots.
+func cbrWatchAny() {
+	sysCBR.watching = false
+	for i := range sysCBR.slots {
+		if sysCBR.slots[i].watched {
+			sysCBR.watching = true
+		}
+	}
+}
+
 // cbrScale converts a character's local position units to 320-wide game
 // space, so distances compare across characters of any localcoord.
 func cbrScale(c *Char) float32 {
@@ -627,6 +781,12 @@ func cbrFillChar(d *cbr.CharSnap, c *Char, root bool) {
 		d.Pos[i] = cbrFinite(d.Pos[i])
 		d.Vel[i] = cbrFinite(d.Vel[i])
 	}
+	if s := cbrRootSlot(c); s != nil && s.routes != nil {
+		d.Routes = &s.routes.table
+		if root && s.watched && s.entryFrame == sysCBR.frame && s.entryID == c.id {
+			d.Entry, d.EntryCommand, d.EntryHelper = s.entry.kind, s.entry.cmd, s.entry.helper
+		}
+	}
 	if root {
 		d.Input = cbrReadInput(c)
 		// The AI level as configured, for a CPU-controlled root.
@@ -735,7 +895,9 @@ func cbrFrame() {
 		for i := range sysCBR.slots {
 			sl := &sysCBR.slots[i]
 			sl.configured, sl.active, sl.wasDriven, sl.aiFlags = false, false, false, 0
+			sl.watched, sl.entry = false, cbrEntry{}
 		}
+		cbrWatchAny()
 		sysCBR.roundOpen = true
 	}
 	if sysCBR.roundOpen {
@@ -767,6 +929,8 @@ func cbrEndFrame() {
 		}
 		sl.wasDriven, sl.driven = sl.driven, false
 	}
+	// State changes from here on are the next frame's
+	sysCBR.frame++
 }
 
 // cbrConfigure assigns player pn's character and applies its slot's
@@ -775,6 +939,7 @@ func cbrConfigure(pn int, s *cbr.Snapshot) {
 	eng := sysCBR.eng
 	slot := &sysCBR.slots[pn]
 	slot.configured = true
+	slot.routes = cbrRoutesFor(pn)
 	if !slot.record && !slot.drive {
 		return
 	}
@@ -790,6 +955,10 @@ func cbrConfigure(pn int, s *cbr.Snapshot) {
 		sysCBR.lastErr = err.Error()
 		return
 	}
+	// From now on the CBR layer observes the root: its state changes are
+	// labelled (cbrStateChanged)
+	slot.watched = slot.routes != nil
+	cbrWatchAny()
 	cpu := s.Players[pn].Root.AILevel > 0
 	if slot.record {
 		src := slot.source
@@ -856,13 +1025,18 @@ func cbrStartDrive(pn int, slot *cbrSlot, aiLevel float32) {
 // AILevel reads above 0 and leaves the button jam on would get random walks,
 // jumps and guards there that it never makes without the CBR layer. So on
 // that frame cbrInput gives the character back the flags its AI had at the
-// end of its last frame, and takes guarding away if those flags switched it
-// off in the character's state type. It only ever adds such restrictions,
-// never clearing a flag the character has, and the usual reset in
-// actionPrepare clears them before the character's code runs, which asserts
-// its own (the engine works out guarding anew after that code). As
-// NoAIButtonJam is read before cbrInput runs, the jam is kept off by
-// returning no buttons with ok=true; the frame stays the AI's.
+// end of its last frame, those of cbrMoveFlags and cbrGuardFlags, and takes
+// guarding away if those flags switched it off in the character's state
+// type. The guard flags are given back too because the built-in walk reads
+// NoStandGuard as it was on the frame before (Char.prevNoStandGuard, noted
+// in actionPrepare before the reset), so without them the AI's back walk
+// with guarding off would not come out on its second frame after the CBR
+// layer's. It only ever adds such restrictions, never clearing a flag the
+// character has, and the usual reset in actionPrepare clears them before
+// the character's code runs, which asserts its own (the engine works out
+// guarding anew after that code). As NoAIButtonJam is read before cbrInput
+// runs, the jam is kept off by returning no buttons with ok=true; the frame
+// stays the AI's.
 func cbrInput(c *Char) (btn [14]bool, ok bool) {
 	s := cbrRootSlot(c)
 	if s == nil || !s.active || !cbrCanDrive() {
@@ -877,7 +1051,7 @@ func cbrInput(c *Char) (btn [14]bool, ok bool) {
 	btn, ok = sysCBR.eng.Input(c.playerNo, !c.fbFlip)
 	s.driven, s.btn = ok, btn
 	if !ok && s.wasDriven {
-		c.setASF(s.aiFlags & cbrMoveFlags)
+		c.setASF(s.aiFlags & (cbrMoveFlags | cbrGuardFlags))
 		if cbrGuardOff(s.aiFlags, c.ss.stateType) {
 			c.unsetSCF(SCF_guard)
 		}
@@ -896,7 +1070,9 @@ func cbrMatchEnd() {
 		s := &sysCBR.slots[i]
 		s.driven, s.configured, s.active, s.rootID = false, false, false, 0
 		s.wasDriven, s.aiFlags = false, 0
+		s.watched, s.routes, s.entry = false, nil, cbrEntry{}
 	}
+	sysCBR.watching, sysCBR.pending = false, cbrPending{}
 	id := sysCBR.replayID
 	sysCBR.replayID = ""
 	if sysCBR.eng == nil {

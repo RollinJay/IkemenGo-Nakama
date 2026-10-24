@@ -2164,7 +2164,8 @@ func (be BytecodeExp) run(c *Char) BytecodeValue {
 		case OC_swap:
 			sys.bcStack.Swap()
 		case OC_ailevel:
-			if c.asf(ASF_noailevel) {
+			// A CBR moment check reads it as a person's 0 (cbr_routes.go)
+			if c.asf(ASF_noailevel) || cbrCheck.on && c.playerNo == cbrCheck.pn {
 				sys.bcStack.PushI(0)
 			} else {
 				sys.bcStack.PushI(int32(c.getAILevel()))
@@ -2213,9 +2214,14 @@ func (be BytecodeExp) run(c *Char) BytecodeValue {
 					redir = oc.ss.sb.playerNo
 					pno = c.ss.sb.playerNo
 				}
-				cmdPos, ok := c.cmd[redir].Names[cmdName]
-				ok = ok && c.command(pno, cmdPos)
-				sys.bcStack.PushB(ok)
+				if cbrCheck.on && c.playerNo == cbrCheck.pn {
+					// A CBR moment check sets which commands are active
+					sys.bcStack.PushB(cbrCheckCommand(c, redir, pno, cmdName))
+				} else {
+					cmdPos, ok := c.cmd[redir].Names[cmdName]
+					ok = ok && c.command(pno, cmdPos)
+					sys.bcStack.PushB(ok)
+				}
 			}
 		case OC_ctrl:
 			sys.bcStack.PushB(c.ctrl())
@@ -3247,7 +3253,7 @@ func (be BytecodeExp) run_ex(c *Char, i *int, oc *Char) {
 	case OC_ex_gethitvar_teamside:
 		sys.bcStack.PushI(int32(c.ghv.teamside) + 1)
 	case OC_ex_ailevelf:
-		if c.asf(ASF_noailevel) {
+		if c.asf(ASF_noailevel) || cbrCheck.on && c.playerNo == cbrCheck.pn {
 			sys.bcStack.PushI(0)
 		} else {
 			sys.bcStack.PushF(c.getAILevel())
@@ -3578,9 +3584,14 @@ func (be BytecodeExp) run_ex(c *Char, i *int, oc *Char) {
 			sys.bcStack.PushB(false)
 		} else {
 			cmdStr := be.ReadPoolStringAt(i)
-			cmd, ok := c.cmd[sys.workingState.playerNo].Names[cmdStr]
-			ok = ok && c.command(sys.workingState.playerNo, cmd)
-			sys.bcStack.PushB(ok)
+			if cbrCheck.on && c.playerNo == cbrCheck.pn {
+				pn := sys.workingState.playerNo
+				sys.bcStack.PushB(cbrCheckCommand(c, pn, pn, cmdStr))
+			} else {
+				cmd, ok := c.cmd[sys.workingState.playerNo].Names[cmdStr]
+				ok = ok && c.command(sys.workingState.playerNo, cmd)
+				sys.bcStack.PushB(ok)
+			}
 		}
 	default:
 		LogMessage("%v", be[*i-1])
@@ -5239,7 +5250,14 @@ func (sc changeState) Run(c *Char, _ []int32) bool {
 		}
 		return true
 	})
-	crun.changeState(v, a, ctrl, ffx)
+	if sysCBR.watching {
+		// The CBR AI labels how a character it watches changes state
+		prev := cbrBeginChange(c, crun, unsafe.SliceData([]byte(sc)), v)
+		crun.changeState(v, a, ctrl, ffx)
+		cbrEndChange(prev)
+	} else {
+		crun.changeState(v, a, ctrl, ffx)
+	}
 	return stop
 }
 
@@ -5275,7 +5293,14 @@ func (sc selfState) Run(c *Char, _ []int32) bool {
 		}
 		return true
 	})
-	crun.selfState(v, a, r, ctrl, ffx)
+	if sysCBR.watching {
+		// The CBR AI labels how a character it watches changes state
+		prev := cbrBeginChange(c, crun, unsafe.SliceData([]byte(sc)), v)
+		crun.selfState(v, a, r, ctrl, ffx)
+		cbrEndChange(prev)
+	} else {
+		crun.selfState(v, a, r, ctrl, ffx)
+	}
 	return stop
 }
 

@@ -22,7 +22,20 @@ package cbr
 // character's helpers moving it with a redirected ChangeState, shows its
 // action a frame after its state number (see lateChange in engine.go). The
 // recorder takes that frame as the action's start, judged by the commands
-// active on the frame the change was made.
+// active on the frame the change was made, and by its label.
+//
+// When the engine labels the state changes (CharSnap.Entry), an action of
+// an AI source that the character's own AI made by changing the state
+// directly is judged by its label rather than by the commands (see
+// command.go): one a person's command could have made at that moment
+// (EntryReachable) starts a command case of the character's AI with that
+// command's canonical inputs, a cancel out of an attack included; one no
+// person's command could have made (EntryCheat) is never recorded, and
+// neither is what follows until control returns, nor the cases whose
+// exchange it took part in, whose results it would have made. A change out
+// of an attack labelled as the move's own (EntryAuto) is no cancel, whatever
+// command was active. Other labels, and no label, are judged as described
+// above.
 
 type frameRec struct {
 	tick      int64
@@ -82,10 +95,18 @@ type recorder struct {
 	prevHitPause int32
 
 	// late is set when the last frame recorded showed a late state change
-	// into lateState, with lateCmds the commands active on it.
-	late      bool
-	lateState int32
-	lateCmds  []string
+	// into lateState, with lateCmds the commands active on it and lateEntry
+	// and lateEntryCmd its label.
+	late         bool
+	lateState    int32
+	lateCmds     []string
+	lateEntry    EntryKind
+	lateEntryCmd string
+
+	// cheats holds this round's ticks at which the character's AI made a
+	// move no person's command could have (EntryCheat): an exchange it took
+	// part in credits none of the recorded cases in it (see finalizeCase).
+	cheats []int64
 
 	out []*Case
 }
@@ -125,6 +146,10 @@ type matchLog struct {
 	// observations before it is committed.
 	active map[uint64][]string
 	hypo   []*Case
+	// reach holds the match's cases of the character's AI (SrcCharacterAI),
+	// committed at its end whether or not the source was flagged: the engine
+	// checked each of them on its own.
+	reach []*Case
 }
 
 func (l *matchLog) note(state int32, names []string) {
@@ -255,8 +280,10 @@ func (r *recorder) step(s *Snapshot, f Feat) {
 	late := r.late && lateStart(r.lateState, &prev, self)
 	r.late = false
 	cmds := self.Commands
+	entry, entryCmd := self.Entry, self.EntryCommand
 	if late {
 		cmds = r.lateCmds
+		entry, entryCmd = r.lateEntry, r.lateEntryCmd
 	}
 
 	if r.log.flagged {
@@ -292,15 +319,24 @@ func (r *recorder) step(s *Snapshot, f Feat) {
 	fromCtrl := r.prevCtrl && !self.Ctrl
 	cancel := r.prevMoveType == MtAttack && self.MoveType == MtAttack
 	command := changed && self.MoveType != MtHit && !landing && (fromCtrl || cancel)
+	if command && !fromCtrl && entry == EntryAuto {
+		// The engine's label says the move went on into its next part by
+		// itself, whatever command happened to be active: no cancel.
+		command = false
+	}
 	regain := !r.prevCtrl && self.Ctrl
 
 	r.trackReach(self)
+
+	// An action of an AI source that the character's own AI made by
+	// changing the state directly, which the engine checked (see command.go).
+	decided := command && !r.source.IsHuman() && (entry == EntryReachable || entry == EntryCheat)
 
 	// An action needs a significant command: one with a button or more than
 	// one step. Direction holds are active nearly all the time and explain
 	// only the engine's own direction-driven states (walk, jump, guard).
 	significant := false
-	if command && self.CmdKnown {
+	if command && self.CmdKnown && !decided {
 		if len(cmds) > 0 {
 			if r.source.IsHuman() {
 				r.st.noteCommand(self.StateNo, cmds)
@@ -321,6 +357,22 @@ func (r *recorder) step(s *Snapshot, f Feat) {
 	}
 	if !command {
 		r.noteLate(&prev, self)
+	}
+	if decided && !hasCommand(cmds, entryCmd) {
+		r.st.ChangeStateAI = true // seen changing states directly
+	}
+	if decided && entry == EntryCheat {
+		// Only a direct state change reaches the move: it is no case, and
+		// neither is what follows until control returns.
+		r.cheats = append(r.cheats, tick)
+		r.closeOpen(tick)
+		r.skip = true
+		r.remember(self)
+		return
+	}
+	if decided && entryCmd != "" {
+		// The command that leads to the state, for the command map.
+		r.log.note(self.StateNo, []string{entryCmd})
 	}
 	if r.skip {
 		if !regain {
@@ -344,9 +396,12 @@ func (r *recorder) step(s *Snapshot, f Feat) {
 			a.Commands = cmds
 			act = &a
 		}
-		if significant && r.source.assisted() {
+		switch {
+		case decided:
+			r.openReach(s, act, f, tick, entryCmd)
+		case significant && r.source.assisted():
 			r.openAssisted(s, act, f, tick)
-		} else {
+		default:
 			r.openCommand(s, act, f, tick)
 		}
 	case regain:
@@ -399,19 +454,31 @@ func (r *recorder) unexplainedStart(s *Snapshot, self *CharSnap, f Feat, tick in
 
 // flag marks the source as direct-state-change AI for the rest of the
 // match and drops what it recorded. The engine discards cases it staged
-// from this recorder earlier in the match.
+// from this recorder earlier in the match. Cases of the character's AI
+// whose command the engine checked (SrcCharacterAI) are kept: each was
+// labelled on its own (see openReach).
 func (r *recorder) flag() {
 	r.log.flagged = true
 	r.st.ChangeStateAI = true
 	r.open = nil
 	r.reachCase = nil
-	r.out = nil
+	kept := r.out[:0]
+	for _, c := range r.out {
+		if c.Source == SrcCharacterAI {
+			kept = append(kept, c)
+		}
+	}
+	r.out = kept
 }
 
 // hypothesisCase stores a synthesized case for a state entered by direct
 // state change, when the command map knows which command leads there.
 func (r *recorder) hypothesisCase(self *CharSnap, tick int64) {
 	h := r.st.hypothesis(self.StateNo)
+	if cmds, known := self.Routes.PersonCommands(self.StateNo); known && len(cmds) == 0 {
+		// No person's route leads into the state at all.
+		h.CheatOnly = true
+	}
 	if h.CheatOnly {
 		return
 	}
@@ -485,6 +552,7 @@ func (r *recorder) noteLate(prev, self *CharSnap) {
 	if lateChange(prev, self) {
 		r.late, r.lateState = true, self.StateNo
 		r.lateCmds = append(r.lateCmds[:0], self.Commands...)
+		r.lateEntry, r.lateEntryCmd = self.Entry, self.EntryCommand
 	}
 }
 
@@ -686,25 +754,61 @@ func (r *recorder) openAssisted(s *Snapshot, self *CharSnap, f Feat, tick int64)
 		r.openCommand(s, self, f, tick)
 		return
 	}
+	if c := r.openSynth(self, f, tick, name, r.source); c != nil {
+		if r.log.active == nil {
+			r.log.active = map[uint64][]string{}
+		}
+		r.log.active[c.ID] = append([]string(nil), self.Commands...)
+	}
+}
+
+// openReach starts a command case for an action the character's own AI
+// made by changing the state directly, where the engine found that the
+// person's command name would have made the same change at that moment
+// (EntryReachable): with that command's canonical inputs, as for an
+// assisted source (see openAssisted), as a case of the character's AI
+// (SrcCharacterAI). When the command was active as well, the AI made the
+// command true (the engine AI's command cheat, or AssertCommand) and the
+// case is the assisted source's own, as it would be without the label. An
+// action out of another attack is a cancel case, from that attack (see
+// attackInfo). Nothing is recorded when no inputs are known for the
+// command, nor until control returns.
+func (r *recorder) openReach(s *Snapshot, self *CharSnap, f Feat, tick int64, name string) {
+	src := SrcCharacterAI
+	for _, n := range self.Commands {
+		if n == name && r.source.assisted() {
+			src = r.source
+		}
+	}
+	if mo := r.motions[name]; len(mo.Inputs) == 0 || r.openSynth(self, f, tick, name, src) == nil {
+		r.closeOpen(tick)
+		r.skip = true
+	}
+}
+
+// openSynth starts a command case from source src for an action at tick
+// with the canonical inputs of command name, back-dated by the motion's
+// length (see openAssisted), and returns it; nil when the motion would begin
+// too early or overlap the CBR layer's input, when the recorder closes what
+// is open and holds until control returns.
+func (r *recorder) openSynth(self *CharSnap, f Feat, tick int64, name string, src Source) *Case {
+	mo := r.motions[name]
 	m := mo.Inputs
 	start := tick - int64(len(m)-1)
 	fr, ok := r.at(start)
 	if !ok || start < r.cmdFloor || r.lastDriven(start, tick) >= start || !r.inFight(start-1) {
 		r.closeOpen(tick)
 		r.skip = true
-		return
+		return nil
 	}
 	r.cutFrom(start)
 
 	c := r.newCase(KindCommand, fr)
+	c.Source = src
 	c.Command = name
 	c.ExecFrame = int32(tick - start)
 	c.MoveRef = self.StateNo
 	c.Inputs = append(c.Inputs, m[:len(m)-1]...)
-	if r.log.active == nil {
-		r.log.active = map[uint64][]string{}
-	}
-	r.log.active[c.ID] = append([]string(nil), self.Commands...)
 	r.open, r.openStart = c, start
 	r.cmdFloor = tick + 1
 	r.tail, r.hasTail = m[len(m)-1], true
@@ -712,6 +816,7 @@ func (r *recorder) openAssisted(s *Snapshot, self *CharSnap, f Feat, tick int64)
 	// character; after a direction motion (a dash) it may still be.
 	r.neutralAfterExec = mo.hasButton()
 	r.attackInfo(c, self, f, tick)
+	return c
 }
 
 // attackInfo fills a new command case's attack fields and joins it to the
@@ -762,7 +867,13 @@ func (r *recorder) finalizeCase(c *Case, rc *resolvedChain, pos, n int) {
 	if c == r.open {
 		r.closeOpen(rc.endTick)
 	}
-	if r.log.flagged {
+	if r.log.flagged && c.Source != SrcCharacterAI {
+		return
+	}
+	if r.cheated(rc) {
+		// The character's AI made a move in this exchange that no person's
+		// command could have: the result is not one a person could get.
+		c.Removed = true
 		return
 	}
 	c.ChainID = rc.ch.id
@@ -792,12 +903,24 @@ func (r *recorder) finalizeCase(c *Case, rc *resolvedChain, pos, n int) {
 	r.out = append(r.out, c)
 }
 
+// cheated reports whether the character's AI made a move no person's
+// command could have (see cheats) during a resolved chain's exchange, or on
+// the frames just before it began, when such a move starts the exchange.
+func (r *recorder) cheated(rc *resolvedChain) bool {
+	for _, t := range r.cheats {
+		if t >= rc.ch.startTick-2 && t <= rc.endTick {
+			return true
+		}
+	}
+	return false
+}
+
 // finalizeLoose resolves a neutral case that never joined an exchange.
 func (r *recorder) finalizeLoose(c *Case, tick int64) {
 	if c == r.open {
 		r.closeOpen(tick)
 	}
-	if r.log.flagged {
+	if r.log.flagged && c.Source != SrcCharacterAI {
 		return
 	}
 	if len(c.Inputs) == 0 {
