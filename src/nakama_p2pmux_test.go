@@ -32,10 +32,10 @@ func p2pPair(t *testing.T, candidates func(a, b *NakamaP2P) (forA, forB P2PCandi
 	if candidates != nil {
 		forA, forB = candidates(a, b)
 	}
-	if err := a.HandleSignal(P2PSignal{Magic: p2pMagic, MatchID: "mux-match", Token: b.token, Candidates: []P2PCandidate{forA}}); err != nil {
+	if err := a.HandleSignal(P2PSignal{Magic: p2pMagic, MatchID: "mux-match", Token: b.token, Key: b.publicKey(), Candidates: []P2PCandidate{forA}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := b.HandleSignal(P2PSignal{Magic: p2pMagic, MatchID: "mux-match", Token: a.token, Candidates: []P2PCandidate{forB}}); err != nil {
+	if err := b.HandleSignal(P2PSignal{Magic: p2pMagic, MatchID: "mux-match", Token: a.token, Key: a.publicKey(), Candidates: []P2PCandidate{forB}}); err != nil {
 		t.Fatal(err)
 	}
 	go a.punchLoop()
@@ -180,9 +180,8 @@ func TestP2PStreamCloseNotifiesPeer(t *testing.T) {
 	}
 }
 
-// A hello from a new address after the handshake (the peer's packets taking
-// another path, or its acks were lost) is answered, and that address is then
-// accepted for session traffic.
+// A route the peer's hello arrives on after the handshake is answered and
+// checked; its data counts once the check is answered.
 func TestP2PLateHelloIsAnsweredAndAccepted(t *testing.T) {
 	a, b := p2pPair(t, nil)
 	ga, _, err := a.OpenGameplay()
@@ -197,32 +196,50 @@ func TestP2PLateHelloIsAnsweredAndAccepted(t *testing.T) {
 	}
 	defer other.Close()
 	aAddr := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: a.LocalPort()}
+	noData := func(what string) {
+		t.Helper()
+		_ = ga.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
+		if n, _, err := ga.ReadFrom(make([]byte, 64)); err == nil {
+			t.Fatalf("accepted %d bytes %s", n, what)
+		}
+	}
 
-	// Data from an address that never completed a handshake is ignored.
+	// Data from an address no check verified is ignored, sealed or not; the
+	// peer's (sealed) has that address checked.
 	_, _ = other.WriteToUDP(append([]byte{p2pTagGGPO}, "early"...), aAddr)
-	_ = ga.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
-	if n, _, err := ga.ReadFrom(make([]byte, 16)); err == nil {
-		t.Fatalf("accepted %d bytes from an unknown address", n)
+	noData("in the clear")
+	if got := readPackets(t, other, b); len(got) != 0 {
+		t.Fatalf("answered data in the clear: %+v", got)
+	}
+	_, _ = other.WriteToUDP(sealAs(t, b, append([]byte{p2pTagGGPO}, "early"...)), aAddr)
+	noData("from an address no check verified")
+	if got := readPackets(t, other, b); len(got) != 1 || got[0].Kind != p2pHello {
+		t.Fatalf("answer to the peer's data from an address no check verified: %+v; want a check", got)
 	}
 
-	hello, _ := json.Marshal(p2PPacket{Magic: p2pMagic, Kind: p2pHello, MatchID: "mux-match", Token: b.token})
-	_, _ = other.WriteToUDP(hello, aAddr)
-	_ = other.SetReadDeadline(time.Now().Add(2 * time.Second))
-	buf := make([]byte, 512)
-	n, _, err := other.ReadFromUDP(buf)
-	if err != nil {
-		t.Fatalf("no ack for a late hello: %v", err)
-	}
-	var ack p2PPacket
-	if json.Unmarshal(buf[:n], &ack) != nil || ack.Kind != p2pAck || ack.Token != a.token {
-		t.Fatalf("unexpected reply %q", buf[:n])
+	// A hello in the clear is not answered.
+	clear, _ := json.Marshal(p2PPacket{Magic: p2pMagic, Kind: p2pHello, MatchID: "mux-match", Token: b.token, Nonce: "n"})
+	_, _ = other.WriteToUDP(clear, aAddr)
+	if got := readPackets(t, other, b); len(got) != 0 {
+		t.Fatalf("answered a hello that was not sealed: %+v", got)
 	}
 
-	_, _ = other.WriteToUDP(append([]byte{p2pTagGGPO}, "via-other-path"...), aAddr)
+	// The peer's hello: an ack, and a check of the route it came on.
+	_, _ = other.WriteToUDP(sealAs(t, b, b.handshakePacket(p2pHello, "late")), aAddr)
+	got := readPackets(t, other, b)
+	if len(got) != 2 || got[0].Kind != p2pAck || got[0].Nonce != "late" || got[0].Token != a.token || got[1].Kind != p2pHello {
+		t.Fatalf("answer to a late hello: %+v", got)
+	}
+	_, _ = other.WriteToUDP(sealAs(t, b, append([]byte{p2pTagGGPO}, "too-soon"...)), aAddr)
+	noData("before the route's check was answered")
+
+	_, _ = other.WriteToUDP(sealAs(t, b, b.handshakePacket(p2pAck, got[1].Nonce)), aAddr)
+	_, _ = other.WriteToUDP(sealAs(t, b, append([]byte{p2pTagGGPO}, "via-other-path"...)), aAddr)
+	buf := make([]byte, 64)
 	_ = ga.SetReadDeadline(time.Now().Add(2 * time.Second))
-	n, _, err = ga.ReadFrom(buf)
+	n, _, err := ga.ReadFrom(buf)
 	if err != nil || string(buf[:n]) != "via-other-path" {
-		t.Fatalf("data from the confirmed address: %q %v", buf[:n], err)
+		t.Fatalf("data from the verified address: %q %v", buf[:n], err)
 	}
 }
 
@@ -442,7 +459,7 @@ func TestP2PSignalAddressing(t *testing.T) {
 			t.Fatalf("accepted a signal from %s to %s", sig.From, sig.To)
 		}
 	}
-	if err := p.HandleSignal(P2PSignal{Magic: p2pMagic, MatchID: "lobby", Token: "t3", Candidates: cand, From: "opponent", To: "me"}); err != nil {
+	if err := p.HandleSignal(P2PSignal{Magic: p2pMagic, MatchID: "lobby", Token: "t3", Key: testP2PKey(t), Candidates: cand, From: "opponent", To: "me"}); err != nil {
 		t.Fatal(err)
 	}
 	if p.remoteToken != "t3" {

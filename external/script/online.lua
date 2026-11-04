@@ -10,9 +10,11 @@
 
 local online = {}
 
--- How long each step may take, in frames (60 per second).
+-- How long each step may take, in frames (60 per second). The connection to
+-- the other player tries one way after another for up to 30 seconds (the
+-- engine's p2pDefaultTimeout); p2pFrames leaves it room.
 online.connectFrames = 60 * 15
-online.p2pFrames = 60 * 25
+online.p2pFrames = 60 * 35
 online.sessionFrames = 60 * 15
 
 -- Status and failure texts. A screenpack or module can replace them. In
@@ -26,10 +28,15 @@ online.text = {
 	-- Under searching, in a ranked search: the player's level.
 	searching_level = '{label} {level}',
 	found = 'Opponent found. Opening a connection...',
+	-- Shown instead of found once the direct connection has not worked and
+	-- the game also tries IPv6, a port the router opens and the relay
+	-- through the server (status().p2p_stage).
+	found_other = 'Opponent found. Trying another way to connect...',
 	session = 'Starting the netplay session...',
 	service = 'Could not reach the online service.',
 	match = 'Matchmaking stopped before an opponent was found.',
-	p2p = 'Could not open a connection to the other player.\nOne of the two networks may block direct connections.',
+	p2p = 'Could not open a connection to the other player,\neither directly or through the server.',
+	p2p_old = 'The other player\'s game is an older version.\nBoth players need the latest download.',
 	session_failed = 'The netplay session with the other player could not start.',
 	-- The screen after a ranked set: while it waits for the result, then
 	-- who won it and the player's level before and after it, or another
@@ -90,6 +97,12 @@ local ratingRequest = 0
 -- The text of a status key, with the player's level under "searching" in a
 -- ranked search once the server has sent it.
 function online.f_statusText(key)
+	if key == 'found' and online.text.found_other ~= nil then
+		local stage = status().p2p_stage
+		if stage == 'extras' or stage == 'relay' then
+			key = 'found_other'
+		end
+	end
 	local text = online.text[key] or tostring(key)
 	if key == 'searching' and searchMode == 'ranked' and type(searchRating) == 'table' and searchRating.level_text ~= nil then
 		text = text .. '\n' .. online.f_fill(online.text.searching_level, {label = searchRating.label or '', level = searchRating.level_text})
@@ -281,6 +294,9 @@ function online.f_openSession(interactive, host, draw)
 			return true
 		end
 		if st.p2p == 'failed' or st.p2p == 'closed' or st.match_id == '' then
+			if st.p2p_error == 'old_peer' then
+				return 'p2p_old'
+			end
 			return false
 		end
 	end, draw)
@@ -317,7 +333,8 @@ function online.f_openSession(interactive, host, draw)
 end
 
 -- Matchmaking through to a connected netplay session. Returns true, or false
--- and a reason key: 'service', 'match', 'p2p', 'session_failed' or 'cancel'.
+-- and a reason key: 'service', 'match', 'p2p', 'p2p_old', 'session_failed'
+-- or 'cancel'.
 function online.f_connect(mode, interactive)
 	online.matchMode = mode
 	if not online.f_ensureConnected(interactive) then

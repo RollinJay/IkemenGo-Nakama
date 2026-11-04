@@ -50,9 +50,13 @@ const (
 	p2pPeerSilenceTimeout = 8 * time.Second
 
 	p2pChannelQueue = 1024
-	// KCP segment size. With the tag byte and UDP/IPv4 headers the datagram
-	// stays under 1280 bytes, below common tunnel and PPPoE MTUs.
+	// KCP segment size. With the tag byte, the seal (p2pCrypt: 28 bytes) and
+	// UDP/IPv6 headers the datagram stays under 1280 bytes, the IPv6 minimum
+	// and below common tunnel and PPPoE MTUs.
 	p2pStreamMTU = 1200
+	// The routes a session accepts data from (p2pMux.known), and the routes
+	// its handshake keeps (NakamaP2P.checks), are at most this many.
+	p2pMaxRoutes = 16
 )
 
 // nakamaP2PHostLabel stands in for the host address on the guest's rollback
@@ -61,15 +65,25 @@ const nakamaP2PHostLabel = "nakama-p2p"
 
 var errP2PMuxClosed = errors.New("p2p socket is closed")
 
-// p2pMux reads the punched socket and routes datagrams to channels.
+// p2pMux reads the punched socket and routes datagrams to channels. The
+// session's other paths (the IPv6 socket, the relay) hand it what they read
+// (dispatch), and it sends on the route the handshake completed on (active).
 type p2pMux struct {
-	conn    *net.UDPConn
-	remote  *net.UDPAddr
-	control func(data []byte, from *net.UDPAddr)
+	conn  *net.UDPConn // the IPv4 socket, which run reads
+	udp   *p2pUDPPath  // conn's path, for the routes of what run reads
+	hooks p2pMuxHooks
+	// remote is the peer's address for KCP and GGPO. On the IPv4 socket it is
+	// the peer's real address; on the other paths it is the peer's IPv4
+	// address or a stand-in (see NakamaP2P.peerIPv4), since the rollback
+	// session takes only an IPv4 peer. Either way every send goes out on the
+	// active route, whatever address it names.
+	remote *net.UDPAddr
 
 	mu       sync.Mutex
-	known    []*net.UDPAddr
+	known    []p2pRoute
+	active   p2pRoute
 	channels map[byte]*p2pChannel
+	heard    sync.Once
 
 	runOnce   sync.Once
 	closed    chan struct{}
@@ -85,18 +99,34 @@ type p2pMux struct {
 	rttSamples int
 }
 
-func newP2PMux(conn *net.UDPConn, remote *net.UDPAddr, control func([]byte, *net.UDPAddr)) *p2pMux {
+// p2pMuxHooks connect a mux to its session: control takes the handshake
+// packets the peer sends, open opens a sealed datagram run read from the
+// IPv4 socket (p2pCrypt), and heard runs once, at the peer's first data,
+// which shows its game finished the handshake too. unverified runs when the
+// peer's data comes on a route this side has not verified, and dropped it:
+// the session checks that route (NakamaP2P.recheck). A nil open takes
+// datagrams as they are (tests).
+type p2pMuxHooks struct {
+	control    func(data []byte, from p2pRoute)
+	open       func(sealed []byte) ([]byte, bool)
+	heard      func()
+	unverified func(from p2pRoute)
+}
+
+func newP2PMux(conn *net.UDPConn, udp *p2pUDPPath, remote *net.UDPAddr, route p2pRoute, hooks p2pMuxHooks) *p2pMux {
 	r := *remote
 	m := &p2pMux{
 		conn:     conn,
+		udp:      udp,
+		hooks:    hooks,
 		remote:   &r,
-		control:  control,
+		active:   route,
 		channels: make(map[byte]*p2pChannel),
 		closed:   make(chan struct{}),
 		epoch:    time.Now(),
 	}
 	m.lastRecv.Store(time.Now().UnixNano())
-	m.addKnown(remote)
+	m.addKnown(route)
 	return m
 }
 
@@ -105,29 +135,54 @@ func (m *p2pMux) remoteAddr() *net.UDPAddr {
 	return &r
 }
 
-// addKnown records an address the peer's handshake packets arrived from.
-// The peer may reach us over a different path than the one we send on (LAN
-// versus hairpinned public address), so data from any of them is accepted.
-func (m *p2pMux) addKnown(addr *net.UDPAddr) {
-	if addr == nil {
+// activeRoute is the route the session sends on.
+func (m *p2pMux) activeRoute() p2pRoute {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.active
+}
+
+// addKnown records a route the handshake verified (NakamaP2P.verify): it
+// works both ways, so the peer's data is accepted from it. The peer may send
+// on another route than the one this side sends on (LAN versus hairpinned
+// public address, or the relay while this side sends directly), so data from
+// any verified route is accepted.
+func (m *p2pMux) addKnown(route p2pRoute) {
+	if !route.valid() {
 		return
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for _, k := range m.known {
-		if k.Port == addr.Port && k.IP.Equal(addr.IP) {
+		if k.equal(route) {
 			return
 		}
 	}
-	a := *addr
-	m.known = append(m.known, &a)
+	if len(m.known) < p2pMaxRoutes {
+		m.known = append(m.known, route)
+	}
 }
 
-func (m *p2pMux) isKnown(addr *net.UDPAddr) bool {
+// prefer makes a verified UDP route the route to send on instead of the
+// relay.
+func (m *p2pMux) prefer(route p2pRoute) {
+	if !route.valid() {
+		return
+	}
+	m.addKnown(route)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.active.valid() && p2pPathRank(route.path) > p2pPathRank(m.active.path) {
+		log.Printf("Nakama P2P: %s works too; sending on it instead of %s", route, m.active)
+		m.active = route
+	}
+}
+
+func (m *p2pMux) isKnown(route p2pRoute) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for _, k := range m.known {
-		if k.Port == addr.Port && k.IP.Equal(addr.IP) {
+		if k.equal(route) {
 			return true
 		}
 	}
@@ -160,29 +215,51 @@ func (m *p2pMux) run(readMu *sync.Mutex) {
 			}
 			return
 		}
-		if n == 0 {
-			continue
+		data := buf[:n]
+		if m.hooks.open != nil {
+			var ok bool
+			if data, ok = m.hooks.open(data); !ok {
+				continue
+			}
 		}
-		switch buf[0] {
-		case '{':
-			if m.control != nil {
-				m.control(append([]byte(nil), buf[:n]...), from)
+		m.dispatch(data, p2pRoute{path: m.udp, addr: from})
+	}
+}
+
+// dispatch handles one datagram from the peer, opened, read on any of the
+// session's paths. It copies what it keeps, so the caller may reuse data.
+func (m *p2pMux) dispatch(data []byte, from p2pRoute) {
+	if len(data) == 0 {
+		return
+	}
+	switch data[0] {
+	case '{':
+		if m.hooks.control != nil {
+			m.hooks.control(append([]byte(nil), data...), from)
+		}
+	case p2pTagControl, p2pTagStream, p2pTagGGPO:
+		if !m.isKnown(from) {
+			// The peer's data, since it opened, on a route the peer verified
+			// and this side has not: this side's check of it may have been
+			// lost.
+			if m.hooks.unverified != nil {
+				m.hooks.unverified(from)
 			}
-		case p2pTagControl, p2pTagStream, p2pTagGGPO:
-			if !m.isKnown(from) {
-				continue
-			}
-			m.lastRecv.Store(time.Now().UnixNano())
-			if buf[0] == p2pTagControl {
-				m.handleControl(buf[1:n])
-				continue
-			}
-			m.mu.Lock()
-			ch := m.channels[buf[0]]
-			m.mu.Unlock()
-			if ch != nil {
-				ch.deliver(append([]byte(nil), buf[1:n]...))
-			}
+			return
+		}
+		m.lastRecv.Store(time.Now().UnixNano())
+		if m.hooks.heard != nil {
+			m.heard.Do(m.hooks.heard)
+		}
+		if data[0] == p2pTagControl {
+			m.handleControl(data[1:])
+			return
+		}
+		m.mu.Lock()
+		ch := m.channels[data[0]]
+		m.mu.Unlock()
+		if ch != nil {
+			ch.deliver(append([]byte(nil), data[1:]...))
 		}
 	}
 }
@@ -190,6 +267,8 @@ func (m *p2pMux) run(readMu *sync.Mutex) {
 func (m *p2pMux) keepalive() {
 	ticker := time.NewTicker(p2pKeepaliveInterval / 2)
 	defer ticker.Stop()
+	// A ping at once tells the peer this side is ready (p2pMuxHooks.heard).
+	_ = m.sendPing()
 	for {
 		select {
 		case <-m.closed:
@@ -199,14 +278,14 @@ func (m *p2pMux) keepalive() {
 			// out when the ping could not be sent.
 			_ = m.sendPing()
 			if time.Since(time.Unix(0, m.lastSend.Load())) >= p2pKeepaliveInterval {
-				_ = m.send(p2pTagControl, []byte{p2pCtrlKeepalive}, m.remote)
+				_ = m.send(p2pTagControl, []byte{p2pCtrlKeepalive})
 			}
 			if time.Since(time.Unix(0, m.lastRecv.Load())) >= p2pPeerSilenceTimeout {
 				m.mu.Lock()
 				ch := m.channels[p2pTagStream]
 				m.mu.Unlock()
 				if ch != nil {
-					log.Printf("Nakama P2P: nothing received from %s for %v; closing the netplay stream", m.remote, p2pPeerSilenceTimeout)
+					log.Printf("Nakama P2P: nothing received over %s for %v; closing the netplay stream", m.activeRoute(), p2pPeerSilenceTimeout)
 					_ = ch.Close()
 				}
 			}
@@ -218,7 +297,7 @@ func (m *p2pMux) sendPing() error {
 	msg := make([]byte, 9)
 	msg[0] = p2pCtrlPing
 	binary.LittleEndian.PutUint64(msg[1:], uint64(time.Since(m.epoch)))
-	return m.send(p2pTagControl, msg, m.remote)
+	return m.send(p2pTagControl, msg)
 }
 
 // addRTTSample folds one measured round trip into the smoothed value.
@@ -251,7 +330,7 @@ func (m *p2pMux) handleControl(data []byte) {
 	case p2pCtrlPing:
 		if len(data) >= 9 {
 			pong := append([]byte{p2pCtrlPong}, data[1:9]...)
-			_ = m.send(p2pTagControl, pong, m.remote)
+			_ = m.send(p2pTagControl, pong)
 		}
 	case p2pCtrlPong:
 		if len(data) >= 9 {
@@ -272,7 +351,9 @@ func (m *p2pMux) handleControl(data []byte) {
 	}
 }
 
-func (m *p2pMux) send(tag byte, payload []byte, to *net.UDPAddr) error {
+// send writes one tagged datagram on the active route. There is one peer,
+// so every channel's traffic goes to it, whatever address KCP or GGPO named.
+func (m *p2pMux) send(tag byte, payload []byte) error {
 	select {
 	case <-m.closed:
 		return errP2PMuxClosed
@@ -281,7 +362,7 @@ func (m *p2pMux) send(tag byte, payload []byte, to *net.UDPAddr) error {
 	pkt := make([]byte, 1+len(payload))
 	pkt[0] = tag
 	copy(pkt[1:], payload)
-	if _, err := m.conn.WriteToUDP(pkt, to); err != nil {
+	if err := m.activeRoute().send(pkt); err != nil {
 		return err
 	}
 	m.lastSend.Store(time.Now().UnixNano())
@@ -292,7 +373,7 @@ func (m *p2pMux) sendBye(conv uint32) {
 	msg := []byte{p2pCtrlBye, 0, 0, 0, 0}
 	binary.LittleEndian.PutUint32(msg[1:], conv)
 	for i := 0; i < 3; i++ {
-		_ = m.send(p2pTagControl, msg, m.remote)
+		_ = m.send(p2pTagControl, msg)
 	}
 }
 
@@ -420,11 +501,10 @@ func (c *p2pChannel) WriteTo(b []byte, addr net.Addr) (int, error) {
 		return 0, net.ErrClosed
 	default:
 	}
-	to, ok := addr.(*net.UDPAddr)
-	if !ok || to == nil {
+	if to, ok := addr.(*net.UDPAddr); !ok || to == nil {
 		return 0, errors.New("p2p channel needs a UDP destination")
 	}
-	if err := c.mux.send(c.tag, b, to); err != nil {
+	if err := c.mux.send(c.tag, b); err != nil {
 		return 0, err
 	}
 	return len(b), nil

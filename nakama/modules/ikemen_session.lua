@@ -1,9 +1,12 @@
 local nk = require("nakama")
 local ranked = require("ikemen_ranked")
+local p2p_relay = require("ikemen_relay")
 
 -- IKEMEN GO matchmaking/session coordination match.
 -- This match is a Nakama relay for P2P signaling and delayed replay chunks.
--- It does not carry the GGPO gameplay stream.
+-- It does not carry the GGPO gameplay stream. When the players' P2P session
+-- falls back to a relay through the server, the session makes the relay match
+-- that carries it, for its two players alone (ikemen_relay.lua).
 --
 -- In a ranked session (mode "ranked"), it also follows the session's ranked
 -- sets (ikemen_ranked.lua) and keeps both players' replay streams instead of
@@ -671,10 +674,25 @@ local function match_terminate(context, dispatcher, tick, state, grace_seconds)
     return nil
 end
 
--- ikemen_rating.lua signals {kind = "ranked_claim", set} when both players
--- have claimed the result of a set (it is settled or disputed): the set is
--- decided.
+-- Whether the session paired players a and b, for their relay: both are in
+-- the session, and the matchmaker matched both into it when it made it.
+local function paired(state, a, b)
+    if state.players[a] == nil or state.players[b] == nil then
+        return false
+    end
+    return next(state.expected) == nil or (state.expected[a] == true and state.expected[b] == true)
+end
+
+-- ikemen_relay.lua's RPC signals {kind = "ikemen-relay", user_id, peer_id}
+-- for the relay of two players: the answer is the relay's match id, or a
+-- refusal. ikemen_rating.lua signals {kind = "ranked_claim", set} when both
+-- players have claimed the result of a set (it is settled or disputed): the
+-- set is decided.
 local function match_signal(context, dispatcher, tick, state, data)
+    local answer = p2p_relay.answer(context, state, data, function(a, b) return paired(state, a, b) end)
+    if answer ~= nil then
+        return state, answer
+    end
     local ok, sig = pcall(nk.json_decode, data or "")
     if ok and type(sig) == "table" and sig.kind == "ranked_claim" and tonumber(sig.set) == state.set_no then
         set_decided(state)

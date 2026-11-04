@@ -93,7 +93,26 @@ func (h *nakamaLuaHandlers) forEvent(event string) []*lua.LFunction {
 	return out
 }
 
+// runBeforeLuaExit makes Lua's os.exit call before first. gopher-lua's
+// os.exit ends the process at once, past System.shutdown, and the scripts
+// end the game that way (the window closed in a fight, the end of a
+// -nakama-match run).
+func runBeforeLuaExit(l *lua.LState, before func()) {
+	osLib, ok := l.GetGlobal("os").(*lua.LTable)
+	if !ok {
+		return
+	}
+	if exit, ok := osLib.RawGetString("exit").(*lua.LFunction); ok && exit.IsG {
+		osLib.RawSetString("exit", l.NewFunction(func(l *lua.LState) int {
+			before()
+			return exit.GFunction(l)
+		}))
+	}
+}
+
 func nakamaScriptInit(l *lua.LState) {
+	// The router ports P2P sessions opened close when the game exits.
+	runBeforeLuaExit(l, releaseRouterPorts)
 	api := l.NewTable()
 	callbacks := newNakamaLuaHandlers()
 	// The answers to ranked claims (nakama_ranked_queue.go) reach Lua as
@@ -357,6 +376,15 @@ func nakamaScriptInit(l *lua.LState) {
 			p2pRTT = int(st.P2PRTT / time.Millisecond)
 		}
 		t.RawSetString("p2p_rtt_ms", lua.LNumber(p2pRTT))
+		// p2p_stage: what the P2P handshake tries by now: direct, extras
+		// (also IPv6 and a port the router opens) or relay (also the relay
+		// through the server). p2p_route: what the connection runs over once
+		// made: direct, ipv6 or relay; "" before.
+		t.RawSetString("p2p_stage", lua.LString(st.P2PStage))
+		t.RawSetString("p2p_route", lua.LString(st.P2PRoute))
+		// p2p_error: why the P2P handshake failed, when known: "old_peer"
+		// (the other player's game is an older version); "" otherwise.
+		t.RawSetString("p2p_error", lua.LString(st.P2PError))
 		// netplay: none, connecting, connected or failed (session handshake
 		// over the P2P stream; see nakama.enterNetPlay).
 		netplay := "none"

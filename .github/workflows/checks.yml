@@ -1,7 +1,7 @@
 # Checks every pull request (dependabot's included) and every push to the
-# main branches: module files, formatting, the CBR package's tests, and a
-# Linux build with the engine's tests. Release packages for every platform
-# come from releases.yml.
+# main branches: module files, formatting, the CBR and portmap packages'
+# tests, and a Linux build with the engine's tests. Release packages for
+# every platform come from releases.yml.
 on:
   push:
     branches: [ main, develop ]
@@ -19,7 +19,7 @@ concurrency:
 
 jobs:
   go:
-    name: module files, formatting and CBR tests
+    name: module files, formatting, CBR and portmap tests
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
@@ -50,6 +50,12 @@ jobs:
         run: |
           go vet ./src/cbr/...
           go test ./src/cbr/...
+
+      # Router port mapping, against fake routers on localhost.
+      - name: Portmap package
+        run: |
+          go vet ./src/portmap/...
+          go test -race ./src/portmap/...
 
   linux:
     name: Linux build and engine tests

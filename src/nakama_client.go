@@ -307,6 +307,7 @@ const (
 	nakamaLobbyResultOp     uint32 = 0x494B_4C11
 	nakamaRematchChoiceOp   uint32 = 0x494B_5243
 	nakamaRematchDecisionOp uint32 = 0x494B_5244
+	nakamaRelayOp           uint32 = 0x494B_524C
 )
 
 type NakamaEvent struct {
@@ -343,9 +344,18 @@ type NakamaClient struct {
 	// pendingSignal holds a peer signal that arrived before StartP2P.
 	pendingSignal   *P2PSignal
 	pendingSignalAt time.Time
-	refreshMu       sync.Mutex
-	pairing         *NakamaPairing
-	lastError       string
+	// The relays P2P sessions fall back to (nakama_relay.go): by the cid of
+	// the request joining one until the server answers, then by match id.
+	// relayServer holds the id of every server relay this client asked to
+	// join, whose messages are the relays' alone.
+	relayMu      sync.Mutex
+	relayByCID   map[string]*nakamaRelay
+	relayByMatch map[string]*nakamaRelay
+	relayGivenUp map[string]string // cid -> relay name of joins given up on
+	relayServer  map[string]struct{}
+	refreshMu    sync.Mutex
+	pairing      *NakamaPairing
+	lastError    string
 	// connection: wired, wifi, mobile or "" (nakama_netkind.go).
 	connection    string
 	displayName   string // the online name as last read or set (nakama_account.go)
@@ -633,6 +643,9 @@ func (n *NakamaClient) disconnect(keepSession bool) {
 		replays = append(replays, n.replay)
 	}
 	n.mu.Unlock()
+	// The server leaves the relayed matches with the connection; a session
+	// on the relay then ends when the peer falls silent (p2pMux.keepalive).
+	n.dropRelays(errors.New("the connection to the server ended"))
 	if p != nil {
 		p.Close()
 	}
@@ -675,6 +688,7 @@ func (n *NakamaClient) StartP2P(localPort int, stunServers []string) error {
 	if err != nil {
 		return err
 	}
+	p.SetRelay(n)
 	selfID := ""
 	if session := n.Session(); session != nil {
 		selfID = session.UserID
@@ -812,6 +826,14 @@ type NakamaStatus struct {
 	// P2PRTT is the round trip to the paired player over the P2P path; zero
 	// until measured.
 	P2PRTT time.Duration
+	// P2PStage is the handshake's latest step ("direct", "extras" or
+	// "relay", see NakamaP2P.punchLoop) and P2PRoute the path the session
+	// runs over once connected ("direct", "ipv6" or "relay"). P2PError says
+	// why the handshake failed, when known: "old_peer" (the other player's
+	// game is an older version).
+	P2PStage string
+	P2PRoute string
+	P2PError string
 }
 
 func (n *NakamaClient) Status() NakamaStatus {
@@ -832,6 +854,11 @@ func (n *NakamaClient) Status() NakamaStatus {
 	}
 	if p != nil {
 		st.P2P = p.State()
+		st.P2PStage = p.Stage()
+		st.P2PRoute = p.Route()
+		if p.OldPeer() {
+			st.P2PError = "old_peer"
+		}
 		if rtt, samples := p.RTT(); samples > 0 {
 			st.P2PRTT = rtt
 		}
@@ -1570,6 +1597,11 @@ func (n *NakamaClient) handleJSON(data []byte) {
 		n.emit(NakamaEvent{Type: "error", Error: fmt.Errorf("decode nakama realtime message: %w", err)})
 		return
 	}
+	// Messages about a P2P session's relay first: joining it must not make it
+	// the client's match, and its datagrams are for the session, not Lua.
+	if n.handleRelay(raw) {
+		return
+	}
 	if v, ok := raw["matchmaker_ticket"]; ok {
 		var p struct {
 			Ticket string `json:"ticket"`
@@ -1687,8 +1719,14 @@ func (n *NakamaClient) handleJSON(data []byte) {
 		case nakamaSignalOp:
 			// Applied here, off the Lua thread, so the handshake does not wait on
 			// the main-thread queue; signals that arrive before StartP2P are kept.
+			// The server names the member who sent the message (the server
+			// modules forward signals with their sender): a signal without
+			// that name, or that names someone else as its sender, was forged
+			// by another member of the match, and is dropped.
 			var signal P2PSignal
-			if err := json.Unmarshal(p.BinaryData, &signal); err == nil {
+			sender := p.Presence.UserID
+			if err := json.Unmarshal(p.BinaryData, &signal); err == nil && sender != "" && (signal.From == "" || signal.From == sender) {
+				signal.From = sender
 				n.deliverSignal(signal)
 			}
 		case nakamaRematchDecisionOp:
