@@ -1,10 +1,14 @@
 local nk = require("nakama")
+local p2p_relay = require("ikemen_relay")
 
 -- IKEMEN GO authoritative lobby.
 --
 -- The lobby owns membership, settings, ready states and 1v1 scheduling. It
 -- does not simulate gameplay: the two players of a pairing open a P2P
--- netplay session between themselves and report the result here.
+-- netplay session between themselves and report the result here. When that
+-- session falls back to a relay through the server, the lobby makes the relay
+-- match that carries it, for the pairing's two players alone
+-- (ikemen_relay.lua).
 --
 -- Phases
 --   waiting   no match is running; members ready up
@@ -1782,7 +1786,24 @@ local function match_terminate(context, dispatcher, tick, state, grace_seconds)
     return nil
 end
 
+-- Whether a and b are the pairing playing now, for their relay: the current
+-- match's two players, both in the lobby.
+local function playing(state, a, b)
+    local current = state.current_match
+    if current == nil or state.players[a] == nil or state.players[b] == nil then
+        return false
+    end
+    return (current.player1 == a and current.player2 == b) or (current.player1 == b and current.player2 == a)
+end
+
+-- ikemen_relay.lua's RPC signals {kind = "ikemen-relay", user_id, peer_id}
+-- for the relay of two players: the answer is the relay's match id, or a
+-- refusal.
 local function match_signal(context, dispatcher, tick, state, data)
+    local answer = p2p_relay.answer(context, state, data, function(a, b) return playing(state, a, b) end)
+    if answer ~= nil then
+        return state, answer
+    end
     return state, data
 end
 

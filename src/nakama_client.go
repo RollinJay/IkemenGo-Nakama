@@ -344,13 +344,15 @@ type NakamaClient struct {
 	// pendingSignal holds a peer signal that arrived before StartP2P.
 	pendingSignal   *P2PSignal
 	pendingSignalAt time.Time
-	// The relayed matches P2P sessions fall back to (nakama_relay.go): by
-	// the cid of the request joining one until the server answers, then by
-	// match id.
+	// The relays P2P sessions fall back to (nakama_relay.go): by the cid of
+	// the request joining one until the server answers, then by match id.
+	// relayServer holds the id of every server relay this client asked to
+	// join, whose messages are the relays' alone.
 	relayMu      sync.Mutex
 	relayByCID   map[string]*nakamaRelay
 	relayByMatch map[string]*nakamaRelay
 	relayGivenUp map[string]string // cid -> relay name of joins given up on
+	relayServer  map[string]struct{}
 	refreshMu    sync.Mutex
 	pairing      *NakamaPairing
 	lastError    string

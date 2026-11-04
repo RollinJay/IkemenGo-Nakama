@@ -16,9 +16,9 @@ import (
 //	direct  the IPv4 UDP socket: host and STUN candidates, and the candidate
 //	        a router opened with PCP, NAT-PMP or UPnP
 //	ipv6    a second UDP socket for IPv6 host candidates, which need no NAT
-//	relay   a Nakama relayed match the two players join, used when no UDP
-//	        path works: the server forwards each datagram over the players'
-//	        realtime sockets
+//	relay   a match on the Nakama server that the two players join, used
+//	        when no UDP path works: the server forwards each datagram over
+//	        the players' realtime sockets
 //
 // Every path carries the same datagrams (handshake JSON and the mux's tagged
 // frames), sealed (p2pCrypt), so the handshake and the mux do not depend on
@@ -154,14 +154,29 @@ func (p *p2pUDPPath) write(b []byte, to net.Addr) error {
 	return err
 }
 
-// p2pRelayer joins the Nakama relayed match a session falls back to. The
-// Nakama client implements it; deliver receives each datagram the peer sends.
+// p2pRelayer joins the relay a session falls back to. The Nakama client
+// implements it; deliver receives each datagram the peer sends.
 type p2pRelayer interface {
-	JoinRelay(name, peerUserID string, deliver func([]byte)) (p2pRelayLink, error)
+	JoinRelay(req p2pRelayRequest, deliver func([]byte)) (p2pRelayLink, error)
+}
+
+// p2pRelayRequest names the relay of a session.
+type p2pRelayRequest struct {
+	// MatchID is the session's match, a lobby or a matchmaker session, which
+	// paired the two players and makes the server's relay for them.
+	MatchID string
+	// Name is the Nakama relayed match the two players meet in instead
+	// (p2pKeys.relayName).
+	Name string
+	// Peer is the other player's user id: only its datagrams are delivered.
+	Peer string
+	// Server: both games ask for the server's relay first (both signals say
+	// so, P2PSignal.ServerRelay).
+	Server bool
 }
 
 // p2pRelayLink is a joined relay: Send forwards one datagram to the peer,
-// Close leaves the relayed match.
+// Close leaves the relay's match.
 type p2pRelayLink interface {
 	Send(b []byte) error
 	Close() error

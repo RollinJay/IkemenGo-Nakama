@@ -228,7 +228,7 @@ For you, as the server's host:
 - Anyone can create accounts, as many as they like, and pick their names; there is no limit on how fast. Watch the console, and ban whoever abuses it.
 - The server sees what players do on it: accounts, names, chat, matchmaking, ranked claims and the ranked sets' replays. It does not see the fights: they are sealed between the two players' games, and when the server relays a fight it passes on what it cannot read (roughly a few tens of kilobytes per second each way for each relayed fight, an estimate).
 - A home server shows your home's address to everyone, and an attack on the server takes your home connection down with it; a VPS avoids both.
-- A known limit: any signed-in player can find the relayed match a fight falls back to and join it. They can neither read nor change the fight, but they can flood the two players with data of their own and spoil that fight.
+- A fight that falls back to the relay runs through a relay match that only its two players can join, once your server has this fork's `ikemen_relay.lua` module and both players' games are current. A known limit until then: a fight where either game is older, or on a server without that module, runs through a Nakama relayed match instead, which any signed-in player can find and join. They can neither read nor change the fight, but they can flood the two players with data of their own and spoil that fight.
 
 For your players, [Security and privacy](README.md#security-and-privacy) says what the game protects and what it shows to whom; it is worth telling them.
 

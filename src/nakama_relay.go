@@ -1,31 +1,48 @@
 package main
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
+	"net/http"
 	"strings"
 	"sync"
 	"time"
 )
 
 // A P2P session that finds no UDP path to the peer falls back to a relay
-// (nakama_p2ppath.go): a Nakama relayed match that the two players join,
-// whose server forwards each datagram one sends to the other. Nakama relays
-// match data to the match's other presences at once, without an
-// authoritative handler's tick, and needs no server module for it.
+// (nakama_p2ppath.go): a match on the Nakama server that the two players
+// join, which forwards each datagram one sends to the other. It is the
+// server's relay when the server has one (nakama/modules/ikemen_relay.lua):
+// the session's match, a lobby or a matchmaker session, makes it for the two
+// players it paired, and it admits them alone and limits what each sends. On
+// a server without that module, or with a peer whose game predates it (its
+// signal says so, P2PSignal.ServerRelay), the relay is a Nakama relayed match
+// that the two create under the same name. Nakama forwards a relayed match's
+// data at once, without an authoritative handler's tick, and needs no server
+// module for it, but anyone who learns its id can join it.
 //
-// The relay is not the client's match (n.matchID): the session's match, a
-// lobby or a matchmaker session, stays what it was. handleRelay therefore
-// takes the server's answers about it before handleJSON looks at them, and
-// every message from a relayed match too: the game's own matches are
-// authoritative, and anyone can join a relayed match by its id.
+// The relay is not the client's match (n.matchID): the session's match stays
+// what it was. handleRelay therefore takes the server's answers about it
+// before handleJSON looks at them, and every message from a relay too: from
+// each server relay this client asked to join, which it knows by the id the
+// server gave it, and from any relayed match, since anyone can join one by
+// its id.
 
-// nakamaRelayJoinTimeout bounds the wait for the server's answer to joining.
+// nakamaRelayJoinTimeout bounds the wait for the server's answer to joining,
+// and to the request for its relay.
 const nakamaRelayJoinTimeout = 5 * time.Second
 
-// nakamaRelay is one joined relayed match; it implements p2pRelayLink.
+// nakamaRelayRPC asks a session or lobby for the server's relay of a pair.
+const nakamaRelayRPC = "ikemen_relay"
+
+// errNakamaNoServerRelay: the server has no relay module.
+var errNakamaNoServerRelay = errors.New("the server has no relay of its own")
+
+// nakamaRelay is one joined relay; it implements p2pRelayLink.
 type nakamaRelay struct {
 	client    *NakamaClient
 	cid       string
@@ -37,16 +54,67 @@ type nakamaRelay struct {
 	closeOnce sync.Once
 }
 
-// JoinRelay implements p2pRelayer. It creates the relayed match of the given
-// name, or joins it when the peer created it first: Nakama gives a relayed
-// match created with a name the id derived from that name. Only datagrams
-// from peerUserID reach deliver.
-func (n *NakamaClient) JoinRelay(name, peerUserID string, deliver func([]byte)) (p2pRelayLink, error) {
+// JoinRelay implements p2pRelayer. With req.Server it asks the session's
+// match (req.MatchID) for the server's relay of this player and req.Peer, and
+// joins it. Without, and on a server without the relay module, it creates the
+// relayed match req.Name, or joins it when the peer created it first: Nakama
+// gives a relayed match created with a name the id derived from that name.
+// Only datagrams from req.Peer reach deliver.
+func (n *NakamaClient) JoinRelay(req p2pRelayRequest, deliver func([]byte)) (p2pRelayLink, error) {
+	if req.Server {
+		id, err := n.requestServerRelay(req.MatchID, req.Peer)
+		if err == nil {
+			return n.joinRelay(req, deliver, id, "match_join", map[string]any{"match_id": id})
+		}
+		if !errors.Is(err, errNakamaNoServerRelay) {
+			return nil, err
+		}
+		log.Printf("Nakama P2P: the server has no relay of its own; joining a relayed match")
+	}
+	return n.joinRelay(req, deliver, "", "match_create", map[string]any{"name": req.Name})
+}
+
+// requestServerRelay asks the session's match (matchID) for the server's
+// relay of this player and peer (the ikemen_relay RPC), and returns the
+// relay's match id: errNakamaNoServerRelay on a server without the RPC.
+func (n *NakamaClient) requestServerRelay(matchID, peer string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), nakamaRelayJoinTimeout)
+	defer cancel()
+	body, err := n.CallRPC(ctx, nakamaRelayRPC, map[string]string{"match_id": matchID, "peer_id": peer})
+	if err != nil {
+		if nakamaRPCMissing(err) {
+			return "", errNakamaNoServerRelay
+		}
+		return "", fmt.Errorf("the server's relay: %w", err)
+	}
+	var reply struct {
+		MatchID string `json:"match_id"`
+	}
+	// The relay is an authoritative match of its own.
+	if json.Unmarshal(body, &reply) != nil || !nakamaAuthoritativeMatchID(reply.MatchID) ||
+		reply.MatchID == matchID || reply.MatchID == n.CurrentMatchID() {
+		return "", fmt.Errorf("the server's answer names no relay: %.200s", body)
+	}
+	return reply.MatchID, nil
+}
+
+// nakamaRPCMissing reports whether err says the server has no such RPC:
+// Nakama answers a call of an RPC that no module registered with "not found"
+// (code 5, HTTP 404), which ikemen_relay never answers with.
+func nakamaRPCMissing(err error) bool {
+	var rpcErr *NakamaRPCError
+	return errors.As(err, &rpcErr) && (rpcErr.Code == 5 || rpcErr.Status == http.StatusNotFound)
+}
+
+// joinRelay sends the request joining a relay (field, payload) and waits for
+// the server's answer. serverID is the server relay's match id, "" for a
+// relayed match.
+func (n *NakamaClient) joinRelay(req p2pRelayRequest, deliver func([]byte), serverID, field string, payload map[string]any) (p2pRelayLink, error) {
 	r := &nakamaRelay{
 		client:  n,
 		cid:     "ikemen-relay-" + strings.TrimPrefix(n.nextCID(), "ikemen-"),
-		name:    name,
-		peer:    peerUserID,
+		name:    req.Name,
+		peer:    req.Peer,
 		deliver: deliver,
 		joined:  make(chan error, 1),
 	}
@@ -56,8 +124,17 @@ func (n *NakamaClient) JoinRelay(name, peerUserID string, deliver func([]byte)) 
 		n.relayByMatch = map[string]*nakamaRelay{}
 	}
 	n.relayByCID[r.cid] = r
+	if serverID != "" {
+		// What comes from it is the relay's from now on, and for good:
+		// messages it sent may still come after the client left it, and its
+		// id never names another match.
+		if n.relayServer == nil {
+			n.relayServer = map[string]struct{}{}
+		}
+		n.relayServer[serverID] = struct{}{}
+	}
 	n.relayMu.Unlock()
-	if err := n.sendEnvelopeCID(r.cid, "match_create", map[string]any{"name": name}); err != nil {
+	if err := n.sendEnvelopeCID(r.cid, field, payload); err != nil {
 		n.forgetRelay(r)
 		return nil, err
 	}
@@ -79,7 +156,7 @@ func (n *NakamaClient) JoinRelay(name, peerUserID string, deliver func([]byte)) 
 		if n.relayGivenUp == nil {
 			n.relayGivenUp = map[string]string{}
 		}
-		n.relayGivenUp[r.cid] = name
+		n.relayGivenUp[r.cid] = req.Name
 	}
 	n.relayMu.Unlock()
 	if !pending {
@@ -95,11 +172,30 @@ func (n *NakamaClient) JoinRelay(name, peerUserID string, deliver func([]byte)) 
 
 // nakamaRelayedMatchID reports whether id names a relayed match: Nakama
 // writes a match id as "<uuid>.<node>", and a relayed match has no node.
-// The game's own matches, lobbies and sessions, are authoritative and always
-// have one.
+// The game's own matches, lobbies, sessions and the server's relays, are
+// authoritative and always have one.
 func nakamaRelayedMatchID(id string) bool {
 	_, node, ok := strings.Cut(id, ".")
 	return ok && node == ""
+}
+
+// nakamaAuthoritativeMatchID reports whether id names an authoritative match:
+// "<uuid>.<node>", with a node.
+func nakamaAuthoritativeMatchID(id string) bool {
+	uuid, node, ok := strings.Cut(id, ".")
+	return ok && uuid != "" && node != ""
+}
+
+// relayMatch reports whether matchID is a relay's: any relayed match, and
+// each server relay this client asked to join.
+func (n *NakamaClient) relayMatch(matchID string) bool {
+	if nakamaRelayedMatchID(matchID) {
+		return true
+	}
+	n.relayMu.Lock()
+	defer n.relayMu.Unlock()
+	_, ok := n.relayServer[matchID]
+	return ok
 }
 
 func (n *NakamaClient) forgetRelay(r *nakamaRelay) {
@@ -114,7 +210,9 @@ func (n *NakamaClient) forgetRelay(r *nakamaRelay) {
 }
 
 // dropRelays forgets every relay: the connection that carried them ended.
-// A join still waiting for its answer fails with err.
+// A join still waiting for its answer fails with err. The server relays' ids
+// stay the relays' (relayMatch): what the connection read last may still be
+// handled after this.
 func (n *NakamaClient) dropRelays(err error) {
 	n.relayMu.Lock()
 	pending := make([]*nakamaRelay, 0, len(n.relayByCID))
@@ -134,8 +232,8 @@ func (n *NakamaClient) dropRelays(err error) {
 }
 
 // handleRelay takes the server's messages about the relays: the answer to
-// joining one, and every message from a relayed match. It reports whether
-// the message was one of those.
+// joining one, and every message from a relay's match (relayMatch). It
+// reports whether the message was one of those.
 func (n *NakamaClient) handleRelay(raw map[string]json.RawMessage) bool {
 	// Answers to joining a relay come first, whether or not a join still
 	// waits for them: one the client gave up on must not reach handleJSON,
@@ -153,13 +251,17 @@ func (n *NakamaClient) handleRelay(raw map[string]json.RawMessage) bool {
 				r.joined <- n.relayJoined(r, raw)
 				return true
 			}
-			// The answer to a join given up on: leave what it joined, unless
-			// a later join of the same relay holds it (the same name gives
-			// the same match, and leaving would take the client out).
+			// The answer to a join given up on: leave the relayed match it
+			// joined, unless a later join of the same relay holds it (the
+			// same name gives the same match, and leaving would take the
+			// client out). A server relay is not left: a player who leaves
+			// it ends it for the other player too, and a later join of the
+			// session's relay, which the server gives again while it runs,
+			// finds the client in it.
 			var m struct {
 				MatchID string `json:"match_id"`
 			}
-			if v, ok := raw["match"]; ok && givenUp && json.Unmarshal(v, &m) == nil && m.MatchID != "" && !n.relayHeld(m.MatchID, name) {
+			if v, ok := raw["match"]; ok && givenUp && json.Unmarshal(v, &m) == nil && nakamaRelayedMatchID(m.MatchID) && !n.relayHeld(m.MatchID, name) {
 				_ = n.sendEnvelope("match_leave", map[string]any{"match_id": m.MatchID})
 			}
 			return true
@@ -174,16 +276,16 @@ func (n *NakamaClient) handleRelay(raw map[string]json.RawMessage) bool {
 				UserID string `json:"user_id"`
 			} `json:"presence"`
 		}
-		if json.Unmarshal(v, &p) != nil || !nakamaRelayedMatchID(p.MatchID) {
+		if json.Unmarshal(v, &p) != nil || !n.relayMatch(p.MatchID) {
 			return false
 		}
 		// Anyone can join a relayed match by its id, and write the id in
-		// another way that Nakama accepts and passes on as written. So the
-		// data of a relayed match never reaches the client's handlers, and
-		// only the peer's data on a relay this client is in, under the id the
-		// server gave it, reaches the session: the server names the sender,
-		// and nobody can pass for another player. What is passed on still has
-		// to open (p2pCrypt).
+		// another way that Nakama accepts and passes on as written; a server
+		// relay admits the two players alone. Either way the data of a relay
+		// never reaches the client's handlers, and only the peer's data on a
+		// relay this client is in, under the id the server gave it, reaches
+		// the session: the server names the sender, and nobody can pass for
+		// another player. What is passed on still has to open (p2pCrypt).
 		n.relayMu.Lock()
 		r := n.relayByMatch[p.MatchID]
 		n.relayMu.Unlock()
@@ -198,7 +300,7 @@ func (n *NakamaClient) handleRelay(raw map[string]json.RawMessage) bool {
 		var p struct {
 			MatchID string `json:"match_id"`
 		}
-		return json.Unmarshal(v, &p) == nil && nakamaRelayedMatchID(p.MatchID)
+		return json.Unmarshal(v, &p) == nil && n.relayMatch(p.MatchID)
 	}
 	return false
 }
@@ -219,7 +321,7 @@ func (n *NakamaClient) relayHeld(matchID, name string) bool {
 	return false
 }
 
-// relayJoined reads the server's answer to joining r: the relayed match, or
+// relayJoined reads the server's answer to joining r: the relay's match, or
 // an error.
 func (n *NakamaClient) relayJoined(r *nakamaRelay, raw map[string]json.RawMessage) error {
 	if v, ok := raw["match"]; ok {
@@ -268,7 +370,8 @@ func (r *nakamaRelay) Send(b []byte) error {
 	})
 }
 
-// Close leaves the relayed match; Nakama ends it when both players left.
+// Close leaves the relay's match. A server relay ends when a player leaves
+// it; Nakama ends a relayed match when both players left.
 func (r *nakamaRelay) Close() error {
 	r.closeOnce.Do(func() {
 		n := r.client

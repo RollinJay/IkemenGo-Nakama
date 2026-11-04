@@ -24,13 +24,14 @@ import (
 // work, the handshake also tries IPv6 and a port the router opens, and then
 // the relay through the server.
 
-// fakeRelayHub stands in for the Nakama server's relayed matches: members
-// that join the same name receive each other's datagrams, in order, on a
-// goroutine of their own as the client's read loop would deliver them.
+// fakeRelayHub stands in for the Nakama server's relays: members that join
+// the same name receive each other's datagrams, in order, on a goroutine of
+// their own as the client's read loop would deliver them.
 type fakeRelayHub struct {
-	mu      sync.Mutex
-	members map[string][]*fakeRelayMember
-	joins   []string
+	mu       sync.Mutex
+	members  map[string][]*fakeRelayMember
+	joins    []string
+	requests []p2pRelayRequest
 }
 
 type fakeRelayMember struct {
@@ -54,11 +55,13 @@ type fakeRelayer struct {
 	user string
 }
 
-func (r fakeRelayer) JoinRelay(name, peer string, deliver func([]byte)) (p2pRelayLink, error) {
+func (r fakeRelayer) JoinRelay(req p2pRelayRequest, deliver func([]byte)) (p2pRelayLink, error) {
+	name := req.Name
 	m := &fakeRelayMember{hub: r.hub, name: name, user: r.user, queue: make(chan []byte, 256), closed: make(chan struct{})}
 	r.hub.mu.Lock()
 	r.hub.members[name] = append(r.hub.members[name], m)
 	r.hub.joins = append(r.hub.joins, r.user+"@"+name)
+	r.hub.requests = append(r.hub.requests, req)
 	r.hub.mu.Unlock()
 	go func() {
 		for {
@@ -764,7 +767,7 @@ func TestNakamaRelayJoinAndDatagrams(t *testing.T) {
 	}
 	joined := make(chan joinResult, 1)
 	go func() {
-		link, err := n.JoinRelay("ikemen-p2p-relay-x", "peer", func(b []byte) {
+		link, err := n.JoinRelay(p2pRelayRequest{MatchID: "session-match", Name: "ikemen-p2p-relay-x", Peer: "peer"}, func(b []byte) {
 			gotMu.Lock()
 			got = append(got, b)
 			gotMu.Unlock()
@@ -898,7 +901,7 @@ func TestNakamaRelayedMatchDataReachesOnlyTheRelay(t *testing.T) {
 	var gotMu sync.Mutex
 	joined := make(chan p2pRelayLink, 1)
 	go func() {
-		link, err := n.JoinRelay("ikemen-p2p-relay-x", "peer", func(b []byte) {
+		link, err := n.JoinRelay(p2pRelayRequest{MatchID: "session-match", Name: "ikemen-p2p-relay-x", Peer: "peer"}, func(b []byte) {
 			gotMu.Lock()
 			got = append(got, string(b))
 			gotMu.Unlock()
