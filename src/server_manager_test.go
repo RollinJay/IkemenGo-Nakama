@@ -180,14 +180,25 @@ func TestServerWizardKeepsExistingProfile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	first.DatabaseDSN = "nakama:dbpassword@127.0.0.1:5432/nakama"
+	if err := saveIkemenServerConfig("save/server.json", first); err != nil {
+		t.Fatal(err)
+	}
 	// Run again, pressing Enter at every prompt: nothing changes, the server
-	// key that the game's copies carry included.
+	// key that the game's copies carry and the database included, and the
+	// database's password is not shown.
 	var out bytes.Buffer
 	if err := runServerWizard(strings.NewReader(""), &out, "save/server.json"); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(out.String(), "Editing "+filepath.Join(dir, "save", "server.json")) {
 		t.Errorf("wizard output does not say it edits the profile: %s", out.String())
+	}
+	if !strings.Contains(out.String(), "Database DSN [nakama:xxxxx@127.0.0.1:5432/nakama]: ") {
+		t.Errorf("wizard output does not show the database without its password: %s", out.String())
+	}
+	if strings.Contains(out.String(), "dbpassword") {
+		t.Errorf("wizard output shows the database's password: %s", out.String())
 	}
 	second, err := loadIkemenServerConfig("save/server.json")
 	if err != nil {
@@ -511,6 +522,24 @@ func TestYAMLQuote(t *testing.T) {
 		var back string
 		if err := json.Unmarshal([]byte(q), &back); err != nil || back != s {
 			t.Errorf("yamlQuote(%q) = %q reads back as %q (%v)", s, q, back, err)
+		}
+	}
+}
+
+func TestRedactDatabaseAddress(t *testing.T) {
+	for _, c := range []struct{ address, shown string }{
+		{"", ""},
+		{"nakama@127.0.0.1:5432/nakama", "nakama@127.0.0.1:5432/nakama"},
+		{"nakama:dbpassword@127.0.0.1:5432/nakama", "nakama:xxxxx@127.0.0.1:5432/nakama"},
+		{"nakama:db@password@127.0.0.1:5432/nakama?sslmode=disable", "nakama:xxxxx@127.0.0.1:5432/nakama?sslmode=disable"},
+		{"postgresql://nakama:dbpassword@db.example.com/nakama", "postgresql://nakama:xxxxx@db.example.com/nakama"},
+		{"nakama@127.0.0.1/nakama?sslmode=disable&password=dbpassword", "nakama@127.0.0.1/nakama?password=xxxxx&sslmode=disable"},
+		{"nakama@127.0.0.1/nakama?sslpassword=dbpassword", "nakama@127.0.0.1/nakama?sslpassword=xxxxx"},
+		// Not a URL: the / in the password ends its host.
+		{"nakama:db/password@127.0.0.1/nakama", "(hidden)"},
+	} {
+		if got := redactDatabaseAddress(c.address); got != c.shown {
+			t.Errorf("redactDatabaseAddress(%q) = %q, want %q", c.address, got, c.shown)
 		}
 	}
 }

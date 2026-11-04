@@ -1105,7 +1105,7 @@ Ikemen_GO -server-wizard
 Ikemen_GO -server -server-config save/server.json
 ```
 
-`-server-wizard` is intentionally headless: it prompts in the terminal and writes an IKEMEN server-manager JSON profile, `save/server.json`. It gives a new server keys of its own, each 16 bytes from the system's cryptographic random generator, in hex, and writes them to the profile, which only its owner can read (mode 600; on Windows, the folder's permissions apply): keep it out of the game you ship. Run again on the same profile, the wizard edits it, and Enter keeps each value, the keys included. The wizard also writes a companion `save/server-client.json` profile, with the server key and two public STUN servers, that can be copied into `data/online/servers.json` after the public hostname, key, and TLS settings are verified.
+`-server-wizard` is intentionally headless: it prompts in the terminal and writes an IKEMEN server-manager JSON profile, `save/server.json`. It gives a new server keys of its own, each 16 bytes from the system's cryptographic random generator, in hex, and writes them to the profile, which only its owner can read (mode 600; on Windows, the folder's permissions apply): keep it out of the game you ship. Run again on the same profile, the wizard edits it, and Enter keeps each value, the keys included; it shows the database's address (`database_dsn`) with `xxxxx` in place of its password. The wizard also writes a companion `save/server-client.json` profile, with the server key and two public STUN servers, that can be copied into `data/online/servers.json` after the public hostname, key, and TLS settings are verified.
 
 | Profile field | Nakama setting | What the wizard writes |
 |---|---|---|

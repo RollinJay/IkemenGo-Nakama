@@ -313,8 +313,14 @@ func writePrivateFile(path string, data []byte) error {
 }
 
 func promptLine(in *bufio.Reader, out io.Writer, label, def string) (string, error) {
-	if def != "" {
-		fmt.Fprintf(out, "%s [%s]: ", label, def)
+	return promptLineShowing(in, out, label, def, def)
+}
+
+// promptLineShowing is promptLine with its default shown as shown, for a
+// default that holds a secret: Enter keeps def itself.
+func promptLineShowing(in *bufio.Reader, out io.Writer, label, def, shown string) (string, error) {
+	if shown != "" {
+		fmt.Fprintf(out, "%s [%s]: ", label, shown)
 	} else {
 		fmt.Fprintf(out, "%s: ", label)
 	}
@@ -452,7 +458,7 @@ func runServerWizard(in io.Reader, out io.Writer, path string) error {
 	if cfg.LobbyMaxGames, err = promptInt(reader, out, "Winner-stays max games", cfg.LobbyMaxGames); err != nil {
 		return err
 	}
-	if cfg.DatabaseDSN, err = promptLine(reader, out, "Database DSN", cfg.DatabaseDSN); err != nil {
+	if cfg.DatabaseDSN, err = promptLineShowing(reader, out, "Database DSN", cfg.DatabaseDSN, redactDatabaseAddress(cfg.DatabaseDSN)); err != nil {
 		return err
 	}
 	if cfg.LogFile, err = promptLine(reader, out, "Server log file", cfg.LogFile); err != nil {
@@ -638,6 +644,33 @@ func nakamaServerArgs(c IkemenServerConfig, settingsPath, configPath, databasePa
 	return append(args, c.ExtraArgs...), migrateArgs
 }
 
+// redactDatabaseAddress is a database address as -server and the wizard show
+// it: xxxxx in place of its password, as Nakama logs it, and of a password
+// among its parameters. The address keeps its form, postgres:// or not; one
+// that is not a URL is hidden whole.
+func redactDatabaseAddress(address string) string {
+	if address == "" {
+		return ""
+	}
+	scheme := "postgres://"
+	if strings.HasPrefix(address, "postgres://") || strings.HasPrefix(address, "postgresql://") {
+		scheme = ""
+	}
+	u, err := url.Parse(scheme + address)
+	if err != nil {
+		return "(hidden)"
+	}
+	if query := u.Query(); query.Has("password") || query.Has("sslpassword") {
+		for _, name := range []string{"password", "sslpassword"} {
+			if query.Has(name) {
+				query.Set(name, "xxxxx")
+			}
+		}
+		u.RawQuery = query.Encode()
+	}
+	return strings.TrimPrefix(u.Redacted(), scheme)
+}
+
 // printableNakamaArgs are Nakama's arguments for the line -server prints,
 // without the secrets that extra_args may set, a database's password among
 // them.
@@ -645,10 +678,7 @@ func printableNakamaArgs(args []string) []string {
 	hide := func(flag, value string) string {
 		switch strings.TrimLeft(flag, "-") {
 		case "database.address":
-			if u, err := url.Parse("postgres://" + value); err == nil {
-				return strings.TrimPrefix(u.Redacted(), "postgres://")
-			}
-			return "(hidden)"
+			return redactDatabaseAddress(value)
 		case "runtime.http_key", "session.encryption_key", "session.refresh_encryption_key", "console.password",
 			"console.signing_key", "mfa.storage_encryption_key", "console.mfa.storage_encryption_key":
 			return "(hidden)"
