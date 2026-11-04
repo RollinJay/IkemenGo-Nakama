@@ -3,10 +3,14 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -17,34 +21,73 @@ import (
 
 const defaultNakamaServerConfigPath = "save/server.json"
 
+const (
+	// defaultNakamaModules is the folder of this fork's server modules, which
+	// the release packages ship next to the game (Nakama's runtime.path).
+	defaultNakamaModules = "nakama/modules"
+	// nakamaDefaultServerKey is the server key of a Nakama that sets none.
+	nakamaDefaultServerKey = "defaultkey"
+)
+
+// defaultServerSTUNServers are the STUN servers of the wizard's client
+// profile, as in data/online/servers.json: a game learns its public address
+// from them, which a direct connection between players behind routers needs.
+var defaultServerSTUNServers = []string{"stun.l.google.com:19302", "stun.cloudflare.com:3478"}
+
 type IkemenServerConfig struct {
-	Version              int      `json:"version"`
-	Name                 string   `json:"name"`
-	Game                 string   `json:"game"`
-	BindAddress          string   `json:"bind_address"`
-	PublicAddress        string   `json:"public_address"`
-	ServerKey            string   `json:"server_key"`
-	ClientSSL            bool     `json:"client_ssl"`
-	NakamaBinary         string   `json:"nakama_binary"`
-	NakamaConfig         string   `json:"nakama_config"`
-	WorkingDir           string   `json:"working_dir"`
-	ExtraArgs            []string `json:"extra_args,omitempty"`
-	Environment          []string `json:"environment,omitempty"`
-	LogFile              string   `json:"log_file,omitempty"`
-	DatabaseDSN          string   `json:"database_dsn,omitempty"`
-	NakamaHTTPPort       int      `json:"nakama_http_port"`
-	NakamaGRPCPort       int      `json:"nakama_grpc_port"`
-	NakamaConsolePort    int      `json:"nakama_console_port"`
-	EnableMatchmaking    bool     `json:"enable_matchmaking"`
-	EnableLobbies        bool     `json:"enable_lobbies"`
-	EnableRanked         bool     `json:"enable_ranked"`
-	EnableSpectators     bool     `json:"enable_spectators"`
-	EnableChat           bool     `json:"enable_chat"`
-	DefaultLobbyMode     string   `json:"default_lobby_mode"`
-	RankedBestOf         int      `json:"ranked_best_of"`
-	RankedSwitchSides    bool     `json:"ranked_switch_sides"`
-	WinnerKeepsSelection bool     `json:"winner_keeps_selection"`
-	LobbyMaxGames        int      `json:"lobby_max_games"`
+	Version           int      `json:"version"`
+	Name              string   `json:"name"`
+	Game              string   `json:"game"`
+	BindAddress       string   `json:"bind_address"`
+	PublicAddress     string   `json:"public_address"`
+	ServerKey         string   `json:"server_key"`
+	ClientSSL         bool     `json:"client_ssl"`
+	NakamaBinary      string   `json:"nakama_binary"`
+	NakamaConfig      string   `json:"nakama_config"`
+	NakamaModules     string   `json:"nakama_modules"`
+	WorkingDir        string   `json:"working_dir"`
+	ExtraArgs         []string `json:"extra_args,omitempty"`
+	Environment       []string `json:"environment,omitempty"`
+	LogFile           string   `json:"log_file,omitempty"`
+	DatabaseDSN       string   `json:"database_dsn,omitempty"`
+	NakamaHTTPPort    int      `json:"nakama_http_port"`
+	NakamaGRPCPort    int      `json:"nakama_grpc_port"`
+	NakamaConsolePort int      `json:"nakama_console_port"`
+	ConsoleAddress    string   `json:"console_address"`
+	ConsoleUser       string   `json:"console_user"`
+	// The server's secrets (serverSecrets).
+	ConsolePassword      string `json:"console_password"`
+	ConsoleSigningKey    string `json:"console_signing_key"`
+	HTTPKey              string `json:"http_key"`
+	SessionKey           string `json:"session_key"`
+	RefreshKey           string `json:"refresh_key"`
+	MFAKey               string `json:"mfa_key"`
+	EnableMatchmaking    bool   `json:"enable_matchmaking"`
+	EnableLobbies        bool   `json:"enable_lobbies"`
+	EnableRanked         bool   `json:"enable_ranked"`
+	EnableSpectators     bool   `json:"enable_spectators"`
+	EnableChat           bool   `json:"enable_chat"`
+	DefaultLobbyMode     string `json:"default_lobby_mode"`
+	RankedBestOf         int    `json:"ranked_best_of"`
+	RankedSwitchSides    bool   `json:"ranked_switch_sides"`
+	WinnerKeepsSelection bool   `json:"winner_keeps_selection"`
+	LobbyMaxGames        int    `json:"lobby_max_games"`
+}
+
+// serverSecrets are the profile's secrets, with Nakama's own default for
+// each. The defaults are public: a server that keeps one lets anyone forge its
+// players' sessions (session_key, refresh_key), call its RPCs as the server,
+// the moderators' among them (http_key), or sign in to its console.
+var serverSecrets = []struct {
+	name, nakamaDefault string
+	field               func(*IkemenServerConfig) *string
+}{
+	{"http_key", "defaulthttpkey", func(c *IkemenServerConfig) *string { return &c.HTTPKey }},
+	{"session_key", "defaultencryptionkey", func(c *IkemenServerConfig) *string { return &c.SessionKey }},
+	{"refresh_key", "defaultrefreshencryptionkey", func(c *IkemenServerConfig) *string { return &c.RefreshKey }},
+	{"console_password", "password", func(c *IkemenServerConfig) *string { return &c.ConsolePassword }},
+	{"console_signing_key", "defaultsigningkey", func(c *IkemenServerConfig) *string { return &c.ConsoleSigningKey }},
+	{"mfa_key", "the-key-has-to-be-32-bytes-long!", func(c *IkemenServerConfig) *string { return &c.MFAKey }},
 }
 
 func normalizeServerConfig(c IkemenServerConfig) IkemenServerConfig {
@@ -58,7 +101,7 @@ func normalizeServerConfig(c IkemenServerConfig) IkemenServerConfig {
 		c.BindAddress = "0.0.0.0"
 	}
 	if c.ServerKey == "" {
-		c.ServerKey = "defaultkey"
+		c.ServerKey = nakamaDefaultServerKey
 	}
 	if c.NakamaBinary == "" {
 		if runtime.GOOS == "windows" {
@@ -70,6 +113,9 @@ func normalizeServerConfig(c IkemenServerConfig) IkemenServerConfig {
 	if c.NakamaConfig == "" {
 		c.NakamaConfig = "nakama/config.yml"
 	}
+	if c.NakamaModules == "" {
+		c.NakamaModules = defaultNakamaModules
+	}
 	if c.NakamaHTTPPort == 0 {
 		c.NakamaHTTPPort = 7350
 	}
@@ -78,6 +124,12 @@ func normalizeServerConfig(c IkemenServerConfig) IkemenServerConfig {
 	}
 	if c.NakamaConsolePort == 0 {
 		c.NakamaConsolePort = 7351
+	}
+	if c.ConsoleAddress == "" {
+		c.ConsoleAddress = "127.0.0.1"
+	}
+	if c.ConsoleUser == "" {
+		c.ConsoleUser = "operator"
 	}
 	if c.DefaultLobbyMode == "" {
 		c.DefaultLobbyMode = "queue"
@@ -106,6 +158,84 @@ func normalizeServerConfig(c IkemenServerConfig) IkemenServerConfig {
 	return c
 }
 
+// newServerSecret returns 16 random bytes in hex: 32 characters, the length
+// Nakama's MFA key must have. crypto/rand.Read never fails.
+func newServerSecret() string {
+	var b [16]byte
+	rand.Read(b[:])
+	return hex.EncodeToString(b[:])
+}
+
+// workDir is the folder Nakama runs in.
+func (c IkemenServerConfig) workDir() string {
+	if c.WorkingDir != "" {
+		return c.WorkingDir
+	}
+	return sys.baseDir
+}
+
+// fillServerProfile gives a profile the Nakama settings that profiles written
+// before them lack: a random value for each secret, and the server modules'
+// folder. normalizeServerConfig gives the others.
+func fillServerProfile(c *IkemenServerConfig) {
+	for _, s := range serverSecrets {
+		if p := s.field(c); *p == "" {
+			*p = newServerSecret()
+		}
+	}
+	// Without runtime.path, Nakama loaded the modules from its own default,
+	// data/modules in its working directory: a host who installed them there
+	// keeps them.
+	if c.NakamaModules == "" {
+		if _, err := os.Stat(filepath.Join(c.workDir(), "data", "modules", "main.lua")); err == nil {
+			c.NakamaModules = "data/modules"
+		}
+	}
+}
+
+// checkServerSecrets refuses a profile that sets a secret to Nakama's public
+// default.
+func checkServerSecrets(profile string, c IkemenServerConfig) error {
+	var public []string
+	for _, s := range serverSecrets {
+		if *s.field(&c) == s.nakamaDefault {
+			public = append(public, fmt.Sprintf("%s (%q)", s.name, s.nakamaDefault))
+		}
+	}
+	if len(public) == 0 {
+		return nil
+	}
+	return fmt.Errorf("%s keeps Nakama's public defaults, which let anyone act as the server: %s; delete them, and a random one is made for each, or set secrets of your own", profile, strings.Join(public, ", "))
+}
+
+// serverProfileWarnings are the wizard's and -server's warnings about a
+// profile: Nakama's default server key, and a console other computers reach.
+func serverProfileWarnings(profile string, c IkemenServerConfig) []string {
+	var warnings []string
+	if c.ServerKey == nakamaDefaultServerKey {
+		warnings = append(warnings, fmt.Sprintf("server_key in %s is Nakama's default, %q. A server key is not a secret (every copy of the game carries it), but a server should have its own: set server_key there to a new one, such as %s, and the same in your game's data/online/servers.json.", profile, nakamaDefaultServerKey, newServerSecret()))
+	}
+	if !isLoopbackAddress(c.ConsoleAddress) {
+		warnings = append(warnings, fmt.Sprintf("Nakama's console listens on %s (console_address in %s), where other computers can reach it, and whoever signs in to it controls the server. Leave it on 127.0.0.1, and reach it from elsewhere through an SSH tunnel.", c.ConsoleAddress, profile))
+	}
+	return warnings
+}
+
+// serverConsoleSummary says where Nakama's console is and how to sign in.
+func serverConsoleSummary(profile string, c IkemenServerConfig) string {
+	address := net.JoinHostPort(strings.Trim(c.ConsoleAddress, "[]"), strconv.Itoa(c.NakamaConsolePort))
+	return fmt.Sprintf("Nakama's console: http://%s, user %q, password: console_password in %s", address, c.ConsoleUser, profile)
+}
+
+func isLoopbackAddress(address string) bool {
+	address = strings.Trim(address, "[]")
+	if strings.EqualFold(address, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(address)
+	return ip != nil && ip.IsLoopback()
+}
+
 func resolveServerPath(path string) string {
 	if strings.TrimSpace(path) == "" {
 		path = defaultNakamaServerConfigPath
@@ -116,7 +246,18 @@ func resolveServerPath(path string) string {
 	return filepath.Join(sys.baseDir, path)
 }
 
-func loadIkemenServerConfig(path string) (IkemenServerConfig, error) {
+// absServerPath is path made absolute, for Nakama, which runs in its own
+// working directory.
+func absServerPath(path string) string {
+	if abs, err := filepath.Abs(path); err == nil {
+		return abs
+	}
+	return path
+}
+
+// readIkemenServerConfig reads a profile without normalizeServerConfig's
+// defaults, so that a caller can tell what it lacks.
+func readIkemenServerConfig(path string) (IkemenServerConfig, error) {
 	resolved := resolveServerPath(path)
 	data, err := os.ReadFile(resolved)
 	if err != nil {
@@ -125,6 +266,14 @@ func loadIkemenServerConfig(path string) (IkemenServerConfig, error) {
 	var cfg IkemenServerConfig
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return IkemenServerConfig{}, fmt.Errorf("parse server config %q: %w", resolved, err)
+	}
+	return cfg, nil
+}
+
+func loadIkemenServerConfig(path string) (IkemenServerConfig, error) {
+	cfg, err := readIkemenServerConfig(path)
+	if err != nil {
+		return IkemenServerConfig{}, err
 	}
 	return normalizeServerConfig(cfg), nil
 }
@@ -139,12 +288,39 @@ func saveIkemenServerConfig(path string, cfg IkemenServerConfig) error {
 		return err
 	}
 	data = append(data, '\n')
-	return os.WriteFile(resolved, data, 0644)
+	return writePrivateFile(resolved, data)
+}
+
+// writePrivateFile replaces path with a file that only its owner can read
+// (mode 0600): a new file renamed over the old one, so that the secrets are
+// never readable by others, not even while they are written, nor left in an
+// older file that was.
+func writePrivateFile(path string, data []byte) error {
+	f, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".*")
+	if err != nil {
+		return err
+	}
+	// After the rename there is nothing left to remove.
+	defer os.Remove(f.Name())
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	return os.Rename(f.Name(), path)
 }
 
 func promptLine(in *bufio.Reader, out io.Writer, label, def string) (string, error) {
-	if def != "" {
-		fmt.Fprintf(out, "%s [%s]: ", label, def)
+	return promptLineShowing(in, out, label, def, def)
+}
+
+// promptLineShowing is promptLine with its default shown as shown, for a
+// default that holds a secret: Enter keeps def itself.
+func promptLineShowing(in *bufio.Reader, out io.Writer, label, def, shown string) (string, error) {
+	if shown != "" {
+		fmt.Fprintf(out, "%s [%s]: ", label, shown)
 	} else {
 		fmt.Fprintf(out, "%s: ", label)
 	}
@@ -185,11 +361,37 @@ func promptInt(in *bufio.Reader, out io.Writer, label string, def int) (int, err
 
 func runServerWizard(in io.Reader, out io.Writer, path string) error {
 	reader := bufio.NewReader(in)
-	cfg := normalizeServerConfig(IkemenServerConfig{})
+	resolved := resolveServerPath(path)
+	// A profile that exists is edited: its secrets stay, and so does its
+	// server key, which the copies of the game carry.
+	cfg, err := readIkemenServerConfig(path)
+	editing := err == nil
+	switch {
+	case editing:
+		if err := checkServerSecrets(resolved, cfg); err != nil {
+			return err
+		}
+	case errors.Is(err, os.ErrNotExist):
+		cfg = IkemenServerConfig{
+			ServerKey:         newServerSecret(),
+			NakamaModules:     defaultNakamaModules,
+			EnableMatchmaking: true,
+			EnableLobbies:     true,
+			EnableRanked:      true,
+			EnableSpectators:  true,
+			EnableChat:        true,
+		}
+	default:
+		return err
+	}
+	fillServerProfile(&cfg)
+	cfg = normalizeServerConfig(cfg)
 	fmt.Fprintln(out, "IKEMEN GO ONLINE SERVER WIZARD")
 	fmt.Fprintln(out, "This headless wizard creates an optional dedicated Nakama launcher profile.")
+	if editing {
+		fmt.Fprintf(out, "Editing %s: press Enter to keep a value.\n", resolved)
+	}
 	fmt.Fprintln(out)
-	var err error
 	if cfg.Name, err = promptLine(reader, out, "Server name", cfg.Name); err != nil {
 		return err
 	}
@@ -226,19 +428,19 @@ func runServerWizard(in io.Reader, out io.Writer, path string) error {
 	if cfg.NakamaConsolePort, err = promptInt(reader, out, "Nakama console port", cfg.NakamaConsolePort); err != nil {
 		return err
 	}
-	if cfg.EnableMatchmaking, err = promptBool(reader, out, "Enable matchmaking", true); err != nil {
+	if cfg.EnableMatchmaking, err = promptBool(reader, out, "Enable matchmaking", cfg.EnableMatchmaking); err != nil {
 		return err
 	}
-	if cfg.EnableLobbies, err = promptBool(reader, out, "Enable lobbies", true); err != nil {
+	if cfg.EnableLobbies, err = promptBool(reader, out, "Enable lobbies", cfg.EnableLobbies); err != nil {
 		return err
 	}
-	if cfg.EnableRanked, err = promptBool(reader, out, "Enable ranked", true); err != nil {
+	if cfg.EnableRanked, err = promptBool(reader, out, "Enable ranked", cfg.EnableRanked); err != nil {
 		return err
 	}
-	if cfg.EnableSpectators, err = promptBool(reader, out, "Enable spectators", true); err != nil {
+	if cfg.EnableSpectators, err = promptBool(reader, out, "Enable spectators", cfg.EnableSpectators); err != nil {
 		return err
 	}
-	if cfg.EnableChat, err = promptBool(reader, out, "Enable chat", true); err != nil {
+	if cfg.EnableChat, err = promptBool(reader, out, "Enable chat", cfg.EnableChat); err != nil {
 		return err
 	}
 	if cfg.RankedBestOf, err = promptInt(reader, out, "Ranked best-of", cfg.RankedBestOf); err != nil {
@@ -256,22 +458,27 @@ func runServerWizard(in io.Reader, out io.Writer, path string) error {
 	if cfg.LobbyMaxGames, err = promptInt(reader, out, "Winner-stays max games", cfg.LobbyMaxGames); err != nil {
 		return err
 	}
-	if cfg.DatabaseDSN, err = promptLine(reader, out, "Database DSN", cfg.DatabaseDSN); err != nil {
+	if cfg.DatabaseDSN, err = promptLineShowing(reader, out, "Database DSN", cfg.DatabaseDSN, redactDatabaseAddress(cfg.DatabaseDSN)); err != nil {
 		return err
 	}
 	if cfg.LogFile, err = promptLine(reader, out, "Server log file", cfg.LogFile); err != nil {
 		return err
 	}
+	cfg = normalizeServerConfig(cfg)
 	if err := saveIkemenServerConfig(path, cfg); err != nil {
 		return err
 	}
-	fmt.Fprintf(out, "\nSaved server configuration to %s\n", resolveServerPath(path))
+	fmt.Fprintf(out, "\nSaved server configuration to %s: it holds the server's secrets, so keep it private and out of the game you ship\n", resolved)
 	profilePath := strings.TrimSuffix(path, filepath.Ext(path)) + "-client.json"
 	if err := saveNakamaClientProfile(profilePath, cfg); err != nil {
 		return err
 	}
 	fmt.Fprintf(out, "Saved client connection profile to %s\n", resolveServerPath(profilePath))
+	fmt.Fprintln(out, serverConsoleSummary(resolved, cfg))
 	fmt.Fprintln(out, "Use: Ikemen_GO -server -server-config", path)
+	for _, w := range serverProfileWarnings(resolved, cfg) {
+		fmt.Fprintln(out, "WARNING:", w)
+	}
 	return nil
 }
 
@@ -293,7 +500,7 @@ func saveNakamaClientProfile(path string, cfg IkemenServerConfig) error {
 		Status:      true,
 		Game:        cfg.Game,
 		Build:       Version,
-		STUNServers: nil,
+		STUNServers: append([]string(nil), defaultServerSTUNServers...),
 	}
 	profiles := NakamaServerProfiles{Version: 1, Default: profile.ID, Servers: []NakamaServerProfile{profile}}
 	resolved := resolveServerPath(path)
@@ -341,53 +548,212 @@ func findNakamaBinary(config IkemenServerConfig) string {
 	return ""
 }
 
-func runNakamaServer(ctx context.Context, cfg IkemenServerConfig) error {
+// nakamaSettingsPath is the settings file -server writes for Nakama next to
+// the profile: save/server-nakama.yml for save/server.json.
+func nakamaSettingsPath(profile string) string {
+	return strings.TrimSuffix(profile, filepath.Ext(profile)) + "-nakama.yml"
+}
+
+// nakamaDatabasePath is the file -server hands Nakama the profile's database
+// in, next to the profile: save/server-nakama-database.yml.
+func nakamaDatabasePath(profile string) string {
+	return strings.TrimSuffix(profile, filepath.Ext(profile)) + "-nakama-database.yml"
+}
+
+// nakamaDatabaseYAML is the file that hands Nakama the profile's database,
+// whose address holds the database's password: a file only its owner can
+// read keeps it from the other users of the computer, who can read Nakama's
+// command line.
+func nakamaDatabaseYAML(dsn string) []byte {
+	return []byte("# The database of an IKEMEN GO server profile (database_dsn), written by Ikemen_GO -server\n" +
+		"# each time it starts Nakama: change the profile, not this file.\n" +
+		"database:\n  address:\n    - " + yamlQuote(dsn) + "\n")
+}
+
+// nakamaServerYAML is the settings file -server hands Nakama first: the
+// profile's secrets, which stay off Nakama's command line (other programs on
+// the computer can read it), the console's address and user, and the
+// modules' folder.
+func nakamaServerYAML(c IkemenServerConfig, modules string) []byte {
+	var b strings.Builder
+	b.WriteString("# Nakama's settings from an IKEMEN GO server profile, written by Ikemen_GO -server\n")
+	b.WriteString("# each time it starts Nakama: change the profile, not this file.\n")
+	fmt.Fprintf(&b, "runtime:\n  path: %s\n  http_key: %s\n", yamlQuote(modules), yamlQuote(c.HTTPKey))
+	fmt.Fprintf(&b, "session:\n  encryption_key: %s\n  refresh_encryption_key: %s\n", yamlQuote(c.SessionKey), yamlQuote(c.RefreshKey))
+	fmt.Fprintf(&b, "mfa:\n  storage_encryption_key: %s\n", yamlQuote(c.MFAKey))
+	fmt.Fprintf(&b, "console:\n  address: %s\n  username: %s\n  password: %s\n  signing_key: %s\n",
+		yamlQuote(nakamaListenAddress(c.ConsoleAddress)), yamlQuote(c.ConsoleUser), yamlQuote(c.ConsolePassword), yamlQuote(c.ConsoleSigningKey))
+	fmt.Fprintf(&b, "  mfa:\n    storage_encryption_key: %s\n", yamlQuote(c.MFAKey))
+	return []byte(b.String())
+}
+
+// yamlQuote quotes s for a YAML file. A JSON string is a YAML double-quoted
+// scalar with the same escapes, but YAML refuses a few characters that JSON
+// leaves as they are (DEL, the C1 controls and the noncharacters U+FFFE and
+// U+FFFF), so those go in as escapes too.
+func yamlQuote(s string) string {
+	j, _ := json.Marshal(s)
+	var b strings.Builder
+	for _, r := range string(j) {
+		if r == 0x7f || (r >= 0x80 && r <= 0x9f) || r == 0xfffe || r == 0xffff {
+			fmt.Fprintf(&b, `\u%04x`, r)
+		} else {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+// nakamaListenAddress is an address as Nakama listens on it: Nakama joins the
+// address and the port with ':', so an IPv6 address goes in brackets.
+func nakamaListenAddress(address string) string {
+	if strings.Contains(address, ":") && net.ParseIP(address) != nil {
+		return "[" + address + "]"
+	}
+	return address
+}
+
+// nakamaServerArgs returns the arguments -server starts Nakama with, and
+// those of the database migration before it. The settings file -server
+// writes (nakamaServerYAML) comes first, and the host's own Nakama config
+// file after it overrides it. The profile's database file
+// (nakamaDatabaseYAML), if it has one, comes after both and overrides them,
+// so that Nakama uses the database the profile names. The profile's ports,
+// server key and address come as flags, which override all of them, so that
+// the wizard's client profile agrees with the running server; extra_args
+// come last so that a host can still override any of them.
+func nakamaServerArgs(c IkemenServerConfig, settingsPath, configPath, databasePath string) (args, migrateArgs []string) {
+	args = []string{"--config", settingsPath}
+	if configPath != "" {
+		args = append(args, "--config", configPath)
+	}
+	if databasePath != "" {
+		args = append(args, "--config", databasePath)
+	}
+	migrateArgs = append([]string{"migrate", "up"}, args...)
+	args = append(args,
+		"--socket.port", strconv.Itoa(c.NakamaHTTPPort),
+		"--socket.server_key", c.ServerKey,
+		"--console.port", strconv.Itoa(c.NakamaConsolePort),
+		// IKEMEN's replay header exceeds Nakama's 4 KiB default message limit.
+		"--socket.max_message_size_bytes", "65536",
+	)
+	if c.BindAddress != "" && c.BindAddress != "0.0.0.0" {
+		args = append(args, "--socket.address", nakamaListenAddress(c.BindAddress))
+	}
+	return append(args, c.ExtraArgs...), migrateArgs
+}
+
+// redactDatabaseAddress is a database address as -server and the wizard show
+// it: xxxxx in place of its password, as Nakama logs it, and of a password
+// among its parameters. The address keeps its form, postgres:// or not; one
+// that is not a URL is hidden whole.
+func redactDatabaseAddress(address string) string {
+	if address == "" {
+		return ""
+	}
+	scheme := "postgres://"
+	if strings.HasPrefix(address, "postgres://") || strings.HasPrefix(address, "postgresql://") {
+		scheme = ""
+	}
+	u, err := url.Parse(scheme + address)
+	if err != nil {
+		return "(hidden)"
+	}
+	if query := u.Query(); query.Has("password") || query.Has("sslpassword") {
+		for _, name := range []string{"password", "sslpassword"} {
+			if query.Has(name) {
+				query.Set(name, "xxxxx")
+			}
+		}
+		u.RawQuery = query.Encode()
+	}
+	return strings.TrimPrefix(u.Redacted(), scheme)
+}
+
+// printableNakamaArgs are Nakama's arguments for the line -server prints,
+// without the secrets that extra_args may set, a database's password among
+// them.
+func printableNakamaArgs(args []string) []string {
+	hide := func(flag, value string) string {
+		switch strings.TrimLeft(flag, "-") {
+		case "database.address":
+			return redactDatabaseAddress(value)
+		case "runtime.http_key", "session.encryption_key", "session.refresh_encryption_key", "console.password",
+			"console.signing_key", "mfa.storage_encryption_key", "console.mfa.storage_encryption_key":
+			return "(hidden)"
+		}
+		return value
+	}
+	out := append([]string(nil), args...)
+	for i, arg := range out {
+		if !strings.HasPrefix(arg, "-") {
+			continue
+		}
+		if flag, value, ok := strings.Cut(arg, "="); ok {
+			out[i] = flag + "=" + hide(flag, value)
+		} else if i+1 < len(out) {
+			out[i+1] = hide(arg, out[i+1])
+		}
+	}
+	return out
+}
+
+// runNakamaServer starts Nakama with the profile at path profile, which
+// prepareServerProfile has read.
+func runNakamaServer(ctx context.Context, profile string, cfg IkemenServerConfig) error {
 	cfg = normalizeServerConfig(cfg)
 	binary := findNakamaBinary(cfg)
 	if binary == "" {
 		return errors.New("Nakama executable not found; set nakama_binary in the server config")
 	}
-	workDir := sys.baseDir
-	if cfg.WorkingDir != "" {
-		workDir = cfg.WorkingDir
-	}
+	binary = absServerPath(binary)
+	workDir := cfg.workDir()
 	configPath := ""
 	if cfg.NakamaConfig != "" {
 		configPath = cfg.NakamaConfig
 		if !filepath.IsAbs(configPath) {
 			configPath = filepath.Join(workDir, configPath)
 		}
-		// Nakama runs fine without a YAML file; the wizard only suggests a path.
+		// Nakama runs fine without a YAML file of the host's own; the wizard
+		// only suggests a path.
 		if _, err := os.Stat(configPath); err != nil {
-			fmt.Fprintf(os.Stdout, "[SERVER] %s not found; starting Nakama with command-line settings only\n", configPath)
+			fmt.Fprintf(os.Stdout, "[SERVER] %s not found; starting Nakama with the profile's settings only\n", configPath)
 			configPath = ""
+		} else {
+			configPath = absServerPath(configPath)
 		}
 	}
-	// The wizard's values must reach Nakama, otherwise the generated client
-	// profile (port/key) can disagree with the running server. ExtraArgs come
-	// last so a host can still override any of them.
-	args := []string{}
-	if configPath != "" {
-		args = append(args, "--config", configPath)
+	modules := cfg.NakamaModules
+	if !filepath.IsAbs(modules) {
+		modules = filepath.Join(workDir, modules)
 	}
+	modules = absServerPath(modules)
+	if _, err := os.Stat(filepath.Join(modules, "main.lua")); err != nil {
+		fmt.Fprintf(os.Stdout, "[SERVER] WARNING: %s has no main.lua, so Nakama starts without this fork's server modules, which online play needs (nakama_modules in %s)\n", modules, profile)
+	}
+	settingsPath := absServerPath(nakamaSettingsPath(profile))
+	if err := writePrivateFile(settingsPath, nakamaServerYAML(cfg, modules)); err != nil {
+		return err
+	}
+	databasePath := absServerPath(nakamaDatabasePath(profile))
 	if cfg.DatabaseDSN != "" {
-		args = append(args, "--database.address", cfg.DatabaseDSN)
+		if err := writePrivateFile(databasePath, nakamaDatabaseYAML(cfg.DatabaseDSN)); err != nil {
+			return err
+		}
+	} else {
+		// A database the profile no longer names leaves no password behind.
+		if err := os.Remove(databasePath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		databasePath = ""
 	}
-	dbArgs := append([]string{}, args...)
-	args = append(args,
-		"--socket.port", strconv.Itoa(cfg.NakamaHTTPPort),
-		"--socket.server_key", cfg.ServerKey,
-		"--console.port", strconv.Itoa(cfg.NakamaConsolePort),
-		// IKEMEN's replay header exceeds Nakama's 4 KiB default message limit.
-		"--socket.max_message_size_bytes", "65536",
-	)
-	if cfg.BindAddress != "" && cfg.BindAddress != "0.0.0.0" {
-		args = append(args, "--socket.address", cfg.BindAddress)
-	}
-	args = append(args, cfg.ExtraArgs...)
+	args, migrateArgs := nakamaServerArgs(cfg, settingsPath, configPath, databasePath)
+	fmt.Fprintf(os.Stdout, "[SERVER] %s\n", serverConsoleSummary(profile, cfg))
+	fmt.Fprintf(os.Stdout, "[SERVER] Server modules: %s\n", modules)
 
 	// Nakama refuses to start on an unmigrated database; migrate is idempotent.
-	migrate := exec.CommandContext(ctx, binary, append([]string{"migrate", "up"}, dbArgs...)...)
+	migrate := exec.CommandContext(ctx, binary, migrateArgs...)
 	migrate.Dir = workDir
 	migrate.Env = append(os.Environ(), cfg.Environment...)
 	migrate.Stdout, migrate.Stderr = os.Stdout, os.Stderr
@@ -407,7 +773,7 @@ func runNakamaServer(ctx context.Context, cfg IkemenServerConfig) error {
 		if err := os.MkdirAll(filepath.Dir(logPath), 0755); err != nil {
 			return err
 		}
-		f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+		f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
 		if err != nil {
 			return err
 		}
@@ -416,8 +782,57 @@ func runNakamaServer(ctx context.Context, cfg IkemenServerConfig) error {
 	}
 	cmd.Stdout = output
 	cmd.Stderr = output
-	fmt.Fprintf(os.Stdout, "[SERVER] launching Nakama: %s %s\n", binary, strings.Join(args, " "))
+	fmt.Fprintf(os.Stdout, "[SERVER] launching Nakama: %s %s\n", binary, strings.Join(printableNakamaArgs(args), " "))
 	return cmd.Run()
+}
+
+// prepareServerProfile reads the profile -server starts Nakama with. It
+// refuses Nakama's public secrets, gives a profile written before the
+// launcher had them the settings it lacks, saving it so that its secrets stay
+// the same from one start to the next, and prints its warnings to out.
+func prepareServerProfile(path string, out io.Writer) (IkemenServerConfig, error) {
+	resolved := resolveServerPath(path)
+	raw, err := readIkemenServerConfig(path)
+	if err != nil {
+		return IkemenServerConfig{}, err
+	}
+	if err := checkServerSecrets(resolved, raw); err != nil {
+		return IkemenServerConfig{}, err
+	}
+	var added []string
+	for _, s := range serverSecrets {
+		if *s.field(&raw) == "" {
+			added = append(added, s.name)
+		}
+	}
+	if raw.ConsoleAddress == "" {
+		added = append(added, "console_address")
+	}
+	if raw.ConsoleUser == "" {
+		added = append(added, "console_user")
+	}
+	if raw.NakamaModules == "" {
+		added = append(added, "nakama_modules")
+	}
+	cfg := raw
+	fillServerProfile(&cfg)
+	cfg = normalizeServerConfig(cfg)
+	if len(added) > 0 {
+		if err := saveIkemenServerConfig(path, cfg); err != nil {
+			return IkemenServerConfig{}, err
+		}
+		private := ""
+		if runtime.GOOS != "windows" {
+			private = " (now readable by you alone)"
+		}
+		fmt.Fprintf(out, "[SERVER] Added to %s%s: %s\n", resolved, private, strings.Join(added, ", "))
+	} else if info, err := os.Stat(resolved); err == nil && runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0 {
+		fmt.Fprintf(out, "[SERVER] WARNING: other users of this computer can read %s, which holds the server's secrets: chmod 600 %s\n", resolved, resolved)
+	}
+	for _, w := range serverProfileWarnings(resolved, cfg) {
+		fmt.Fprintln(out, "[SERVER] WARNING:", w)
+	}
+	return cfg, nil
 }
 
 func runServerCommand() error {
@@ -428,9 +843,9 @@ func runServerCommand() error {
 	if val, ok := sys.cmdFlags["-server-config"]; ok && strings.TrimSpace(val) != "" {
 		path = val
 	}
-	cfg, err := loadIkemenServerConfig(path)
+	cfg, err := prepareServerProfile(path, os.Stdout)
 	if err != nil {
 		return err
 	}
-	return runNakamaServer(context.Background(), cfg)
+	return runNakamaServer(context.Background(), resolveServerPath(path), cfg)
 }
