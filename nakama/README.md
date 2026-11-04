@@ -970,7 +970,7 @@ Commands (`nakama.lobbySend(kind, fields)`):
 
 ## Server modules
 
-The runtime entrypoint is `nakama/modules/main.lua`. Install all nine files into Nakama's runtime module path:
+[hosting.md](hosting.md) walks through running a server with these modules for your game's players, step by step. The runtime entrypoint is `nakama/modules/main.lua`. Install all nine files into Nakama's runtime module path:
 
 - `main.lua` — loads the supporting modules. Lua match handlers are resolved by module name through `nk.match_create("ikemen_session", ...)`; the Lua runtime has no `register_match`.
 - `ikemen_matchmaker.lua` — uses Nakama's own matchmaker. Buckets come from the client's `+properties.*` query clauses; a `MatchmakerAdd` realtime before-hook replaces the ranked ticket's Elo with the stored rating (read by `ikemen_rating.lua`, with its settings) and appends the Elo window to the query. It creates an `ikemen_session` match for each pair, and records a ranked session's first set (see [Ranked sets](#ranked-sets)).
@@ -1016,13 +1016,15 @@ The replay stream header carries the players' fingerprint, and a spectator's gam
 
 What the game protects when a player plays online, and what it shows to whom:
 
-- **The connection to the server.** With a server profile that sets `ssl` (as every server on the internet should), the game talks to the server over HTTPS and a secure WebSocket and checks the server's certificate, so nobody on the way can read or change the sign-in, the chat or the matchmaking.
+- **The connection to the server.** With a server profile that sets `ssl` (as every server on the internet should, see [hosting.md](hosting.md)), the game talks to the server over HTTPS and a secure WebSocket and checks the server's certificate, so nobody on the way can read or change the sign-in, the chat or the matchmaking.
 - **The account.** A copy of the game signs in with a random device id it keeps in `save/nakama_device_id`. That file is the account: whoever has it signs in as that player, so it must never be shared, and a game must not ship its developer's.
 - **The fights.** Every packet between the two players' games, on every way they connect (direct, IPv6, the relay through the server), is encrypted and authenticated (AES-256-GCM) with keys the two games agree on through an X25519 key exchange in their signals (see [P2P primitive](#p2p-primitive)). Nobody else, other members of a lobby included, can read a fight, change it or add to it, and only the paired player's game can complete the handshake. The server passes the signals on, so it could come between the two players; it is trusted.
 - **What the opponent learns.** A direct connection needs each game to know the other's addresses, so the opponent's game gets your public IP address and port, your addresses on your own network and, from the ladder's second step, your IPv6 addresses. A fight that runs through the relay keeps the two players' addresses from each other; the server sees them, as it always does.
 - **The router.** Only when no direct connection has worked after 4 seconds does the game ask the router (PCP, NAT-PMP, then UPnP) to forward one UDP port to it: for 15 minutes, renewed while the session lasts, and closed again when the session ends and when the game exits; never for good. Only the router itself is asked, and the forwarded port reaches only the game's own socket, which takes nothing but the opponent's sealed packets.
 - **The relay.** Nakama lists relayed matches, so any signed-in player can find the one a fight falls back to and join it. They can neither read nor change the fight, but they can send the two players a flood of data of their own and spoil that fight.
 - **What the server sees.** Accounts and online names, chat, matchmaking and lobbies, the claims of ranked sets and, for its moderators, the ranked sets' replays; not the fights.
+
+[hosting.md](hosting.md#12-security-checklist) has the server host's side.
 
 ## Current implementation boundary
 
@@ -1102,6 +1104,8 @@ Dedicated servers are optional. A normal player does not need a local Nakama pro
 Ikemen_GO -server-wizard
 Ikemen_GO -server -server-config save/server.json
 ```
+
+**Not for a public server.** `-server` starts Nakama with Nakama's own defaults for everything it does not set: the public HTTP key `defaulthttpkey`, which allows the moderator RPCs; the web console on every address, with the user `admin` and the password `password`; and Nakama's default runtime path, which is not `nakama/modules`. The wizard's client profile has no STUN servers. Use it on your own network only; [hosting.md](hosting.md) walks through running a server for the internet, step by step.
 
 `-server-wizard` is intentionally headless: it prompts in the terminal and writes an IKEMEN server-manager JSON profile. The wizard also writes a companion `save/server-client.json` profile that can be copied into `data/online/servers.json` after the public hostname, key, and TLS settings are verified.
 
