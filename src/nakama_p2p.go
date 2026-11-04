@@ -80,6 +80,12 @@ type P2PSignal struct {
 	// them a secret that nobody can work out from the signals, which keys the
 	// sealing of every datagram between them (p2pKeys, p2pCrypt).
 	Key string `json:"key"`
+	// ServerRelay says the sender's game asks the session's match for the
+	// server's relay of the pair (nakama/modules/ikemen_relay.lua) before it
+	// falls back to a Nakama relayed match. A game from before it only joins
+	// the relayed match, so the two games use the server's relay only when
+	// both signals say so.
+	ServerRelay bool `json:"server_relay,omitempty"`
 }
 
 // p2PPacket is a handshake packet: a hello, which checks a route, or the ack
@@ -119,6 +125,9 @@ type NakamaP2P struct {
 	remoteToken string
 	remoteKey   string
 	keys        *p2pKeys // from the peer's signal; nil before
+	// peerServerRelay: the peer's signal says its game asks for the server's
+	// relay (P2PSignal.ServerRelay).
+	peerServerRelay bool
 	// crypt seals and opens every datagram on every path once the peer's
 	// signal gave the keys (p2pCrypt); the paths hold a pointer to it.
 	crypt atomic.Pointer[p2pCrypt]
@@ -208,7 +217,7 @@ func (p *NakamaP2P) localSignal() P2PSignal {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return P2PSignal{Magic: p2pMagic, MatchID: p.matchID, Token: p.token, Key: p.publicKey(),
-		Candidates: append([]P2PCandidate(nil), p.local...), From: p.selfID, To: p.peerID}
+		Candidates: append([]P2PCandidate(nil), p.local...), From: p.selfID, To: p.peerID, ServerRelay: true}
 }
 
 // publicKey is this side's half of the key exchange, as signals carry it.
@@ -339,6 +348,7 @@ func (p *NakamaP2P) HandleSignal(signal P2PSignal) error {
 		p.crypt.Store(crypt)
 	}
 	p.remote = append([]P2PCandidate(nil), signal.Candidates...)
+	p.peerServerRelay = signal.ServerRelay
 	p.mu.Unlock()
 	return nil
 }
@@ -384,11 +394,13 @@ func p2pDeriveKeys(secret []byte, matchID, token, remoteToken string) *p2pKeys {
 		mac.Write([]byte("ikemen-p2p-" + purpose + "|" + matchID + "|" + low + "|" + high))
 		return mac.Sum(nil)
 	}
-	// Nakama puts everyone who creates a relayed match of the same name into
-	// the same match, so the two players reach it without telling each other
-	// its id. Nakama also lists relayed matches and lets anyone join one by
-	// its id, so the name is not what keeps the relay private: every datagram
-	// on it is sealed, and the client passes on only the peer's data.
+	// The relayed match a session falls back to without the server's relay
+	// (nakama_relay.go): Nakama puts everyone who creates a relayed match of
+	// the same name into the same match, so the two players reach it without
+	// telling each other its id. Nakama also lists relayed matches and lets
+	// anyone join one by its id, so the name is not what keeps the relay
+	// private: every datagram on it is sealed, and the client passes on only
+	// the peer's data.
 	return &p2pKeys{
 		handshake: derive("handshake"),
 		seal:      derive("from|" + token),
@@ -655,14 +667,16 @@ func (p *NakamaP2P) joinRelay(relayer p2pRelayer) {
 		default:
 		}
 		p.mu.Lock()
-		keys, peerID := p.keys, p.peerID
+		keys, peerID, server := p.keys, p.peerID, p.peerServerRelay
 		p.mu.Unlock()
 		// The relay's name and keys come from the key exchange, so the peer's
 		// signal must have arrived; until then there is nobody to relay to.
+		// The signal also says which relay the peer's game joins.
 		if keys != nil {
 			path := &p2pRelayPath{crypt: &p.crypt}
 			route := p2pRoute{path: path, addr: p2pRelayAddr{peer: peerID}}
-			link, err := relayer.JoinRelay(keys.relayName, peerID, func(b []byte) { p.receive(b, route) })
+			req := p2pRelayRequest{MatchID: p.matchID, Name: keys.relayName, Peer: peerID, Server: server}
+			link, err := relayer.JoinRelay(req, func(b []byte) { p.receive(b, route) })
 			if err == nil {
 				path.mu.Lock()
 				path.link = link

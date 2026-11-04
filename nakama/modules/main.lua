@@ -11,11 +11,14 @@ local nk = require("nakama")
 -- ikemen_ranked (ranked sets and their replays) is shared by the matchmaker,
 -- the session, the rating and the moderation modules; ikemen_levels (the
 -- levels players see for their ratings, IKEMEN_LEVELS) by the rating
--- module, which the matchmaker and the moderation module use.
+-- module, which the matchmaker and the moderation module use. ikemen_relay
+-- (the relay match of a P2P session's two players, and its RPC) is used by
+-- the session and lobby modules, which make the relays.
 require("ikemen_matchmaker")
 require("ikemen_rating")
 require("ikemen_moderation")
 require("ikemen_lobby")
 require("ikemen_account")
+require("ikemen_relay")
 
 nk.logger_info("IKEMEN GO Nakama modules loaded")
