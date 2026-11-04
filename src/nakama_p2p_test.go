@@ -108,20 +108,32 @@ func TestNakamaP2PGatherCandidatesWithRouteFallback(t *testing.T) {
 	}
 }
 
-func TestNakamaP2PStartFailsWithoutAnyAddress(t *testing.T) {
+// Without an IPv4 address the handshake still starts: IPv6 and the relay
+// may connect the players, and the signal carries the token and key they
+// need.
+func TestNakamaP2PStartsWithoutAnyIPv4Address(t *testing.T) {
 	stubP2PAddresses(t,
 		func() ([]net.IP, error) { return nil, errNetlink },
 		func() (net.Addr, error) { return nil, errors.New("network is unreachable") })
-	p, err := NewNakamaP2P("test-match", 0, nil)
+	signals := make(chan P2PSignal, 4)
+	p, err := NewNakamaP2P("test-match", 0, func(s P2PSignal) error { signals <- s; return nil })
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer p.Close()
-	if err := p.Start(context.Background(), nil); !errors.Is(err, errNetlink) {
-		t.Fatalf("Start() error = %v, want %v", err, errNetlink)
+	if err := p.Start(context.Background(), nil); err != nil {
+		t.Fatalf("Start() error = %v", err)
 	}
-	if state := p.State(); state != "failed" {
-		t.Fatalf("State() = %q after a failed Start, want failed", state)
+	select {
+	case s := <-signals:
+		if s.Token == "" || s.Key == "" || len(s.Candidates) != 0 {
+			t.Fatalf("signal %+v", s)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no signal")
+	}
+	if state := p.State(); state != "connecting" {
+		t.Fatalf("State() = %q, want connecting", state)
 	}
 }
 
@@ -190,13 +202,13 @@ func TestNakamaP2PPunchesBetweenTwoPeers(t *testing.T) {
 	port2 := p2.LocalPort()
 
 	if err := p1.HandleSignal(P2PSignal{
-		Magic: p2pMagic, MatchID: "test-match", Token: tok2,
+		Magic: p2pMagic, MatchID: "test-match", Token: tok2, Key: p2.publicKey(),
 		Candidates: []P2PCandidate{{Type: "host", Address: "127.0.0.1", Port: port2}},
 	}); err != nil {
 		t.Fatal(err)
 	}
 	if err := p2.HandleSignal(P2PSignal{
-		Magic: p2pMagic, MatchID: "test-match", Token: tok1,
+		Magic: p2pMagic, MatchID: "test-match", Token: tok1, Key: p1.publicKey(),
 		Candidates: []P2PCandidate{{Type: "host", Address: "127.0.0.1", Port: port1}},
 	}); err != nil {
 		t.Fatal(err)

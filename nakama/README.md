@@ -371,7 +371,26 @@ nakama.stopP2P()
 
 When the first argument is omitted, the engine uses `Netplay.Rollback.Port`. The port only matters to players who forward it; when it is taken (for example by a second instance on the same machine) the socket binds an ephemeral port instead. An empty STUN list uses the server profile's `stun_servers`.
 
-This starts IPv4 host/server-reflexive candidate gathering and UDP hole punching. Signals carry the sender's and the intended peer's user ids; a lobby delivers each signal only to the member it names, and only the paired player answers. After the handshake the socket stays open until `nakama.stopP2P()`; the netplay stream and GGPO use channels on it (`src/nakama_p2pmux.go`). GGPO receives its channel through `transport.NewUdpFromPacketConn`, the constructor described in `patches/ggpo-nakama-transport.md`.
+This starts IPv4 host/server-reflexive candidate gathering and UDP hole punching. Signals carry the sender's and the intended peer's user ids; a lobby delivers each signal only to the member it names, the client drops a signal that names a sender other than the member the server says sent it, and only the paired player answers. Signals also carry each player's half of an X25519 key exchange. The secret it gives the two players, which nobody can work out from the signals (the server, which passes them on, could come between the players only by changing them), keys the sealing of every datagram between them, on every way (see below): AES-256-GCM, with one key for each direction. A datagram anyone else made, or a player's own sent back to it, does not open, so nobody else can complete the handshake, read what the players send, or add to it. The handshake is version 2 of the protocol (`IKEMEN-P2P/2`), which games from before the key exchange cannot complete; matchmaking and lobbies pair only games of the same build, so a game moving to this version gives its server profile a new `build`. After the handshake the socket stays open until `nakama.stopP2P()`; the netplay stream and GGPO use channels on it (`src/nakama_p2pmux.go`). GGPO receives its channel through `transport.NewUdpFromPacketConn`, the constructor described in `patches/ggpo-nakama-transport.md`.
+
+#### The connection ladder
+
+When the IPv4 path does not work, the handshake tries other ways to the other player, each added to the ones before (a way that has not worked yet may still work once the other player's game has started it too), and gives up after 30 seconds (`p2pDefaultTimeout` in `src/nakama_p2p.go`):
+
+| From | Way | What it gets past |
+|---|---|---|
+| the start | the IPv4 path: host and STUN (server-reflexive) candidates, hole punching | most home routers |
+| 4 seconds | IPv6 host candidates, on an IPv6 socket of their own | NAT altogether, where both players have IPv6: many mobile and newer networks do |
+| 4 seconds | a port the router forwards to the IPv4 socket, asked for with PCP, NAT-PMP or UPnP (`src/portmap`), offered as a candidate with the router's public address | a router that drops what nobody inside asked for, when it lets programs open ports (UPnP is on by default on most home routers) |
+| 10 seconds | a relay through the Nakama server | every network where the server is reachable |
+
+The relay is a Nakama relayed match that the two players join: the server forwards each datagram one sends to the other over their realtime sockets, at once (a relayed match has no handler and no tick). It needs no server module and no setting. Both players create the relayed match with the same name, derived from the key exchange's secret, and Nakama gives a relayed match created with a name the id derived from that name, so the two meet without sending each other its id. Nakama lists relayed matches and lets any signed-in player join one by its id, so the relay does not count on its name staying unknown: every datagram on it is sealed like any other, and the client takes the relay's data only from the paired player, whom the server names as its sender. Someone else who joins the relayed match sees how much the players send, but can neither read it nor send anything their games accept. They can still send the players a flood of their own, which the server forwards at once and the players' games then drop, and slow or break that relayed session; only a relay that a server module runs, admitting the two players alone, would prevent that (see [Current implementation boundary](#current-implementation-boundary)). The relay is not the client's match: the session's match or lobby stays what it was (`src/nakama_relay.go`). A relayed session sends its traffic, inputs and a few control packets, over the server, which adds the server's round trip to the players' own; rollback netcode hides most of it. The relay shares the realtime socket's output queue: a datagram is dropped, as a busy UDP socket would drop it, when the queue is three quarters full, so the client's own messages keep their room. A relayed session ends when the connection to the server does (the other player's game then falls silent, see below).
+
+Every way carries the same datagrams, so the netplay stream and GGPO run on whichever completed the handshake (`src/nakama_p2ppath.go`). The handshake checks routes as ICE's connectivity checks do. A hello checks a route: it carries a nonce that names the address it went to, and the ack that answers it echoes that nonce. An ack counts only when it comes from that address, so it shows that the route works both ways, and a copy of it sent from anywhere else shows nothing. A hello that arrives from an address the game has not verified is answered, and also starts a check of that address: behind a NAT that gives each destination a port of its own, the address the other player's packets come from is one no signal named. A game completes the handshake on the first route it verified and sends on it, takes the other player's data only from verified routes, and moves from the relay to a UDP route when it verifies one. The other player's data arriving on a route the game has not verified is dropped, and has the game check that route (at most once every 75 ms): the other game may have moved there after this game's own check of it was lost. Completing the handshake does not end it: a game keeps answering, checking and, after 10 seconds, joining the relay until the other player's game sends its first data, which shows that game completed it too, and gives up if that does not come within the 30 seconds (or 10 seconds after its own completion). The rollback session takes an IPv4 peer address; on the IPv6 socket and the relay it gets the other player's IPv4 address, or a documentation address (TEST-NET-1), and the mux sends every datagram on the session's way whatever address it names.
+
+The router is asked with PCP and NAT-PMP first, and with UPnP only when neither maps the port, so a router that speaks both does not open two ports. A port the router opened lasts 15 minutes, is renewed while the session lasts, and is removed when the session ends or the game exits, including through the scripts' `os.exit`; a request that went out without an answer, which the router may have granted all the same, is undone. The game never asks for a permanent UPnP mapping, which would outlive a game that crashed (a router that takes only those gets none), and a router whose own public address is private or shared (another NAT in front of it, as with carrier-grade NAT) gets no mapping, or has it removed again, since it would not help. Only the router is asked: PCP and NAT-PMP go to the default gateway where the system tells it (Linux, Windows, and Android where it allows it) and otherwise to the first and last address of each local network, and a UPnP answer counts only from that gateway, where the system tells it, and only when its description and control URLs are on the device that answered; redirects are not followed.
+
+`nakama.status()` reports the ladder: `st.p2p_stage` is `direct`, `extras` (IPv6 and a router port as well) or `relay` (the relay as well), `st.p2p_route` is `direct`, `ipv6` or `relay` once connected, and `st.p2p_error` is `old_peer` when the handshake ended because the other player's game is an older version. While the stage is past `direct`, the matchmaker's connecting screen says "Opponent found. Trying another way to connect..." (`online.text.found_other`); the lobby screens draw their own texts. The log names each step and the way the session connected over (`Nakama P2P: connected to the other player over relay ...`).
 
 ## Online sessions
 
@@ -416,6 +435,9 @@ Lua API used by the flow, also used by the lobby screens:
 local st = nakama.status()
 -- st.connected, st.matchmaking, st.match_id
 -- st.p2p: none | connecting | ready | failed | closed
+-- st.p2p_stage: direct | extras | relay (the connection ladder's latest step)
+-- st.p2p_route: direct | ipv6 | relay once connected, "" before
+-- st.p2p_error: old_peer when the other player's game is an older version, "" otherwise
 -- st.netplay: none | connecting | connected | failed
 -- st.host and st.peer once the pairing is known; st.error, st.netplay_error
 -- st.rtt_ms: last server round trip measured by nakama.ping() (see Lobbies), -1 until known
@@ -432,14 +454,17 @@ Connection behaviour:
 
 | Situation | Result |
 |---|---|
-| Both players behind typical home routers (NAT with a WAN firewall) | Connects |
-| One player behind such a router, the other with a public address | Connects |
-| One player behind a symmetric NAT (random port per destination), the other behind a port-restricted NAT | Fails after about 20 seconds with "Could not open a connection to the other player" |
-| Both players behind conntrack NATs without a WAN firewall | Fails the same way: the first player's packets reach the other NAT before that player has sent anything, and the NAT then moves the other player's mapping to a new port |
+| Both players behind typical home routers (NAT with a WAN firewall) | Connects directly, within the first seconds |
+| One player behind such a router, the other with a public address | Connects directly |
+| One player behind a symmetric NAT (random port per destination), the other reachable by anyone (a public address, a forwarded port, a router port the ladder opened, or a full-cone NAT) | Connects directly: the other player's game checks the address the first player's packets come from |
+| One player behind a symmetric NAT (random port per destination), the other behind a port-restricted NAT | The direct path fails; connects over IPv6 or a router port when one works, else over the relay, about 10 seconds after the start |
+| Both players behind conntrack NATs without a WAN firewall | The direct path fails (the first player's packets reach the other NAT before that player has sent anything, and the NAT then moves the other player's mapping to a new port); connects the same way as above |
+| No way works, the relay included | Fails after 30 seconds with "Could not open a connection to the other player, either directly or through the server." |
+| The other player's game speaks version 1 of the handshake (a copy from before the connection ladder) | Fails at once with "The other player's game is an older version." (`online.text.p2p_old`; a lobby is told `p2p`); the older game itself gives up after its own timeout |
 | A player quits or crashes during the session | The other side's session ends within about 8 seconds (1 second when the player leaves normally) |
-| The server stops, or the connection to it fails, during the session | The session goes on over the P2P path, which the game keeps with the session's match, so that both games take the same steps whether one or both lost their connection (the next fight runs over the P2P path too). The online rematch choices go through the server: a game without the connection cannot send its choice after a match, and the decision does not reach it. Claims of ranked sets are sent again (see [Claims sent again](#claims-sent-again)). The session's end leaves the match. |
+| The server stops, or the connection to it fails, during the session | A session on a UDP path goes on over it, which the game keeps with the session's match, so that both games take the same steps whether one or both lost their connection (the next fight runs over the P2P path too). A session on the relay ends, as when the other player quits. The online rematch choices go through the server: a game without the connection cannot send its choice after a match, and the decision does not reach it. Claims of ranked sets are sent again (see [Claims sent again](#claims-sent-again)). The session's end leaves the match. |
 
-A relay (TURN, or relaying through Nakama) is needed for the failing cases; none is implemented yet.
+The NAT rows were tested in a Linux network-namespace NAT lab with two games playing a quick match. The symmetric NAT was nftables `masquerade fully-random`, the conntrack and port-restricted NATs plain `masquerade`, the WAN firewall an input chain that drops what was not asked for, and a port-preserving `snat` that forwards everything to the player stood for a player anyone can reach. The first row and the symmetric-and-reachable row (both ways round) connected directly; the symmetric-and-port-restricted row and the conntrack row connected over the relay 10 seconds after the start; each match ended with the same result in both games. The engine before the ladder failed the two relay rows.
 
 ## Ranked sets
 
@@ -987,6 +1012,18 @@ The fingerprint is computed at the first `synchronize()`, before character selec
 
 The replay stream header carries the players' fingerprint, and a spectator's game compares it with its own before it plays the stream (see [Watching a lobby match](#watching-a-lobby-match)).
 
+## Security and privacy
+
+What the game protects when a player plays online, and what it shows to whom:
+
+- **The connection to the server.** With a server profile that sets `ssl` (as every server on the internet should), the game talks to the server over HTTPS and a secure WebSocket and checks the server's certificate, so nobody on the way can read or change the sign-in, the chat or the matchmaking.
+- **The account.** A copy of the game signs in with a random device id it keeps in `save/nakama_device_id`. That file is the account: whoever has it signs in as that player, so it must never be shared, and a game must not ship its developer's.
+- **The fights.** Every packet between the two players' games, on every way they connect (direct, IPv6, the relay through the server), is encrypted and authenticated (AES-256-GCM) with keys the two games agree on through an X25519 key exchange in their signals (see [P2P primitive](#p2p-primitive)). Nobody else, other members of a lobby included, can read a fight, change it or add to it, and only the paired player's game can complete the handshake. The server passes the signals on, so it could come between the two players; it is trusted.
+- **What the opponent learns.** A direct connection needs each game to know the other's addresses, so the opponent's game gets your public IP address and port, your addresses on your own network and, from the ladder's second step, your IPv6 addresses. A fight that runs through the relay keeps the two players' addresses from each other; the server sees them, as it always does.
+- **The router.** Only when no direct connection has worked after 4 seconds does the game ask the router (PCP, NAT-PMP, then UPnP) to forward one UDP port to it: for 15 minutes, renewed while the session lasts, and closed again when the session ends and when the game exits; never for good. Only the router itself is asked, and the forwarded port reaches only the game's own socket, which takes nothing but the opponent's sealed packets.
+- **The relay.** Nakama lists relayed matches, so any signed-in player can find the one a fight falls back to and join it. They can neither read nor change the fight, but they can send the two players a flood of data of their own and spoil that fight.
+- **What the server sees.** Accounts and online names, chat, matchmaking and lobbies, the claims of ranked sets and, for its moderators, the ranked sets' replays; not the fights.
+
 ## Current implementation boundary
 
 Implemented in this tree:
@@ -1010,6 +1047,7 @@ Implemented in this tree:
 - Match replays: one file per match, for online versus and co-op matches, local versus matches (an option) and matches against the CPU in the modes a game lists, with the match's description, the players' accounts, the rules and state it started with and its inputs, played from the replay menu without the menus that led to the fight.
 - Client-side replay chunk buffering per stream, including out-of-order chunk acceptance with contiguous-frame advancement.
 - STUN Binding Request parsing, host/server-reflexive candidate gathering, and UDP hole punching.
+- The connection ladder: IPv6 host candidates, a port the router opens (PCP, NAT-PMP or UPnP), and a relay through a Nakama relayed match when the IPv4 path does not work (see [The connection ladder](#the-connection-ladder)).
 - Matchmaker pairing into an IKEMEN netplay session over the P2P socket (KCP stream for the session, a GGPO channel per match).
 - Lua/main-thread event marshalling.
 - Explicit Nakama Lua server module entrypoint and match-handler registration.
@@ -1017,12 +1055,12 @@ Implemented in this tree:
 
 Still requiring completion or validation:
 
-- TURN/relay fallback for networks where direct UDP traversal fails.
 - Watching matchmaker (quick and ranked) matches as they are played: a quick match's stream reaches only the coordination match's members, the two players, and a ranked session's streams are kept for moderators; nothing loads the fight for anyone else.
 - Automatic verification of ranked results by replaying a set's replay on the server (moderators watch the replays instead; settlement itself is atomic).
 - Online co-op runs: a co-op fight can fail to start with a netplay "Synchronization error" (the two games' menu lockstep frame counts differ when the fight starts), which ends the session. It has been seen at the fight after a co-op match and at a run's first fight, and predates match replays. The fights played before it keep their match replays.
 - Meaningful `currentContentFingerprint()` coverage for production compatibility gating.
-- Production Nakama deployment configuration and two-peer testing across real internet NATs (tested so far in a Linux network-namespace NAT lab).
+- Production Nakama deployment configuration and two-peer testing across real internet NATs (tested so far in a Linux network-namespace NAT lab). The router ports were tested against simulated PCP, NAT-PMP and UPnP routers, not real ones, and the Windows lookup of the default gateway has been built but not run on Windows.
+- A relay that only the two players can join. The connection ladder's relay is a Nakama relayed match, which any signed-in player can find and join: they cannot read or change the players' data, but they can flood a relayed session (see [The connection ladder](#the-connection-ladder)). An authoritative relay match in the server modules, which admits only the paired players, would close this, at the cost of its tick's delay.
 
 ## Shipped client server profiles
 
