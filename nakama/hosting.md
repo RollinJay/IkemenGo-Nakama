@@ -207,7 +207,7 @@ Your game also needs a screenpack with the online menu items (QUICK MATCH (ONLIN
 Ship the game folder with your `data/online/servers.json`, and without:
 
 - `save/nakama_device_id`: the sign-in of your own copy. Shipped, every player would sign in as your account.
-- the server's configuration folder (`~/.config/nakama-matchmaker`), its keys, the Caddyfile's data, and any `save/server.json`, `save/server-nakama.yml` or `save/server-client.json` (the fork's own launcher's);
+- the server's configuration folder (`~/.config/nakama-matchmaker`), its keys, the Caddyfile's data, and any `save/server.json`, `save/server-nakama.yml`, `save/server-nakama-database.yml` or `save/server-client.json` (the fork's own launcher's);
 - your own `save/` state: logs, replays, `ranked_pending.json`, `stats.json`, the CBR AI's learned data.
 
 ## 11. Day to day

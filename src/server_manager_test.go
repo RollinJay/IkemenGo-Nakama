@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -403,11 +404,11 @@ func TestNakamaServerArgs(t *testing.T) {
 	cfg.BindAddress = "::1"
 	cfg.DatabaseDSN = "nakama:dbpassword@127.0.0.1:5432/nakama"
 	cfg.ExtraArgs = []string{"--logger.level", "DEBUG"}
-	args, migrateArgs := nakamaServerArgs(cfg, "/srv/save/server-nakama.yml", "/srv/nakama/config.yml")
+	args, migrateArgs := nakamaServerArgs(cfg, "/srv/save/server-nakama.yml", "/srv/nakama/config.yml", "/srv/save/server-nakama-database.yml")
 	want := []string{
 		"--config", "/srv/save/server-nakama.yml",
 		"--config", "/srv/nakama/config.yml",
-		"--database.address", "nakama:dbpassword@127.0.0.1:5432/nakama",
+		"--config", "/srv/save/server-nakama-database.yml",
 		"--socket.port", "17350",
 		"--socket.server_key", "serverkey",
 		"--console.port", "17351",
@@ -422,14 +423,18 @@ func TestNakamaServerArgs(t *testing.T) {
 		"migrate", "up",
 		"--config", "/srv/save/server-nakama.yml",
 		"--config", "/srv/nakama/config.yml",
-		"--database.address", "nakama:dbpassword@127.0.0.1:5432/nakama",
+		"--config", "/srv/save/server-nakama-database.yml",
 	}
 	if !reflect.DeepEqual(migrateArgs, wantMigrate) {
 		t.Errorf("migrate args\n%q\nwant\n%q", migrateArgs, wantMigrate)
 	}
-	// The secrets go in the settings file, never on the command line.
-	for _, s := range serverSecrets {
-		for _, arg := range append(args, migrateArgs...) {
+	// The secrets and the database's password go in files, never on the
+	// command line.
+	for _, arg := range append(args, migrateArgs...) {
+		if strings.Contains(arg, "dbpassword") {
+			t.Errorf("argument %q holds the database's password", arg)
+		}
+		for _, s := range serverSecrets {
 			if strings.Contains(arg, *s.field(&cfg)) {
 				t.Errorf("argument %q holds %s", arg, s.name)
 			}
@@ -438,7 +443,7 @@ func TestNakamaServerArgs(t *testing.T) {
 
 	// No config file of the host's, every address, and no database.
 	cfg.BindAddress, cfg.DatabaseDSN, cfg.ExtraArgs = "0.0.0.0", "", nil
-	args, migrateArgs = nakamaServerArgs(cfg, "/srv/save/server-nakama.yml", "")
+	args, migrateArgs = nakamaServerArgs(cfg, "/srv/save/server-nakama.yml", "", "")
 	want = []string{
 		"--config", "/srv/save/server-nakama.yml",
 		"--socket.port", "17350",
@@ -475,6 +480,19 @@ console:
   signing_key: "signingkey"
   mfa:
     storage_encryption_key: "mfakey-mfakey-mfakey-mfakey-mfak"
+`
+	if got != want {
+		t.Errorf("got\n%s\nwant\n%s", got, want)
+	}
+}
+
+func TestNakamaDatabaseYAML(t *testing.T) {
+	got := string(nakamaDatabaseYAML("nakama:p%40ss@db.example.com:5432/nakama?sslmode=verify-full"))
+	want := `# The database of an IKEMEN GO server profile (database_dsn), written by Ikemen_GO -server
+# each time it starts Nakama: change the profile, not this file.
+database:
+  address:
+    - "nakama:p%40ss@db.example.com:5432/nakama?sslmode=verify-full"
 `
 	if got != want {
 		t.Errorf("got\n%s\nwant\n%s", got, want)
@@ -548,26 +566,35 @@ func TestRunNakamaServerStartsNakama(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg.Environment = []string{"IKEMEN_TEST_NAKAMA_ARGS=" + record}
-	if err := runNakamaServer(context.Background(), path, cfg); err != nil {
-		t.Fatal(err)
+	// runNakama starts Nakama and returns the arguments of its two runs.
+	runNakama := func(cfg IkemenServerConfig) (migrate, server string) {
+		t.Helper()
+		if err := os.Remove(record); err != nil && !errors.Is(err, os.ErrNotExist) {
+			t.Fatal(err)
+		}
+		if err := runNakamaServer(context.Background(), path, cfg); err != nil {
+			t.Fatal(err)
+		}
+		data, err := os.ReadFile(record)
+		if err != nil {
+			t.Fatal(err)
+		}
+		runs := strings.Split(strings.TrimSuffix(string(data), "---\n"), "---\n")
+		if len(runs) != 2 {
+			t.Fatalf("Nakama ran %d times, want 2 (migrate, then the server): %q", len(runs), data)
+		}
+		return runs[0], runs[1]
 	}
 
-	data, err := os.ReadFile(record)
-	if err != nil {
-		t.Fatal(err)
-	}
-	runs := strings.Split(strings.TrimSuffix(string(data), "---\n"), "---\n")
-	if len(runs) != 2 {
-		t.Fatalf("Nakama ran %d times, want 2 (migrate, then the server): %q", len(runs), data)
-	}
+	migrateRun, serverRun := runNakama(cfg)
 	settings := filepath.Join(dir, "save", "server-nakama.yml")
 	wantMigrate := "migrate\nup\n--config\n" + settings + "\n"
 	wantServer := "--config\n" + settings + "\n--socket.port\n17350\n--socket.server_key\ndefaultkey\n--console.port\n17351\n--socket.max_message_size_bytes\n65536\n"
-	if runs[0] != wantMigrate {
-		t.Errorf("migrate ran with\n%s\nwant\n%s", runs[0], wantMigrate)
+	if migrateRun != wantMigrate {
+		t.Errorf("migrate ran with\n%s\nwant\n%s", migrateRun, wantMigrate)
 	}
-	if runs[1] != wantServer {
-		t.Errorf("Nakama ran with\n%s\nwant\n%s", runs[1], wantServer)
+	if serverRun != wantServer {
+		t.Errorf("Nakama ran with\n%s\nwant\n%s", serverRun, wantServer)
 	}
 
 	checkPrivateFile(t, settings)
@@ -582,5 +609,36 @@ func TestRunNakamaServerStartsNakama(t *testing.T) {
 		if !strings.Contains(string(yaml), line+"\n") {
 			t.Errorf("settings file lacks %q:\n%s", line, yaml)
 		}
+	}
+	database := filepath.Join(dir, "save", "server-nakama-database.yml")
+	if _, err := os.Stat(database); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("a profile without a database got %s (%v)", database, err)
+	}
+
+	// The profile's database comes in a file of its own, after the others,
+	// and its password stays off Nakama's command line.
+	cfg.DatabaseDSN = "nakama:dbpassword@127.0.0.1:5432/nakama"
+	migrateRun, serverRun = runNakama(cfg)
+	if want := "migrate\nup\n--config\n" + settings + "\n--config\n" + database + "\n"; migrateRun != want {
+		t.Errorf("migrate ran with\n%s\nwant\n%s", migrateRun, want)
+	}
+	if want := "--config\n" + settings + "\n--config\n" + database + strings.TrimPrefix(wantServer, "--config\n"+settings); serverRun != want {
+		t.Errorf("Nakama ran with\n%s\nwant\n%s", serverRun, want)
+	}
+	if strings.Contains(migrateRun+serverRun, "dbpassword") {
+		t.Errorf("Nakama's command line holds the database's password:\n%s%s", migrateRun, serverRun)
+	}
+	checkPrivateFile(t, database)
+	if data, err := os.ReadFile(database); err != nil || string(data) != string(nakamaDatabaseYAML(cfg.DatabaseDSN)) {
+		t.Errorf("database file %q (%v), want %q", data, err, nakamaDatabaseYAML(cfg.DatabaseDSN))
+	}
+
+	// A profile that drops its database leaves no password behind.
+	cfg.DatabaseDSN = ""
+	if _, serverRun = runNakama(cfg); serverRun != wantServer {
+		t.Errorf("Nakama ran with\n%s\nwant\n%s", serverRun, wantServer)
+	}
+	if _, err := os.Stat(database); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("%s stayed after the profile dropped its database (%v)", database, err)
 	}
 }

@@ -548,6 +548,22 @@ func nakamaSettingsPath(profile string) string {
 	return strings.TrimSuffix(profile, filepath.Ext(profile)) + "-nakama.yml"
 }
 
+// nakamaDatabasePath is the file -server hands Nakama the profile's database
+// in, next to the profile: save/server-nakama-database.yml.
+func nakamaDatabasePath(profile string) string {
+	return strings.TrimSuffix(profile, filepath.Ext(profile)) + "-nakama-database.yml"
+}
+
+// nakamaDatabaseYAML is the file that hands Nakama the profile's database,
+// whose address holds the database's password: a file only its owner can
+// read keeps it from the other users of the computer, who can read Nakama's
+// command line.
+func nakamaDatabaseYAML(dsn string) []byte {
+	return []byte("# The database of an IKEMEN GO server profile (database_dsn), written by Ikemen_GO -server\n" +
+		"# each time it starts Nakama: change the profile, not this file.\n" +
+		"database:\n  address:\n    - " + yamlQuote(dsn) + "\n")
+}
+
 // nakamaServerYAML is the settings file -server hands Nakama first: the
 // profile's secrets, which stay off Nakama's command line (other programs on
 // the computer can read it), the console's address and user, and the
@@ -594,17 +610,19 @@ func nakamaListenAddress(address string) string {
 // nakamaServerArgs returns the arguments -server starts Nakama with, and
 // those of the database migration before it. The settings file -server
 // writes (nakamaServerYAML) comes first, and the host's own Nakama config
-// file after it overrides it. The profile's database, ports, server key and
-// address come as flags, which override both, so that the wizard's client
-// profile agrees with the running server; extra_args come last so that a
-// host can still override any of them.
-func nakamaServerArgs(c IkemenServerConfig, settingsPath, configPath string) (args, migrateArgs []string) {
+// file after it overrides it. The profile's database file
+// (nakamaDatabaseYAML), if it has one, comes after both and overrides them,
+// so that Nakama uses the database the profile names. The profile's ports,
+// server key and address come as flags, which override all of them, so that
+// the wizard's client profile agrees with the running server; extra_args
+// come last so that a host can still override any of them.
+func nakamaServerArgs(c IkemenServerConfig, settingsPath, configPath, databasePath string) (args, migrateArgs []string) {
 	args = []string{"--config", settingsPath}
 	if configPath != "" {
 		args = append(args, "--config", configPath)
 	}
-	if c.DatabaseDSN != "" {
-		args = append(args, "--database.address", c.DatabaseDSN)
+	if databasePath != "" {
+		args = append(args, "--config", databasePath)
 	}
 	migrateArgs = append([]string{"migrate", "up"}, args...)
 	args = append(args,
@@ -621,7 +639,8 @@ func nakamaServerArgs(c IkemenServerConfig, settingsPath, configPath string) (ar
 }
 
 // printableNakamaArgs are Nakama's arguments for the line -server prints,
-// without the database's password and the secrets that extra_args may set.
+// without the secrets that extra_args may set, a database's password among
+// them.
 func printableNakamaArgs(args []string) []string {
 	hide := func(flag, value string) string {
 		switch strings.TrimLeft(flag, "-") {
@@ -687,7 +706,19 @@ func runNakamaServer(ctx context.Context, profile string, cfg IkemenServerConfig
 	if err := writePrivateFile(settingsPath, nakamaServerYAML(cfg, modules)); err != nil {
 		return err
 	}
-	args, migrateArgs := nakamaServerArgs(cfg, settingsPath, configPath)
+	databasePath := absServerPath(nakamaDatabasePath(profile))
+	if cfg.DatabaseDSN != "" {
+		if err := writePrivateFile(databasePath, nakamaDatabaseYAML(cfg.DatabaseDSN)); err != nil {
+			return err
+		}
+	} else {
+		// A database the profile no longer names leaves no password behind.
+		if err := os.Remove(databasePath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		databasePath = ""
+	}
+	args, migrateArgs := nakamaServerArgs(cfg, settingsPath, configPath, databasePath)
 	fmt.Fprintf(os.Stdout, "[SERVER] %s\n", serverConsoleSummary(profile, cfg))
 	fmt.Fprintf(os.Stdout, "[SERVER] Server modules: %s\n", modules)
 
