@@ -331,7 +331,7 @@ jobs:
             mingw-w64-x86_64-toolchain
             mingw-w64-x86_64-bzip2
             mingw-w64-x86_64-nasm
-            mingw-w64-x86_64-tools-git
+            mingw-w64-ucrt-x86_64-tools
             mingw-w64-x86_64-SDL2
             mingw-w64-x86_64-libxmp
       - name: Prepare Vulkan SDK

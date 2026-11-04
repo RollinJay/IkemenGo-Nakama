@@ -560,6 +560,7 @@ func (s *System) shutdown() {
 	if speaker != nil {
 		speaker.Close()
 	}
+	releaseRouterPorts()
 }
 
 func getViewport(srcW, srcH, dstW, dstH float64) [4]float64 {

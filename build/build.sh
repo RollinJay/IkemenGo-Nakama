@@ -176,6 +176,11 @@ check_deps() {
 			need g++
 			need nasm
 			need go
+			# MSYS2 ships gendef (mingw-w64's tools) for UCRT64 only now; it
+			# reads any DLL, so the MINGW64 build can use that one.
+			if ! command -v gendef >/dev/null 2>&1 && [[ -x /ucrt64/bin/gendef.exe ]]; then
+				export PATH="$PATH:/ucrt64/bin"
+			fi
 			need gendef
 			need dlltool
 			if ((${#missing[@]})); then
@@ -186,7 +191,7 @@ check_deps() {
 				echo "    git make diffutils mingw-w64-x86_64-pkg-config \\" >&2
 				echo "    mingw-w64-x86_64-go mingw-w64-x86_64-toolchain \\" >&2
 				echo "    mingw-w64-x86_64-nasm mingw-w64-x86_64-yasm \\" >&2
-				echo "    mingw-w64-x86_64-tools-git mingw-w64-x86_64-libxmp \\" >&2
+				echo "    mingw-w64-ucrt-x86_64-tools mingw-w64-x86_64-libxmp \\" >&2
 				echo "    mingw-w64-x86_64-SDL2" >&2
 				exit 1
 			fi

@@ -1910,7 +1910,14 @@ function lobby.f_playMatch()
 	end)
 	if not ok then
 		if reason ~= 'ended' then
-			pcall(nakama.lobbySend, 'pair_failed', {seq = cur.seq, reason = reason or 'p2p'})
+			-- The lobby knows p2p, session_failed and cancel: to it, an older
+			-- game on the other side is a p2p failure (the chat line below
+			-- tells this player why).
+			local sent = reason or 'p2p'
+			if sent == 'p2p_old' then
+				sent = 'p2p'
+			end
+			pcall(nakama.lobbySend, 'pair_failed', {seq = cur.seq, reason = sent})
 		end
 		online.f_endSession()
 		-- A cancelled or already ended pairing needs no explanation here: the
