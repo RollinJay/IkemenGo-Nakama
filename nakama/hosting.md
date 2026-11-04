@@ -15,7 +15,7 @@ The steps follow a setup that has run a real community (Hyper DBZ) on a home Lin
 | a name | a domain of yours, or a free dynamic DNS name such as DuckDNS |
 | a router or a firewall | one TCP port, 443, open to the internet |
 
-**Why not `Ikemen_GO -server`?** The fork's own launcher ([Optional dedicated-server launcher](README.md#optional-dedicated-server-launcher)) starts Nakama with Nakama's defaults: the public HTTP key `defaulthttpkey`, which lets anyone call the moderators' RPCs, the web console open on every address with the user `admin` and the password `password`, no path to this fork's modules, and a server profile without STUN servers. It is fine for trying things on your own network; do not open it to the internet.
+**Why not `Ikemen_GO -server`?** The fork's own launcher ([Optional dedicated-server launcher](README.md#optional-dedicated-server-launcher)) also starts Nakama with keys of its own, the console on its computer only and this fork's modules. But you set up its database yourself, and it runs the modules without Nakama Matchmaker's community module, so players can write the records the modules keep: a player who has no rating yet can write one, which the leaderboard then shows ([Server modules](README.md#server-modules)). `nakama-matchmaker-server` does both for you, so this guide uses it.
 
 ## 1. Choose where the server runs
 
@@ -207,7 +207,7 @@ Your game also needs a screenpack with the online menu items (QUICK MATCH (ONLIN
 Ship the game folder with your `data/online/servers.json`, and without:
 
 - `save/nakama_device_id`: the sign-in of your own copy. Shipped, every player would sign in as your account.
-- the server's configuration folder (`~/.config/nakama-matchmaker`), its keys, the Caddyfile's data, and any `save/server.json` or `save/server-client.json`;
+- the server's configuration folder (`~/.config/nakama-matchmaker`), its keys, the Caddyfile's data, and any `save/server.json`, `save/server-nakama.yml` or `save/server-client.json` (the fork's own launcher's);
 - your own `save/` state: logs, replays, `ranked_pending.json`, `stats.json`, the CBR AI's learned data.
 
 ## 11. Day to day
