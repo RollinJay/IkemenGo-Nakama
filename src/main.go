@@ -137,15 +137,21 @@ func realMain() {
 		if val, exists := sys.cmdFlags["-server-config"]; exists && strings.TrimSpace(val) != "" {
 			path = val
 		}
+		waitToClose := openServerConsole("IKEMEN GO server wizard", true)
 		if err := runServerWizard(os.Stdin, os.Stdout, path); err != nil {
 			fmt.Fprintln(os.Stderr, "Server wizard error:", err)
 		}
+		waitToClose(0)
 		return
 	}
 	if _, ok := sys.cmdFlags["-server"]; ok {
+		waitToClose := openServerConsole("IKEMEN GO server", false)
 		if err := runServerCommand(); err != nil {
 			fmt.Fprintln(os.Stderr, "Server error:", err)
 		}
+		// A server nobody watches closes its window by itself, for whatever
+		// restarts it to do so.
+		waitToClose(time.Minute)
 		return
 	}
 

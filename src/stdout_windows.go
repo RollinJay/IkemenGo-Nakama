@@ -17,17 +17,33 @@ var (
 	procAttachConsole = modkernel32.NewProc("AttachConsole")
 )
 
+// replacedStreams holds the files taken out of os.Stdin, os.Stdout and
+// os.Stderr. Left to the garbage collector, each would close its handle,
+// which may be the handle of the file that replaced it (a stream the game was
+// started with redirected to a file or a pipe) or a number a newer handle has
+// taken since.
+var replacedStreams []*os.File
+
+// setStdStream points stream, &os.Stdin, &os.Stdout or &os.Stderr, at handle h.
+func setStdStream(stream **os.File, h uintptr, name string) {
+	replacedStreams = append(replacedStreams, *stream)
+	*stream = os.NewFile(h, name)
+}
+
 func init() {
+	attachParentConsole()
+	LogMessage("Ikemen, GO!")
+	LogMessage("Version: %v Build Time: %v", Version, BuildTime)
+	runtime.LockOSThread()
+}
+
+// attachParentConsole attaches the game, a windowed program, to the console
+// of the program that started it, if it has one, for its output to show there.
+func attachParentConsole() {
 	syscall.Syscall(procAttachConsole.Addr(), 1, uintptr(ATTACH_PARENT_PROCESS), 0, 0)
 
 	hout, _ := syscall.GetStdHandle(syscall.STD_OUTPUT_HANDLE)
 	herr, _ := syscall.GetStdHandle(syscall.STD_ERROR_HANDLE)
-	//if err1 != nil || err2 != nil { // nowhere to print the message
-
-	//}
-	os.Stdout = os.NewFile(uintptr(hout), "/dev/stdout")
-	os.Stderr = os.NewFile(uintptr(herr), "/dev/stderr")
-	LogMessage("Ikemen, GO!")
-	LogMessage("Version: %v Build Time: %v", Version, BuildTime)
-	runtime.LockOSThread()
+	setStdStream(&os.Stdout, uintptr(hout), "/dev/stdout")
+	setStdStream(&os.Stderr, uintptr(herr), "/dev/stderr")
 }
