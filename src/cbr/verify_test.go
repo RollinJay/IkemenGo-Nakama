@@ -1199,3 +1199,41 @@ func TestCheatChecksDoNotBlockAReachableSpot(t *testing.T) {
 		t.Fatalf("below the power the route was found open at: %v, cheating %v; want blocked, cheating", got, st.cheating(k2, 500))
 	}
 }
+
+// TestPauseHoldsTheTestPlay: no play begins while a pause holds the
+// character (the opponent's SuperPause, say), whose input the engine does
+// not take then; and a test play the pause keeps from coming out counts
+// neither against the case nor against its command's spot.
+func TestPauseHoldsTheTestPlay(t *testing.T) {
+	p := DefaultParams()
+	eng := New(p, t.TempDir(), 1)
+	st, _ := eng.Store("A")
+	start := Feat{RoundState: 2, Enemy: CharFeat{Present: true, RelX: 150, State: StStand, Ctrl: true, Move: MtIdle, LifeFrac: 1}, TimeFrac: -1}
+	c := &Case{ID: 1, Source: SrcCharacterAI, Kind: KindCommand, Command: "a", ExecFrame: 0, MoveRef: 200, ExecAttack: true, ExecClass: StStand,
+		Inputs: []InputBits{InA, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}, StartStateType: StStand, StartCtrl: true, StartMoveType: MtIdle, Start: start,
+		Outcome: Outcome{Trials: 1, ValueSum: 0.2}}
+	st.Admit(p, []*Case{c})
+	eng.SetPlayer(0, "A", "B")
+	eng.Drive(0, Levels{Execution: 8, Knowledge: 8})
+	ff := &frameFeeder{eng: eng}
+	standing := CharSnap{StateType: StStand, MoveType: MtIdle, Ctrl: true, Routes: simRouteTable}
+	frozen := standing
+	frozen.Frozen = true
+	ff.frame(frozen)
+	if _, ok := eng.Input(0, true); ok {
+		t.Fatal("a play began while a pause held the character")
+	}
+	ff.frame(standing)
+	for i := 0; i < 10; i++ {
+		if _, ok := eng.Input(0, true); !ok {
+			break
+		}
+		f := frozen
+		f.CBRDriven = true
+		ff.frame(f)
+	}
+	v := st.Verdicts[spotKey(200, "a", &standing)]
+	if c.Outcome.Plays == 0 || c.Outcome.ExecFails != 0 || v != nil && v.Fails > 0 {
+		t.Fatalf("%d plays, %d failed executions, spot %+v; want a play that counts against nothing", c.Outcome.Plays, c.Outcome.ExecFails, v)
+	}
+}

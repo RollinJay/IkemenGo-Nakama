@@ -771,6 +771,7 @@ func cbrFillChar(d *cbr.CharSnap, c *Char, root bool) {
 		}
 	}
 	d.HitPause = c.hitPauseTime
+	d.Frozen = cbrFrozen(c)
 	// The last hitter's player number. GetHitVar keeps it after the hit ends
 	// and holds -2 until the first hit of the round; helpers and projectiles
 	// carry their owner's player number.
@@ -811,6 +812,15 @@ func cbrFillChar(d *cbr.CharSnap, c *Char, root bool) {
 			}
 		}
 	}
+}
+
+// cbrFrozen reports whether a Pause or SuperPause holds c this frame: one
+// it does not move during, as CharList.commandUpdate tells.
+func cbrFrozen(c *Char) bool {
+	if sys.supertime > 0 {
+		return c.superMovetime == 0
+	}
+	return sys.pausetime > 0 && c.pauseMovetime == 0
 }
 
 func cbrFinite(v float32) float32 {

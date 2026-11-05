@@ -84,8 +84,8 @@ type driver struct {
 	// Verifying commands (see Verdict): tests counts this round's test plays
 	// (see Params.VerifyPerRound); vkey is the spot of the current play's
 	// command, where it was begun, and vpow the power it was begun at; hit is
-	// set when the character was hit or guarded during the play, which then
-	// says nothing of its command. prev is the frame observed before the
+	// set when the character was hit, guarded or held by a pause during the
+	// play, which then says nothing of its command. prev is the frame observed before the
 	// last one.
 	tests    int32
 	vkey     VerdictKey
@@ -159,7 +159,7 @@ func (d *driver) observeOwn(self *CharSnap) {
 	c := d.cur
 	changed := seen && (self.Entry != EntryNone || !labelled(self) && self.StateNo != prev.StateNo)
 	if c != nil && self.CBRDriven {
-		if self.MoveType == MtHit {
+		if self.MoveType == MtHit || self.Frozen {
 			d.hit = true
 		}
 		// Something other than the move came out of the CBR layer's input.
@@ -258,6 +258,10 @@ func (d *driver) input(w *WorldSnap, self *CharSnap, cur *Feat) (InputBits, bool
 		}
 	}
 	if d.cur == nil {
+		if self.Frozen {
+			// A pause holds the character: input given now would be lost.
+			return 0, false
+		}
 		if d.waitCtrl {
 			if !self.Ctrl {
 				return 0, false

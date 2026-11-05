@@ -135,6 +135,11 @@ type CharSnap struct {
 	// HitPause is the remaining hitpause. State time does not advance during
 	// hitpause, so it distinguishes frames that share a state time.
 	HitPause int32
+	// Frozen is set while a Pause or SuperPause holds the character (one it
+	// does not move during, as the opponent's super): its state does not
+	// advance, and the engine takes its input only in the pause's last
+	// frames.
+	Frozen bool
 	// HitBy is the player number (1-based) of whoever hit this character
 	// last, 0 when unknown. It attributes damage in team modes.
 	HitBy int
