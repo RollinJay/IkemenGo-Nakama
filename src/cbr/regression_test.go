@@ -1,6 +1,7 @@
 package cbr
 
 import (
+	"math"
 	"math/rand"
 	"testing"
 )
@@ -475,5 +476,32 @@ func TestCommandOutOfAMovementIsItsOwnCase(t *testing.T) {
 	}
 	if special == nil || special.Kind != KindCommand || special.Command != "qcf_a" || special.StartCtrl {
 		t.Fatalf("the special's own case, begun in the dash: %+v", special)
+	}
+}
+
+// A value that is not a number, which only a damaged file holds, proves no
+// move better than the base AI, and the store leaves such records out when
+// it loads, so that they are not saved again.
+func TestNotANumberProvesNothing(t *testing.T) {
+	p := DefaultParams()
+	nan := float32(math.NaN())
+	cmp := comparison{bases: [2]basis{{b: nan, margin: 0.1, share: 1}}, n: 1}
+	if p.beats(cmp, PlayStat{Trials: 10, Sum: 5, Shares: 10}, 1) {
+		t.Fatal("a move beat a record of the base AI that is not a number")
+	}
+	st := NewStore("x")
+	st.Baseline[1] = &BaselineStat{Trials: 5, ValueSum: nan, Shares: 5}
+	st.Baseline[2] = &BaselineStat{Trials: 5, ValueSum: 1, Shares: 5}
+	st.Played[3] = &PlayStat{Trials: float32(math.Inf(1))}
+	path := t.TempDir() + "/x.cbr"
+	if err := SaveStore(path, st); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := LoadStore(path, "x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := loaded.Baseline[1]; ok || loaded.Baseline[2] == nil || len(loaded.Played) != 0 {
+		t.Fatalf("loaded: base AI records %v, plays %v; want only the finite record", loaded.Baseline, loaded.Played)
 	}
 }

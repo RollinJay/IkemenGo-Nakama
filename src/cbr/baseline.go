@@ -333,7 +333,8 @@ func (p *Params) beats(cmp comparison, rec PlayStat, w float32) bool {
 		if adv > 0 {
 			adv *= w
 		}
-		if adv <= x.margin {
+		// Not proved, also when the advantage is not a number.
+		if !(adv > x.margin) {
 			return false
 		}
 	}

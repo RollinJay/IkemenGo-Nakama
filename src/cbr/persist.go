@@ -9,6 +9,7 @@ import (
 	"hash/fnv"
 	"io"
 	"io/fs"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -171,8 +172,36 @@ func LoadStore(path, char string) (*Store, error) {
 		clear(s.Played)
 		s.BaseFormat = baseFormat
 	}
+	dropNonFinite(s)
 	s.index()
 	return s, nil
+}
+
+// dropNonFinite removes the base AI's records and the CBR layer's plays that
+// hold a value that is not a finite number, which only a damaged file
+// holds: kept, one would make comparisons with the base AI (see beats) come
+// out wrong for good, as it would be saved again.
+func dropNonFinite(s *Store) {
+	finite := func(vs ...float32) bool {
+		for _, v := range vs {
+			if math.IsNaN(float64(v)) || math.IsInf(float64(v), 0) {
+				return false
+			}
+		}
+		return true
+	}
+	for _, m := range []map[uint64]*BaselineStat{s.Baseline, s.Offered} {
+		for k, b := range m {
+			if b == nil || !finite(b.Trials, b.ValueSum, b.Shares) {
+				delete(m, k)
+			}
+		}
+	}
+	for k, p := range s.Played {
+		if p == nil || !finite(p.Trials, p.Sum, p.Shares, p.Contests) {
+			delete(s.Played, k)
+		}
+	}
 }
 
 // SaveAggregate writes an aggregate as gzip-compressed JSON.
