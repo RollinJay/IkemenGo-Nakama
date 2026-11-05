@@ -1540,3 +1540,217 @@ func TestCBRCheckRestoresEngineState(t *testing.T) {
 		}
 	}
 }
+
+// cbrTestBufferNegOne is a [Statedef -1] in the way of characters that read
+// the input themselves: the person's special is gated on !AILevel and reads
+// a variable the character's own input code sets (var(20) here, explods in
+// many characters) instead of a command, while the AI has a route of its
+// own into the same state.
+const cbrTestBufferNegOne = `
+[State -1, person's buffered special]
+type = ChangeState
+value = 1500
+triggerall = !AILevel
+triggerall = var(20) = 1
+trigger1 = ctrl
+
+[State -1, AI's special]
+type = ChangeState
+value = 1500
+triggerall = AILevel
+trigger1 = var(21) = 1 && ctrl
+
+[State -1, AI only]
+type = ChangeState
+value = 1600
+trigger1 = AILevel && var(22) = 1
+
+[State -1, AI jump]
+type = ChangeState
+value = 40
+trigger1 = AILevel && var(23) = 1
+
+[State -1, AI walk]
+type = ChangeState
+value = 20
+trigger1 = AILevel && var(24) = 1
+
+[State -1, person's special that reads the direction from an explod]
+type = ChangeState
+value = 1700
+triggerall = AILevel <= 0
+triggerall = command = "x"
+triggerall = NumExplod(5000)
+trigger1 = ctrl
+
+[State -1, person's special that also needs power]
+type = ChangeState
+value = 1710
+triggerall = AILevel <= 0
+triggerall = command = "x"
+triggerall = NumExplod(5000)
+triggerall = power >= 1000
+trigger1 = ctrl
+
+[State -1, AI into 1700]
+type = ChangeState
+value = 1700
+trigger1 = AILevel && var(25) = 1
+
+[State -1, AI into 1710]
+type = ChangeState
+value = 1710
+trigger1 = AILevel && var(26) = 1
+`
+
+const cbrTestBufferStates = cbrTestStates + `
+[Statedef 1500]
+type = S
+movetype = A
+ctrl = 0
+
+[Statedef 1600]
+type = S
+movetype = A
+ctrl = 0
+
+[Statedef 40]
+type = S
+movetype = I
+ctrl = 0
+
+[Statedef 20]
+type = S
+movetype = I
+ctrl = 1
+
+[Statedef 1601]
+type = S
+movetype = A
+ctrl = 0
+
+[Statedef 1700]
+type = S
+movetype = A
+ctrl = 0
+
+[Statedef 1710]
+type = S
+movetype = A
+ctrl = 0
+`
+
+// TestCBRInputBufferRoutes: a person's special that reads the input itself
+// behind !AILevel is a person's way in that names no command. Fired by a
+// person, or by the CBR layer's input with the AI level masked, it is Input;
+// the AI's own route into the same state is Unknown rather than Cheat, since
+// that way in cannot be pressed; and the route table does not block the
+// state. A person's special that also reads the input from an explod is
+// Unknown when only the explod is missing, and Cheat when its conditions
+// fail otherwise. The engine's own jump and walk, made by the AI's
+// ChangeState with control, are Reachable with no command.
+func TestCBRInputBufferRoutes(t *testing.T) {
+	w := cbrCompileWorld(t, cbrTestBufferNegOne, cbrTestBufferStates, false)
+	c := w.root
+	if cmds, known := w.set.table.PersonCommands(1500); known || len(cmds) > 0 {
+		t.Errorf("state 1500: person commands %v, known %v; want not known", cmds, known)
+	}
+	if cmds, known := w.set.table.PersonCommands(1600); !known || len(cmds) > 0 {
+		t.Errorf("state 1600: person commands %v, known %v; want known, none", cmds, known)
+	}
+	for _, tc := range []struct {
+		name   string
+		v      int32 // the variable that fires a route
+		setup  func()
+		want   cbrEntry
+		target int32
+	}{
+		{"person's buffered special", 20, w.person, cbrEntry{kind: cbr.EntryInput}, 1500},
+		{"the CBR layer's buffered special, the AI level masked", 20,
+			func() { c.setASF(ASF_noailevel) }, cbrEntry{kind: cbr.EntryInput}, 1500},
+		{"the AI's own special into the same state", 21, nil, cbrEntry{kind: cbr.EntryUnknown}, 1500},
+		{"AI-only state", 22, nil, cbrEntry{kind: cbr.EntryCheat}, 1600},
+		{"AI jump with control", 23, nil, cbrEntry{kind: cbr.EntryReachable}, 40},
+		{"AI jump without control", 23, func() { c.unsetSCF(SCF_ctrl) }, cbrEntry{kind: cbr.EntryCheat}, 40},
+		{"AI jump with jumping turned off", 23, func() { c.setASF(ASF_nojump) }, cbrEntry{kind: cbr.EntryCheat}, 40},
+		{"AI walk with control", 24, nil, cbrEntry{kind: cbr.EntryReachable}, 20},
+		{"AI into a person's special that reads an explod", 25, nil, cbrEntry{kind: cbr.EntryUnknown}, 1700},
+		{"the same without the power the person's needs", 26, nil, cbrEntry{kind: cbr.EntryCheat}, 1710},
+		{"the same with the power", 26, func() { c.power = 1000 }, cbrEntry{kind: cbr.EntryUnknown}, 1710},
+	} {
+		sys.aiLevel[0], c.controller, c.power = 8, -1, 0
+		c.unsetASF(ASF_noailevel)
+		c.unsetASF(ASF_nojump)
+		got, state := w.decide(0, tc.v, tc.setup)
+		if got != tc.want || state != tc.target {
+			t.Errorf("%s: %v into %d, want %v into %d", tc.name, got, state, tc.want, tc.target)
+		}
+	}
+}
+
+// TestCBRLooseRoutes: a person's route whose target is not a fixed number,
+// here one that reads the input itself, makes the AI's change Unknown only
+// where its target, worked out again, is the state the AI entered; when its
+// target cannot be worked out again (it draws Random), wherever it runs.
+func TestCBRLooseRoutes(t *testing.T) {
+	const ai = `
+[State -1, AI into 1500]
+type = ChangeState
+value = 1500
+trigger1 = AILevel && var(21) = 1
+
+[State -1, AI into 1600]
+type = ChangeState
+value = 1600
+trigger1 = AILevel && var(22) = 1
+
+[State -1, AI into 1601]
+type = ChangeState
+value = 1601
+trigger1 = AILevel && var(23) = 1
+`
+	// An AI decision by the variable v that fires one of the AI's routes,
+	// with setup, and the label it must get, into state.
+	type decision struct {
+		v     int32
+		setup func(c *Char)
+		want  cbr.EntryKind
+		state int32
+	}
+	for _, wc := range []struct {
+		name  string
+		value string
+		cases []decision
+	}{
+		{"worked-out target", "cond(var(26) = 1, 1601, 1500)", []decision{
+			{21, nil, cbr.EntryUnknown, 1500},
+			{22, nil, cbr.EntryCheat, 1600},
+			{23, nil, cbr.EntryCheat, 1601},
+			{23, func(c *Char) { c.cnsvar[26] = 1 }, cbr.EntryUnknown, 1601},
+		}},
+		{"random target", "cond(random < 500, 1601, 1500)", []decision{
+			{22, nil, cbr.EntryUnknown, 1600},
+		}},
+	} {
+		w := cbrCompileWorld(t, `
+[State -1, person's buffered special]
+type = ChangeState
+value = `+wc.value+`
+triggerall = !AILevel
+triggerall = var(20) = 1
+trigger1 = ctrl
+`+ai, cbrTestBufferStates, false)
+		c := w.root
+		for _, tc := range wc.cases {
+			sys.aiLevel[0], c.controller = 8, -1
+			var setup func()
+			if tc.setup != nil {
+				setup = func() { tc.setup(c) }
+			}
+			got, state := w.decide(0, tc.v, setup)
+			if got.kind != tc.want || state != tc.state {
+				t.Errorf("%s: AI into %d: %v into %d, want %v", wc.name, tc.state, got, state, tc.want)
+			}
+		}
+	}
+}

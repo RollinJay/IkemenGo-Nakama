@@ -3197,6 +3197,7 @@ func (c *CharCompiler) expValue(out *BytecodeExp, in *string,
 	case "numenemy":
 		out.append(OC_numenemy)
 	case "numexplod":
+		c.cbr.cur.explods = true
 		if _, err := c.oneArg(out, in, rd, true, BytecodeInt(-1)); err != nil {
 			return bvNone(), err
 		}

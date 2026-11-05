@@ -89,6 +89,10 @@ type RouteTable struct {
 	// button command when it needs several (a held direction and a button,
 	// say). A state missing here has no person route with a fixed target.
 	Person map[int32][]string
+	// Unnamed holds the states a person's way in enters that names no
+	// command: the character reads the input itself (from explods or
+	// variables its own code sets) behind a test that the AI level is 0.
+	Unnamed map[int32]bool
 	// Unreadable is set when some person route's target is not a fixed
 	// number, so it might lead into any state.
 	Unreadable bool
@@ -96,9 +100,10 @@ type RouteTable struct {
 
 // PersonCommands returns the commands of the person routes into state.
 // known is false when the table cannot say: there is no table, or no person
-// route with a fixed target leads there and some route's target is not a
-// fixed number. known with no commands means no person route enters the
-// state, so only a state change the AI makes directly reaches it.
+// route with a fixed target names a command into it, and a person's way in
+// that names none leads there or some route's target is not a fixed number.
+// known with no commands means no person route enters the state, so only a
+// state change the AI makes directly reaches it.
 func (t *RouteTable) PersonCommands(state int32) (cmds []string, known bool) {
 	if t == nil {
 		return nil, false
@@ -106,7 +111,7 @@ func (t *RouteTable) PersonCommands(state int32) (cmds []string, known bool) {
 	if cmds, ok := t.Person[state]; ok && len(cmds) > 0 {
 		return cmds, true
 	}
-	return nil, !t.Unreadable
+	return nil, !t.Unreadable && !t.Unnamed[state]
 }
 
 // CharSnap is one character or helper on one logical frame. The adapter

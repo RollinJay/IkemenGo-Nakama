@@ -25,7 +25,11 @@ package main
 // var(1) in its CNS command file, works out each frame whether a special may
 // cancel). A person route is a route with a fixed target, not redirected to
 // another character, with a trigger group that needs a command to be active
-// and does not need the AI level above 0.
+// and does not need the AI level above 0. A trigger group that needs the AI
+// level at 0 and checks no command is a person's way in too, one whose
+// command cannot be named: the character reads the input itself, from
+// explods or variables its own code sets (an input buffer, as many
+// characters have, gated on !AILevel, while their AI has routes of its own).
 //
 // At run time, only offline and only for root characters the CBR layer
 // watches, ChangeState and SelfState (bytecode.go) label a state change of
@@ -35,7 +39,11 @@ package main
 //   - Input: a person route fired, by a command in the real input buffer.
 //     To tell, the group with that command is evaluated again with AILevel
 //     reading 0 and only the commands really in the buffer active (no
-//     cheat); it must still hold.
+//     cheat); it must still hold. Or a person's way in that names no
+//     command fired while the AI level read 0 for the character (a
+//     person's input, or the CBR layer's, which the character read itself):
+//     Input with no command, when it still holds evaluated again, or cannot
+//     be evaluated.
 //   - Auto: a route with no command and no AI level inside a move (a
 //     follow-up, the return to standing); another character's code (a
 //     throw's custom state, TargetState); and the changes the engine makes
@@ -55,9 +63,13 @@ package main
 //     the assignments before the route that it may read. In hitpause, a
 //     route that does not run during it counts as it will run when hitpause
 //     ends, when its commands stay in the input buffer through hitpause, as
-//     they do by default. Reachable when one holds, with its command; Cheat
-//     when none does; Unknown when a person route that might could not be
-//     evaluated.
+//     they do by default. Reachable when one holds, with its command. The
+//     engine's own moves (the guard, jump, air jump, crouch and walk) are
+//     Reachable with no command when a person could make them right then
+//     with the directions alone, as the engine would (see cbrBuiltinReach).
+//     Unknown when a person route that might could not be evaluated, or a
+//     person's way in that names no command could run now, since it has no
+//     command to press. Cheat otherwise.
 //
 // The check changes nothing in the game: it never evaluates a condition with
 // an assignment, nor runs a function that does more than set local
@@ -77,8 +89,11 @@ package main
 //   - The AI level's need is read from the text right after AILevel; the
 //     moment check does not rely on it, since it evaluates with AILevel
 //     reading 0, but the person routes listed in the table do.
-//   - A route whose target is not a fixed number is not evaluated: when one
-//     could run, a change no other route reaches is Unknown.
+//   - A route whose target is not a fixed number counts only when, worked
+//     out again right then (when its value assigns nothing and reads no
+//     command, AI level, Random or local variable), its target is the
+//     state, and one of its person groups might hold as the moment check
+//     evaluates them: then a change no other route reaches is Unknown.
 //   - A ZSS route inside a loop or a function is not evaluated, nor one that
 //     reads a local variable set in a loop or by an unsafe assignment.
 //   - Of the code that runs before a route in its state, only the
@@ -138,6 +153,9 @@ type cbrExprScan struct {
 	localVars bool // a ZSS local variable, which only the running state holds
 	rawInput  bool // InputTime, which reads the raw input buffer
 	random    bool // Random or RandomRange
+	// explods: NumExplod, which characters that read the input themselves
+	// often keep it in (an explod for each direction or button pressed).
+	explods bool
 }
 
 // cbrDraft is one trigger group of a CNS ChangeState or SelfState: its
@@ -341,8 +359,21 @@ func (c *CharCompiler) cbrNoteCNS(sctrl StateController, all []BytecodeExp,
 }
 
 // cbrNoteParams notes, for a VarSet or VarAdd, whether its parameters,
-// compiled while s was noted, are safe to evaluate again.
+// compiled while s was noted, are safe to evaluate again; and for a
+// ChangeState or SelfState, whether its target may be worked out again in a
+// moment check: its parameters assign nothing and read no command, AI
+// level, Random, raw input or ZSS local variable.
 func (c *CharCompiler) cbrNoteParams(sctrl StateController, s cbrExprScan) {
+	if key := cbrCtrlKey(sctrl); key != nil {
+		if s.assigns || s.rawInput || s.random || s.localVars || len(s.cmds) > 0 || len(s.ai) > 0 {
+			return
+		}
+		if c.cbr.safe == nil {
+			c.cbr.safe = map[*byte]bool{}
+		}
+		c.cbr.safe[key] = true
+		return
+	}
 	x, ok := sctrl.(varSet)
 	if !ok || len(x) == 0 || s.assigns || s.rawInput {
 		return
@@ -373,10 +404,12 @@ func cbrCtrlKey(sc StateController) *byte {
 // cbrInFunction is the owner state of a route inside a ZSS function.
 const cbrInFunction = math.MinInt32
 
-// cbrCond is one condition of a route: exp must evaluate to want.
+// cbrCond is one condition of a route: exp must evaluate to want. buffer
+// is set when it reads explods (see cbrExprScan.explods).
 type cbrCond struct {
-	exp  BytecodeExp
-	want bool
+	exp    BytecodeExp
+	want   bool
+	buffer bool
 }
 
 // cbrGroup is one trigger group of a route: all its conditions must hold.
@@ -388,6 +421,7 @@ type cbrGroup struct {
 	main    string   // the main button command of cmds
 	ai      bool     // reads the AI level
 	aiAbove bool     // needs the AI level above 0
+	aiZero  bool     // needs the AI level at 0 (!AILevel, AILevel = 0)
 	random  bool
 	locals  bool // reads ZSS local variables
 	// checkable: every condition may be evaluated, and gives the same
@@ -401,6 +435,16 @@ func (g *cbrGroup) person() bool {
 	return len(g.cmds) > 0 && !g.aiAbove
 }
 
+// unnamed reports whether the group is a person's way into the route's
+// target that names no command: it needs the AI level at 0 and checks no
+// command, as when the character reads the input itself, from explods or
+// variables its own code sets (an input buffer, as many characters have).
+// Only a person, or the CBR layer's input while the AI level reads 0, can
+// make it hold.
+func (g *cbrGroup) unnamed() bool {
+	return len(g.cmds) == 0 && g.aiZero && !g.aiAbove
+}
+
 // cbrRoute is one ChangeState or SelfState controller.
 type cbrRoute struct {
 	id       int32
@@ -410,12 +454,19 @@ type cbrRoute struct {
 	foreign  bool  // readplayerid: it enters another player's states
 	fixed    bool  // the target is a fixed number
 	target   int32
-	groups   []cbrGroup
-	anyCmd   bool    // some group needs a command
-	anyAI    bool    // some group reads the AI level
-	person   bool    // a person route (fixed or not)
-	hitpause bool    // it can run during hitpause
-	persist  []int32 // persistent counters on its way, in its state
+	// value is the target's expression when it is not a fixed number;
+	// valueSafe when it may be worked out again (see evalTarget): it
+	// assigns nothing and reads no command, AI level, Random, raw input or
+	// ZSS local variable.
+	value     BytecodeExp
+	valueSafe bool
+	groups    []cbrGroup
+	anyCmd    bool    // some group needs a command
+	anyAI     bool    // some group reads the AI level
+	person    bool    // a person route (fixed or not)
+	unnamed   bool    // some group is a person's way in with no command
+	hitpause  bool    // it can run during hitpause
+	persist   []int32 // persistent counters on its way, in its state
 	// pre are the assignments that run before the route in its state (see
 	// cbrLocalStep), which the moment check runs again, in a frame of numVars
 	// local variables of its own, before it evaluates the route's conditions;
@@ -447,10 +498,13 @@ type cbrRouteSet struct {
 	routes []cbrRoute
 	byCtrl map[*byte]int32
 	// into lists, by fixed target, the routes into it that need a command,
-	// not redirected; loose the person routes whose target is not fixed.
-	into  map[int32][]int32
-	loose []int32
-	table cbr.RouteTable
+	// not redirected; unnamedInto the ones with a person's way in that names
+	// no command (see cbrGroup.unnamed); loose the person routes, named or
+	// not, whose target is not fixed.
+	into        map[int32][]int32
+	unnamedInto map[int32][]int32
+	loose       []int32
+	table       cbr.RouteTable
 	// evalState is the working state while conditions are evaluated: the
 	// command names they check are read from its player's string pool.
 	evalState StateBytecode
@@ -488,12 +542,13 @@ func cbrBuildRoutes(pn int, states map[int32]StateBytecode,
 		return
 	}
 	set := &cbrRouteSet{
-		pn:        pn,
-		states:    states,
-		byCtrl:    map[*byte]int32{},
-		into:      map[int32][]int32{},
-		table:     cbr.RouteTable{Person: map[int32][]string{}},
-		evalState: StateBytecode{playerNo: pn},
+		pn:          pn,
+		states:      states,
+		byCtrl:      map[*byte]int32{},
+		into:        map[int32][]int32{},
+		unnamedInto: map[int32][]int32{},
+		table:       cbr.RouteTable{Person: map[int32][]string{}, Unnamed: map[int32]bool{}},
+		evalState:   StateBytecode{playerNo: pn},
 	}
 	w := &cbrWalker{set: set, scan: scan, cmdl: cmdl, funcs: funcs, pure: map[string]bool{}}
 	nos := make([]int, 0, len(states))
@@ -526,7 +581,11 @@ func cbrBuildRoutes(pn int, states map[int32]StateBytecode,
 		if r.fixed && r.anyCmd {
 			set.into[r.target] = append(set.into[r.target], r.id)
 		}
-		if !r.person {
+		if r.fixed && r.unnamed {
+			set.unnamedInto[r.target] = append(set.unnamedInto[r.target], r.id)
+			set.table.Unnamed[r.target] = true
+		}
+		if !r.person && !r.unnamed {
 			continue
 		}
 		if !r.fixed {
@@ -685,7 +744,7 @@ func (w *cbrWalker) block(b *StateBlock, p cbrPath) {
 	if b.loopBlock {
 		in.loop = true
 	} else if len(b.trigger) > 0 {
-		in.conds = append(append([]cbrCond(nil), p.conds...), cbrCond{b.trigger, true})
+		in.conds = append(append([]cbrCond(nil), p.conds...), cbrCond{exp: b.trigger, want: true})
 	}
 	for _, sc := range b.ctrls {
 		if sb, ok := sc.(StateBlock); ok {
@@ -699,7 +758,7 @@ func (w *cbrWalker) block(b *StateBlock, p cbrPath) {
 	if b.elseBlock != nil && !b.loopBlock {
 		ep := p
 		if len(b.trigger) > 0 {
-			ep.conds = append(append([]cbrCond(nil), p.conds...), cbrCond{b.trigger, false})
+			ep.conds = append(append([]cbrCond(nil), p.conds...), cbrCond{exp: b.trigger, want: false})
 		}
 		w.block(b.elseBlock, ep)
 	}
@@ -729,6 +788,9 @@ func (w *cbrWalker) route(sc StateController, key *byte, p cbrPath, ctrlsIhp boo
 	}
 	if exp, ok := cbrParamExp(scb, changeState_value); ok {
 		r.target, r.fixed = cbrConstInt(exp)
+		if !r.fixed {
+			r.value, r.valueSafe = exp, w.scan.safe[key]
+		}
 	}
 	checkable := !p.loop && w.owner != cbrInFunction
 	if drafts, ok := w.scan.cns[key]; ok {
@@ -736,7 +798,7 @@ func (w *cbrWalker) route(sc StateController, key *byte, p cbrPath, ctrlsIhp boo
 			conds := make([]cbrCond, len(d.exprs))
 			scans := make([]*cbrExprScan, len(d.exprs))
 			for i := range d.exprs {
-				conds[i] = cbrCond{d.exprs[i], true}
+				conds[i] = cbrCond{exp: d.exprs[i], want: true}
 				scans[i] = &d.scans[i]
 			}
 			r.groups = append(r.groups, w.group(conds, scans, checkable))
@@ -761,6 +823,7 @@ func (w *cbrWalker) route(sc StateController, key *byte, p cbrPath, ctrlsIhp boo
 		r.anyCmd = r.anyCmd || len(g.cmds) > 0
 		r.anyAI = r.anyAI || g.ai
 		r.person = r.person || g.person() && !r.redirect && !r.foreign
+		r.unnamed = r.unnamed || g.unnamed() && !r.redirect && !r.foreign
 	}
 	w.set.byCtrl[key] = r.id
 	w.set.routes = append(w.set.routes, r)
@@ -769,13 +832,14 @@ func (w *cbrWalker) route(sc StateController, key *byte, p cbrPath, ctrlsIhp boo
 // group makes one trigger group from its conditions and what each checks
 // (nil when nothing was noted, which leaves the group not checkable).
 func (w *cbrWalker) group(conds []cbrCond, scans []*cbrExprScan, checkable bool) cbrGroup {
-	g := cbrGroup{conds: conds, checkable: checkable}
+	g := cbrGroup{conds: append([]cbrCond(nil), conds...), checkable: checkable}
 	for i, s := range scans {
 		if s == nil {
 			g.checkable = false
 			continue
 		}
-		want := conds[i].want
+		g.conds[i].buffer = s.explods
+		want := g.conds[i].want
 		for _, ref := range s.cmds {
 			if ref.neg != want {
 				if !cbrHas(g.cmds, ref.name) {
@@ -790,8 +854,11 @@ func (w *cbrWalker) group(conds []cbrCond, scans []*cbrExprScan, checkable bool)
 			if !want {
 				need = need.negated()
 			}
-			if need == cbrAIAbove {
+			switch need {
+			case cbrAIAbove:
 				g.aiAbove = true
+			case cbrAIZero:
+				g.aiZero = true
 			}
 		}
 		if s.assigns || s.rawInput {
@@ -970,13 +1037,39 @@ var cbrEvalScratch []cbrCharCache
 
 // eval evaluates group g of route r on c as r's state's code would, with the
 // check's commands (real, or only press active) and AILevel reading 0 for
-// c's player, and restores everything the evaluation may have touched.
-// With replay, a group that reads ZSS local variables gets a frame of its
-// own, in which the local variable assignments before r (r.pre) run first;
-// without it, it reads those of the state running now, which must be r's.
-// failed is set when evaluating panicked.
+// c's player (see within). failed is set when evaluating panicked or could
+// not be done; buffer when the group does not hold, and each of its
+// conditions that does not hold reads explods.
 func (set *cbrRouteSet) eval(c *Char, r *cbrRoute, g *cbrGroup, real bool,
-	press []string, replay bool) (ok, failed bool) {
+	press []string, replay bool) (ok, failed, buffer bool) {
+	if set.within(c, r, g.locals, real, press, replay, func() {
+		ok, buffer = cbrCondsCheck(c, g.conds)
+	}) {
+		return false, true, false
+	}
+	return ok, false, buffer
+}
+
+// evalTarget works out the target of route r, whose target is not a fixed
+// number, on c as r's state's code would right now, after the assignments
+// before it run again (see within); failed is set when it could not.
+func (set *cbrRouteSet) evalTarget(c *Char, r *cbrRoute) (target int32, failed bool) {
+	failed = set.within(c, r, false, false, nil, true, func() {
+		target = r.value.evalI(c)
+	})
+	return target, failed
+}
+
+// within runs f, which evaluates code of route r on c, as r's state's code
+// would run it, with the check's commands (real, or only press active) and
+// AILevel reading 0 for c's player, and restores everything the evaluation
+// may have touched. With replay, when locals (f reads ZSS local variables)
+// or r has assignments before it, f gets a frame of its own, in which the
+// local variable assignments before r (r.pre) run first; without it, f reads
+// those of the state running now, which must be r's. It reports whether
+// evaluating panicked or could not be done.
+func (set *cbrRouteSet) within(c *Char, r *cbrRoute, locals, real bool,
+	press []string, replay bool, f func()) (failed bool) {
 	seed, ws, wc, minus := sys.randseed, sys.workingState, sys.workingChar, c.minus
 	stack, console, nearChanged := len(sys.bcStack), sys.consoleText, sys.charList.enemyNearChanged
 	vars, varStack, sctrl := sys.bcVar, sys.bcVarStack, c.currentSctrlIndex
@@ -990,7 +1083,7 @@ func (set *cbrRouteSet) eval(c *Char, r *cbrRoute, g *cbrGroup, real bool,
 	prevCheck := cbrCheck
 	defer func() {
 		if recover() != nil {
-			ok, failed = false, true
+			failed = true
 		}
 		cbrCheck = prevCheck
 		sys.randseed, sys.workingState, sys.workingChar, c.minus = seed, ws, wc, minus
@@ -1013,11 +1106,11 @@ func (set *cbrRouteSet) eval(c *Char, r *cbrRoute, g *cbrGroup, real bool,
 	case r.owner >= -4:
 		c.minus = int8(r.owner)
 	}
-	if replay && (g.locals || len(r.pre) > 0) {
+	if replay && (locals || len(r.pre) > 0) {
 		// A function call needs the bytecode stack empty, as it is between
 		// controllers.
-		if g.locals && !r.preOK || stack != 0 {
-			return false, true
+		if locals && !r.preOK || stack != 0 {
+			return true
 		}
 		if r.preVars {
 			cbrSaveVars(c)
@@ -1031,7 +1124,24 @@ func (set *cbrRouteSet) eval(c *Char, r *cbrRoute, g *cbrGroup, real bool,
 			}
 		}
 	}
-	return cbrCondsHold(c, g.conds), false
+	f()
+	return false
+}
+
+// cbrCondsCheck evaluates conds on c, in order, as cbrCondsHold does: ok
+// when all hold. It stops at the first that does not hold unless that one
+// reads explods; buffer is set when the only ones that do not hold read
+// explods.
+func cbrCondsCheck(c *Char, conds []cbrCond) (ok, buffer bool) {
+	for _, cd := range conds {
+		if cd.exp.evalB(c) != cd.want {
+			if !cd.buffer {
+				return false, false
+			}
+			buffer = true
+		}
+	}
+	return !buffer, buffer
 }
 
 // cbrVarScratch holds a character's variables while a check's VarSets run
@@ -1151,21 +1261,47 @@ func cbrKeptThroughHitpause(c *Char, names []string) bool {
 	return true
 }
 
+// cbrAILevelReadsZero reports whether c's AILevel trigger reads 0 now (see
+// OC_ailevel): its player is a person's, or the CBR layer gives its input.
+func cbrAILevelReadsZero(c *Char) bool {
+	return c.asf(ASF_noailevel) || c.getAILevel() == 0
+}
+
 // inputEntry reports whether route r, which just fired on c (the character
 // whose code ran it), fired as a person route by a command in the real
 // input buffer: a group with a command in the buffer holds with AILevel
 // reading 0 and only the buffer's commands active. A group that cannot be
 // evaluated, or draws Random, counts when it does not need the AI level
-// above 0.
+// above 0. A person's way in that names no command counts, with no command,
+// when AILevel reads 0 for c and the group holds evaluated again the same
+// way (or cannot be evaluated, or draws Random).
 func (set *cbrRouteSet) inputEntry(c *Char, r *cbrRoute) (cbrEntry, bool) {
 	for gi := range r.groups {
 		g := &r.groups[gi]
+		if g.unnamed() {
+			// The character reads the input itself: the group can only have
+			// held while the AI level read 0, for a person or for the CBR
+			// layer's input.
+			if !cbrAILevelReadsZero(c) {
+				continue
+			}
+			if g.checkable {
+				ok, failed, _ := set.eval(c, r, g, true, nil, false)
+				if ok {
+					return cbrEntry{kind: cbr.EntryInput}, true
+				}
+				if !failed && !g.random {
+					continue
+				}
+			}
+			return cbrEntry{kind: cbr.EntryInput}, true
+		}
 		cmd, buffered := cbrBufferedRank(c, g.cmds, g.ranks)
 		if !buffered {
 			continue
 		}
 		if g.checkable {
-			ok, failed := set.eval(c, r, g, true, nil, false)
+			ok, failed, _ := set.eval(c, r, g, true, nil, false)
 			if ok {
 				return cbrEntry{kind: cbr.EntryInput, cmd: cmd}, true
 			}
@@ -1207,16 +1343,30 @@ func (set *cbrRouteSet) momentCheck(c *Char, target int32) cbrEntry {
 				unsure = unsure || g.person()
 				continue
 			}
-			ok, failed := set.eval(c, r, g, false, g.cmds, true)
+			ok, failed, buffer := set.eval(c, r, g, false, g.cmds, true)
 			if ok {
 				return cbrEntry{kind: cbr.EntryReachable, cmd: g.main}
 			}
-			// One that draws Random might have held with another draw.
-			unsure = unsure || (failed || g.random) && g.person()
+			// One that draws Random might have held with another draw; a way
+			// in for a person only (it needs the AI level at 0) that does not
+			// hold only where it reads explods might have, with the person's
+			// input in them, which the check cannot press.
+			unsure = unsure || (failed || g.random || buffer && g.aiZero) && g.person()
+		}
+	}
+	if cbrBuiltinReach(c, target) {
+		return cbrEntry{kind: cbr.EntryReachable}
+	}
+	for _, id := range set.unnamedInto[target] {
+		// It has no command to press: a person might have made the change.
+		if runs, sure, _ := set.runsNow(c, &set.routes[id]); runs || !sure {
+			unsure = true
+			break
 		}
 	}
 	for _, id := range set.loose {
-		if runs, sure, _ := set.runsNow(c, &set.routes[id]); runs || !sure {
+		r := &set.routes[id]
+		if runs, sure, _ := set.runsNow(c, r); !sure || runs && set.looseMay(c, r, target) {
 			unsure = true
 			break
 		}
@@ -1225,6 +1375,62 @@ func (set *cbrRouteSet) momentCheck(c *Char, target int32) cbrEntry {
 		return cbrEntry{kind: cbr.EntryUnknown}
 	}
 	return cbrEntry{kind: cbr.EntryCheat}
+}
+
+// looseMay reports whether route r, a person route whose target is not a
+// fixed number and whose state runs now, might have changed c's state to
+// target right now: its target, worked out again when that is safe, is
+// target, and one of its person groups might hold, as the moment check has
+// them hold (a way in that names no command always might).
+func (set *cbrRouteSet) looseMay(c *Char, r *cbrRoute, target int32) bool {
+	if r.valueSafe {
+		if v, failed := set.evalTarget(c, r); !failed && v != target {
+			return false
+		}
+	}
+	for gi := range r.groups {
+		g := &r.groups[gi]
+		switch {
+		case g.unnamed():
+			return true
+		case !g.person():
+		case !g.checkable:
+			return true
+		default:
+			ok, failed, buffer := set.eval(c, r, g, false, g.cmds, true)
+			if ok || failed || g.random || buffer && g.aiZero {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// cbrBuiltinReach reports whether a person could have made c's change to
+// target right now with the directions alone, through the engine's own
+// moves, as Char.actionPrepare makes them for the input held: the guard
+// (120), the jump (40), the air jump (45), crouching (10) and the walk
+// (20), each with control, when the character has not turned it off.
+func cbrBuiltinReach(c *Char, target int32) bool {
+	if !c.ctrl() || !c.keyctrl[0] || c.asf(ASF_nohardcodedkeys) {
+		return false
+	}
+	st := c.ss.stateType
+	switch target {
+	case 120:
+		return c.scf(SCF_guard) && c.inguarddist && !c.inGuardState() && st != ST_L
+	case 40:
+		return !c.asf(ASF_nojump) && st == ST_S
+	case 45:
+		return !c.asf(ASF_noairjump) && st == ST_A &&
+			c.pos[1] <= -float32(c.gi().movement.airjump.height) &&
+			c.airJumpCount < c.gi().movement.airjump.num
+	case 10:
+		return !c.asf(ASF_nocrouch) && st == ST_S
+	case 20:
+		return !c.asf(ASF_nowalk) && st == ST_S
+	}
+	return false
 }
 
 // classify labels a state change of the watched root c to target, which
