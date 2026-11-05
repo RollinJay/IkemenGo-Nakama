@@ -309,7 +309,14 @@ func (r *recorder) step(s *Snapshot, f Feat) {
 	landing := r.prevState == StAir && self.StateType != StAir && self.MoveType == MtIdle
 	fromCtrl := r.prevCtrl && !self.Ctrl
 	cancel := r.prevMoveType == MtAttack && self.MoveType == MtAttack
-	command := changed && self.MoveType != MtHit && !landing && (fromCtrl || cancel)
+	// Out of a movement of its own without control (a dash, the start of a
+	// jump), a change the engine labels as a person's command, or as a
+	// decision of the character's AI that it checked, is a new action too,
+	// begun from that movement (see moveWithoutControl).
+	labelledCmd := entry == EntryInput && entryCmd != ""
+	fromMove := !r.prevCtrl && r.prevMoveType == MtIdle &&
+		(labelledCmd || entry == EntryReachable || entry == EntryCheat)
+	command := changed && self.MoveType != MtHit && !landing && (fromCtrl || cancel || fromMove)
 	if command && !fromCtrl && entry == EntryAuto {
 		// The engine's label says the move went on into its next part by
 		// itself, whatever command happened to be active: no cancel.
@@ -335,7 +342,9 @@ func (r *recorder) step(s *Snapshot, f Feat) {
 				r.log.note(self.StateNo, cmds)
 			}
 		}
-		significant = r.significant(cmds)
+		// The engine's label names the person's command even when the
+		// command is no longer active (a special buffered through a dash).
+		significant = r.significant(cmds) || labelledCmd && r.significant([]string{entryCmd})
 		switch {
 		case significant:
 		case fromCtrl && self.MoveType == MtAttack:
@@ -395,7 +404,12 @@ func (r *recorder) step(s *Snapshot, f Feat) {
 		case significant && r.source.assisted():
 			r.openAssisted(s, act, f, tick)
 		default:
-			r.openCommand(s, act, f, tick)
+			if c := r.openCommand(s, act, f, tick); c != nil && labelledCmd {
+				// The command that made the action, by the engine's label, so
+				// that the case can be verified by it, and played where it was
+				// verified without control.
+				c.Command = entryCmd
+			}
 		}
 	case flagged:
 		// What follows a checked decision ends with it.
@@ -688,8 +702,9 @@ func (r *recorder) cutFrom(tick int64) {
 }
 
 // openCommand starts a command case for an action observed at tick,
-// back-dated to the start of its motion.
-func (r *recorder) openCommand(s *Snapshot, self *CharSnap, f Feat, tick int64) {
+// back-dated to the start of its motion, and returns it; nil when no frame
+// is left to begin it at.
+func (r *recorder) openCommand(s *Snapshot, self *CharSnap, f Feat, tick int64) *Case {
 	// When the active command is known, its canonical motion says how far
 	// back a person's input of it can reach and whether it taps a direction
 	// twice across a neutral gap.
@@ -713,7 +728,7 @@ func (r *recorder) openCommand(s *Snapshot, self *CharSnap, f Feat, tick int64) 
 		start = tick
 		fr, ok = r.at(tick)
 		if !ok {
-			return
+			return nil
 		}
 	}
 	r.cutFrom(start)
@@ -732,6 +747,7 @@ func (r *recorder) openCommand(s *Snapshot, self *CharSnap, f Feat, tick int64) 
 	r.cmdFloor = tick + 1
 	r.neutralAfterExec, r.hasTail = false, false
 	r.attackInfo(c, self, f, tick)
+	return c
 }
 
 // openAssisted starts a command case for an assisted source, with the

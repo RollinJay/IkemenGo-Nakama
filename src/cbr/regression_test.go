@@ -428,3 +428,52 @@ func TestFlaggedSourceKeepsCheckedDecisions(t *testing.T) {
 		t.Errorf("checked decisions recorded: %v, want 200 by a and 1100 by qcf_b", got)
 	}
 }
+
+// A person's special cancelled out of a dash, which takes control away, is
+// a case of its own, begun in the dash and named by the engine's label, so
+// that it can be verified there; the dash is the case before it.
+func TestCommandOutOfAMovementIsItsOwnCase(t *testing.T) {
+	eng := New(DefaultParams(), t.TempDir(), 1)
+	eng.SetMotions("A", simMotionsMove)
+	eng.SetPlayer(0, "A", "B")
+	eng.Record(0, SrcHumanLocal)
+	ff := &frameFeeder{eng: eng}
+	frame := func(f CharSnap) { f.Routes = simRouteTable; ff.frame(f) }
+	for i := 0; i < 30; i++ {
+		frame(CharSnap{StateType: StStand, MoveType: MtIdle, Ctrl: true})
+	}
+	frame(CharSnap{StateNo: 105, StateTime: 1, MoveType: MtIdle, Input: InF,
+		Commands: []string{"ff"}, Entry: EntryInput, EntryCommand: "ff"})
+	frame(CharSnap{StateNo: 105, StateTime: 2, MoveType: MtIdle, Input: InD})
+	frame(CharSnap{StateNo: 105, StateTime: 3, MoveType: MtIdle, Input: InD | InF})
+	// The special comes out of the dash buffered: its command is no longer
+	// active, but the engine's label names it.
+	frame(CharSnap{StateNo: 1000, StateTime: 1, MoveType: MtAttack, Input: InF | InA,
+		Entry: EntryInput, EntryCommand: "qcf_a"})
+	for i := int32(2); i <= 20; i++ {
+		frame(CharSnap{StateNo: 1000, StateTime: i, MoveType: MtAttack})
+	}
+	for i := 0; i < 40; i++ {
+		frame(CharSnap{StateType: StStand, MoveType: MtIdle, Ctrl: true})
+	}
+	ff.end()
+	if err := eng.MatchEnd(); err != nil {
+		t.Fatal(err)
+	}
+	st, _ := eng.Store("A")
+	var dash, special *Case
+	for _, c := range st.Cases {
+		switch c.MoveRef {
+		case 105:
+			dash = c
+		case 1000:
+			special = c
+		}
+	}
+	if dash == nil || dash.Command != "ff" {
+		t.Fatalf("the dash's case: %+v", dash)
+	}
+	if special == nil || special.Kind != KindCommand || special.Command != "qcf_a" || special.StartCtrl {
+		t.Fatalf("the special's own case, begun in the dash: %+v", special)
+	}
+}
