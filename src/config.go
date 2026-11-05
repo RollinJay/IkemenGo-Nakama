@@ -240,6 +240,7 @@ type Config struct {
 	CBR struct {
 		Enabled          bool `ini:"Enabled"`
 		DriveCPU         bool `ini:"DriveCPU"`
+		TakeoverMargin   int  `ini:"TakeoverMargin"`
 		Execution        int  `ini:"Execution"`
 		Knowledge        int  `ini:"Knowledge"`
 		Ambition         int  `ini:"Ambition"`
@@ -363,7 +364,8 @@ func (c *Config) normalize() {
 	c.SetValueUpdate("Config.Players", int(Clamp(int32(c.Config.Players), 1, int32(MaxSimul)*2)))
 	c.SetValueUpdate("Options.Difficulty", int(Clamp(int32(c.Options.Difficulty), 1, 8)))
 	// CBR AI dials: execution 0 follows the CPU's AI level, ambition 0
-	// follows execution.
+	// follows execution. The take-over margin is 1 (Low) to 3 (High).
+	c.SetValueUpdate("CBR.TakeoverMargin", int(Clamp(int32(c.CBR.TakeoverMargin), 1, 3)))
 	c.SetValueUpdate("CBR.Execution", int(Clamp(int32(c.CBR.Execution), 0, 8)))
 	c.SetValueUpdate("CBR.Knowledge", int(Clamp(int32(c.CBR.Knowledge), 1, 8)))
 	c.SetValueUpdate("CBR.Ambition", int(Clamp(int32(c.CBR.Ambition), 0, 8)))

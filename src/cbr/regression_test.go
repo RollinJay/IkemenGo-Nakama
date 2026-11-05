@@ -1,6 +1,7 @@
 package cbr
 
 import (
+	"math"
 	"math/rand"
 	"testing"
 )
@@ -34,7 +35,7 @@ func (ff *frameFeeder) end() {
 // A case whose inputs end on its exec frame must still have a failed exec
 // noted, and a hypothesis play must count toward its classification.
 func TestExecFailAtLastInputIsNoted(t *testing.T) {
-	p := DefaultParams()
+	p := withoutBaseAI()
 	eng := New(p, t.TempDir(), 1)
 	st, _ := eng.Store("Rush")
 	c := &Case{ID: 1, Source: SrcSynthesized, Kind: KindCommand, ExecFrame: 2, MoveRef: 1234, ExecAttack: true, ExecClass: StStand,
@@ -60,7 +61,7 @@ func TestExecFailAtLastInputIsNoted(t *testing.T) {
 // The better-case check must not switch away from a command case whose
 // command has not come out yet; the exec check decides first.
 func TestBetterCaseWaitsForExec(t *testing.T) {
-	p := DefaultParams()
+	p := withoutBaseAI()
 	st := NewStore("x")
 	start := Feat{RoundState: 2, Enemy: CharFeat{Present: true, RelX: 120}, TimeFrac: 1}
 	cmd := &Case{ID: 1, Source: SrcHumanLocal, Kind: KindCommand, ExecFrame: 0, MoveRef: 1234, ExecAttack: true, ExecClass: StStand,
@@ -87,7 +88,7 @@ func TestBetterCaseWaitsForExec(t *testing.T) {
 
 // A mid-action case starts at its recorded point in the action, not before.
 func TestMidActionCaseNotEarly(t *testing.T) {
-	p := DefaultParams()
+	p := withoutBaseAI()
 	st := NewStore("x")
 	start := Feat{RoundState: 2, Self: CharFeat{Present: true, StateNo: 200, StateTime: 10, Move: MtAttack, State: StStand}, Enemy: CharFeat{Present: true, RelX: 50}, TimeFrac: 1}
 	c := &Case{ID: 1, Source: SrcHumanLocal, Kind: KindCommand, ExecFrame: 0, MoveRef: 210, ExecAttack: true, ExecClass: StStand,
@@ -341,15 +342,15 @@ func TestFreshPressOnlyWhenRecordedFresh(t *testing.T) {
 	}
 	d := newDriver(p, 0, Levels{Execution: 8, Knowledge: 8}, 1, st, newChainTracker(p, 0, new(uint64)))
 	self := &CharSnap{Input: InF | InA, Ctrl: true, StateType: StStand}
-	d.begin(mk(true, 0), self, 1)
+	d.begin(mk(true, 0), self, 1, 0)
 	if d.shift != 1 {
 		t.Fatal("keys held now but not at the recorded decision must be released first")
 	}
-	d.begin(mk(true, InF|InA), self, 2)
+	d.begin(mk(true, InF|InA), self, 2, 0)
 	if d.shift != 0 {
 		t.Fatal("keys held at the recorded decision stay held")
 	}
-	d.begin(mk(false, 0), self, 3)
+	d.begin(mk(false, 0), self, 3, 0)
 	if d.shift != 0 {
 		t.Fatal("a case begun mid-action is played as recorded")
 	}
@@ -371,5 +372,136 @@ func TestMostRepeatedIsDeterministic(t *testing.T) {
 	}
 	if ref, n := mostRepeated(nil); ref != 0 || n != 0 {
 		t.Fatalf("empty chain: got %d x%d", ref, n)
+	}
+}
+
+// Once a CPU source is flagged as an AI that changes states directly (two
+// attack starts the engine could not check), the decisions of the
+// character's AI that the engine checked are still recorded as its cases,
+// and nothing else is.
+func TestFlaggedSourceKeepsCheckedDecisions(t *testing.T) {
+	eng := New(DefaultParams(), t.TempDir(), 1)
+	eng.SetMotions("A", simMotions)
+	eng.SetPlayer(0, "A", "B")
+	eng.Record(0, SrcEngineAI)
+	ff := &frameFeeder{eng: eng}
+	frame := func(f CharSnap) { f.Routes = simRouteTable; ff.frame(f) }
+	standing := func(n int) {
+		for i := 0; i < n; i++ {
+			frame(CharSnap{StateType: StStand, MoveType: MtIdle, Ctrl: true})
+		}
+	}
+	attack := func(no int32, k EntryKind, cmd string) {
+		frame(CharSnap{StateNo: no, StateTime: 1, MoveType: MtAttack, Entry: k, EntryCommand: cmd})
+		for i := int32(2); i <= 20; i++ {
+			frame(CharSnap{StateNo: no, StateTime: i, MoveType: MtAttack})
+		}
+	}
+	standing(30)
+	attack(1000, EntryUnknown, "")
+	standing(30)
+	attack(1000, EntryUnknown, "")
+	standing(60)
+	attack(200, EntryReachable, "a")
+	standing(60)
+	attack(1100, EntryReachable, "qcf_b")
+	standing(60)
+	ff.end()
+	if err := eng.MatchEnd(); err != nil {
+		t.Fatal(err)
+	}
+	st, err := eng.Store("A")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !st.ChangeStateAI {
+		t.Error("the source was not flagged")
+	}
+	got := map[int32]string{}
+	for _, c := range st.Cases {
+		if c.Source != SrcCharacterAI {
+			t.Errorf("a case of source %v into %d was kept", c.Source, c.MoveRef)
+			continue
+		}
+		got[c.MoveRef] = c.Command
+	}
+	if len(got) != 2 || got[200] != "a" || got[1100] != "qcf_b" {
+		t.Errorf("checked decisions recorded: %v, want 200 by a and 1100 by qcf_b", got)
+	}
+}
+
+// A person's special cancelled out of a dash, which takes control away, is
+// a case of its own, begun in the dash and named by the engine's label, so
+// that it can be verified there; the dash is the case before it.
+func TestCommandOutOfAMovementIsItsOwnCase(t *testing.T) {
+	eng := New(DefaultParams(), t.TempDir(), 1)
+	eng.SetMotions("A", simMotionsMove)
+	eng.SetPlayer(0, "A", "B")
+	eng.Record(0, SrcHumanLocal)
+	ff := &frameFeeder{eng: eng}
+	frame := func(f CharSnap) { f.Routes = simRouteTable; ff.frame(f) }
+	for i := 0; i < 30; i++ {
+		frame(CharSnap{StateType: StStand, MoveType: MtIdle, Ctrl: true})
+	}
+	frame(CharSnap{StateNo: 105, StateTime: 1, MoveType: MtIdle, Input: InF,
+		Commands: []string{"ff"}, Entry: EntryInput, EntryCommand: "ff"})
+	frame(CharSnap{StateNo: 105, StateTime: 2, MoveType: MtIdle, Input: InD})
+	frame(CharSnap{StateNo: 105, StateTime: 3, MoveType: MtIdle, Input: InD | InF})
+	// The special comes out of the dash buffered: its command is no longer
+	// active, but the engine's label names it.
+	frame(CharSnap{StateNo: 1000, StateTime: 1, MoveType: MtAttack, Input: InF | InA,
+		Entry: EntryInput, EntryCommand: "qcf_a"})
+	for i := int32(2); i <= 20; i++ {
+		frame(CharSnap{StateNo: 1000, StateTime: i, MoveType: MtAttack})
+	}
+	for i := 0; i < 40; i++ {
+		frame(CharSnap{StateType: StStand, MoveType: MtIdle, Ctrl: true})
+	}
+	ff.end()
+	if err := eng.MatchEnd(); err != nil {
+		t.Fatal(err)
+	}
+	st, _ := eng.Store("A")
+	var dash, special *Case
+	for _, c := range st.Cases {
+		switch c.MoveRef {
+		case 105:
+			dash = c
+		case 1000:
+			special = c
+		}
+	}
+	if dash == nil || dash.Command != "ff" {
+		t.Fatalf("the dash's case: %+v", dash)
+	}
+	if special == nil || special.Kind != KindCommand || special.Command != "qcf_a" || special.StartCtrl {
+		t.Fatalf("the special's own case, begun in the dash: %+v", special)
+	}
+}
+
+// A value that is not a number, which only a damaged file holds, proves no
+// move better than the base AI, and the store leaves such records out when
+// it loads, so that they are not saved again.
+func TestNotANumberProvesNothing(t *testing.T) {
+	p := DefaultParams()
+	nan := float32(math.NaN())
+	cmp := comparison{bases: [2]basis{{b: nan, margin: 0.1, share: 1}}, n: 1}
+	if p.beats(cmp, PlayStat{Trials: 10, Sum: 5, Shares: 10}, 1) {
+		t.Fatal("a move beat a record of the base AI that is not a number")
+	}
+	st := NewStore("x")
+	st.Baseline[1] = &BaselineStat{Trials: 5, ValueSum: nan, Shares: 5}
+	st.Baseline[2] = &BaselineStat{Trials: 5, ValueSum: 1, Shares: 5}
+	st.Played[3] = &PlayStat{Trials: float32(math.Inf(1))}
+	path := t.TempDir() + "/x.cbr"
+	if err := SaveStore(path, st); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := LoadStore(path, "x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := loaded.Baseline[1]; ok || loaded.Baseline[2] == nil || len(loaded.Played) != 0 {
+		t.Fatalf("loaded: base AI records %v, plays %v; want only the finite record", loaded.Baseline, loaded.Played)
 	}
 }

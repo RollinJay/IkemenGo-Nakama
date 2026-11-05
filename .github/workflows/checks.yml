@@ -46,10 +46,12 @@ jobs:
             exit 1
           fi
 
+      # The CBR AI's simulated fights take longer than go test's default
+      # limit of 10 minutes.
       - name: CBR package
         run: |
           go vet ./src/cbr/...
-          go test ./src/cbr/...
+          go test -timeout 45m ./src/cbr/...
 
       # Router port mapping, against fake routers on localhost.
       - name: Portmap package

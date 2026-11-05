@@ -9,6 +9,7 @@ import (
 	"hash/fnv"
 	"io"
 	"io/fs"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -147,8 +148,60 @@ func LoadStore(path, char string) (*Store, error) {
 	if s.Hypotheses == nil {
 		s.Hypotheses = map[int32]*Hypothesis{}
 	}
+	if s.Verdicts == nil {
+		s.Verdicts = map[VerdictKey]*Verdict{} // a store saved before verdicts existed
+	}
+	if s.Baseline == nil {
+		s.Baseline = map[uint64]*BaselineStat{} // a store saved before the baseline existed
+	}
+	if s.Offered == nil {
+		s.Offered = map[uint64]*BaselineStat{}
+	}
+	if s.Played == nil {
+		s.Played = map[uint64]*PlayStat{}
+	}
+	if s.BaseFormat < baseFormat {
+		// The base AI's records and the CBR layer's plays were kept by
+		// situations that mixed what is now kept apart (see baseFormat): they
+		// start over, and fill again as the character plays. The cases and
+		// their values are kept. (The plays an older store credited to an
+		// action as a whole, from any stance, are not read: gob leaves out
+		// fields the store no longer has.)
+		clear(s.Baseline)
+		clear(s.Offered)
+		clear(s.Played)
+		s.BaseFormat = baseFormat
+	}
+	dropNonFinite(s)
 	s.index()
 	return s, nil
+}
+
+// dropNonFinite removes the base AI's records and the CBR layer's plays that
+// hold a value that is not a finite number, which only a damaged file
+// holds: kept, one would make comparisons with the base AI (see beats) come
+// out wrong for good, as it would be saved again.
+func dropNonFinite(s *Store) {
+	finite := func(vs ...float32) bool {
+		for _, v := range vs {
+			if math.IsNaN(float64(v)) || math.IsInf(float64(v), 0) {
+				return false
+			}
+		}
+		return true
+	}
+	for _, m := range []map[uint64]*BaselineStat{s.Baseline, s.Offered} {
+		for k, b := range m {
+			if b == nil || !finite(b.Trials, b.ValueSum, b.Shares) {
+				delete(m, k)
+			}
+		}
+	}
+	for k, p := range s.Played {
+		if p == nil || !finite(p.Trials, p.Sum, p.Shares, p.Contests) {
+			delete(s.Played, k)
+		}
+	}
 }
 
 // SaveAggregate writes an aggregate as gzip-compressed JSON.

@@ -103,6 +103,101 @@ type Params struct {
 	DemoWeight      float32
 	DemoComboWeight float32
 
+	// The base AI (see baseline.go). With BaseAI set, the character's own AI
+	// is the base and plays whenever the CBR layer does not take over, and the
+	// CBR layer takes over only with a move that has proved better than the
+	// base AI in the same kind of situation. Results are chain rewards (see
+	// Params.reward), whose scale is a fraction of a life bar per exchange,
+	// credited to each decision with its share of its exchange's reward.
+	//
+	// A move can prove itself in a situation once the CBR layer has played it
+	// there TakeoverMinPlays times, and those plays were credited with at
+	// least TakeoverMinPlays exchanges' worth of shares of their exchanges'
+	// rewards between them (see Params.proves), so that one exchange, however
+	// large, does not prove a move. Its advantage is the mean result of those
+	// plays minus the base AI's mean there, shrunk toward zero as if
+	// TakeoverShrink more exchanges' worth of plays had matched the base AI
+	// exactly, then weighted by the chance that its route completes, as the
+	// value is (see score). The base AI's mean is taken where the move was on
+	// offer (see Store.against): from its results at the decisions left to it
+	// while the move was among the closest matches, once there are
+	// BaselineMinTrials of them, shrunk toward its mean in the situation as if
+	// BaselineShrink results had matched that; until then from the situation
+	// as a whole, at twice the margin. It takes over when the advantage
+	// exceeds the take-over margin: TakeoverMargin for the Medium setting (Low
+	// is half of it, High twice; see Engine.SetTakeoverMargin). The margin is
+	// per exchange, so before the comparison it is scaled by the share of an
+	// exchange's reward a decision in the situation usually gets (see
+	// Store.baselineShare): nearly in full where decisions lead into an
+	// exchange, much less where most never do (a step in neutral far from the
+	// enemy, say). The shrinking counts exchanges the same way (see
+	// Params.advantage): where decisions take half an exchange's reward on
+	// average, TakeoverShrink exchanges' worth is twice TakeoverShrink plays.
+	// Because of the shrinking, a move's first plays must beat the base AI by
+	// about twice the margin (three exchanges' worth count half), and less the
+	// more it is played.
+	//
+	// The base AI's mean in a situation is shrunk toward the mean of a
+	// coarser situation as if BaselineShrink results had matched that, the
+	// coarser one likewise toward the mean of all its results in the store,
+	// and that toward BaselineDefault.
+	//
+	// Moves are tried now and then so they can prove themselves: in a new
+	// decision situation where no move has proved better, with chance
+	// TakeoverExplore, the best of the moves that may be tried is played, at
+	// most TakeoverExploreMax times a round, so that trying moves costs the
+	// base AI little. A move may be tried while its demonstrated result beats
+	// the base AI's mean (a move with no result at all, such as a hypothesis,
+	// always may) and it has fewer than TakeoverRetryPlays plays in the
+	// situation, so that a move whose first few plays were unlucky gets more,
+	// unless those plays fell short of the base AI's by more than the margin.
+	// A move not proved better yet is promising when TakeoverRetryPlays plays
+	// as good as its demonstrated result (or, once it has a few plays, as good
+	// as their mean), credited with the usual share of an exchange there,
+	// would prove it, where the base AI's record holds BaselineMinTrials
+	// results; it is tried with the larger chance TakeoverExplorePromising. Such moves are mostly in situations that come
+	// up only a few times a round (a follow-up after a hit, say), where the
+	// smaller chance would take many rounds; in neutral, where a decision
+	// seldom leads into an exchange, proving a move takes many more plays, so
+	// few moves there are promising. Moves not played TakeoverMinPlays times
+	// yet come first, and at most TakeoverRetryMax of a round's explorations
+	// try a move again, and only one that could still prove itself (its plays
+	// or its case's record promising), so that moves in neutral tried again do
+	// not crowd out the rest. The caps per round always hold.
+	// A move whose plays in a situation the character's own AI has taken over
+	// from TakeoverContestMax times (an AI that cannot be paused starting
+	// attacks of its own during them) is not tried there any more: such plays
+	// count for nothing, and trying it again would only spend the exploration
+	// on them.
+	//
+	// With chance BaseExplore the CBR layer leaves even a situation where a
+	// move has proved better to the base AI, so the base AI's record stays
+	// current.
+	//
+	// After declining because nothing proved better, the CBR layer waits
+	// NotBetterBackoff frames before looking again while it has control,
+	// unless its state or control, or the situation compared with the base
+	// AI, changes first. While the base AI moves the character with control
+	// (walking, running, in the air), it looks again every few frames
+	// whatever it found last, and at once in each new situation, such as the
+	// next distance band, so that a move that proved better from a distance
+	// takes over as the base AI comes into it (see driver.input).
+	BaseAI                   bool
+	TakeoverMargin           float32
+	TakeoverMinPlays         float32
+	TakeoverRetryPlays       float32
+	TakeoverShrink           float32
+	BaselineMinTrials        float32
+	BaselineShrink           float32
+	BaselineDefault          float32
+	TakeoverExplore          float32
+	TakeoverExplorePromising float32
+	TakeoverExploreMax       int32
+	TakeoverRetryMax         int32
+	TakeoverContestMax       float32
+	BaseExplore              float32
+	NotBetterBackoff         int32
+
 	// Store budget (see Store.Prune).
 	MaxCases         int
 	MaxNonHumanShare float32
@@ -149,15 +244,28 @@ type Params struct {
 
 	// Commands (see command.go). ChangeStateFlagCount is how many attack
 	// starts with no command active mark an AI-controlled character's AI as
-	// direct state change for the match. A hypothesis needs its command seen
+	// direct state change for the match; with the engine's labels, only those
+	// the engine could not check count (EntryUnknown), the others being
+	// recorded or left out by their label. A hypothesis needs its command seen
 	// with the state HypothesisMinEvidence times before a case is
 	// synthesized for it; at most HypothesisCasesPerState such cases are
-	// kept per state, and HypothesisMaxAttempts failed plays with no success
-	// classify the state as reachable only by direct state change.
+	// kept per state, and without the base AI, HypothesisMaxAttempts failed
+	// plays from a clean start with no success classify the state as
+	// reachable only by direct state change (with it, the verdicts decide).
+	//
+	// A case whose command nobody was seen to input (a character AI's direct
+	// state change, or a hypothesis) takes over only where its command has
+	// been verified (see Verdict). To verify it, the CBR layer plays it as a
+	// test where its spot is still open: at most VerifyPerRound test plays a
+	// round for each character, apart from the exploration cap, and none
+	// once the spots that come up are settled. A test play needs no proof
+	// that the move is better than the base AI, and counts toward that proof
+	// like any other play.
 	ChangeStateFlagCount    int32
 	HypothesisMinEvidence   float32
 	HypothesisCasesPerState int
 	HypothesisMaxAttempts   int32
+	VerifyPerRound          int32
 
 	// Variables whose values gate case selection.
 	Vars []VarDecl
@@ -237,6 +345,22 @@ func DefaultParams() *Params {
 		DemoWeight:            1,
 		DemoComboWeight:       1,
 
+		BaseAI:                   true,
+		TakeoverMargin:           0.03,
+		TakeoverMinPlays:         3,
+		TakeoverRetryPlays:       10,
+		TakeoverShrink:           3,
+		BaselineMinTrials:        5,
+		BaselineShrink:           5,
+		BaselineDefault:          0,
+		TakeoverExplore:          0.05,
+		TakeoverExplorePromising: 0.25,
+		TakeoverExploreMax:       3,
+		TakeoverRetryMax:         1,
+		TakeoverContestMax:       3,
+		BaseExplore:              0.02,
+		NotBetterBackoff:         8,
+
 		MaxCases:         6000,
 		MaxNonHumanShare: 0.4,
 
@@ -283,6 +407,11 @@ func DefaultParams() *Params {
 			CompPunished:  -0.05,
 		},
 
+		// A character AI's direct state change (SrcCharacterAI) is an
+		// authored decision, unlike the engine AI's random command picks, but
+		// one that skipped the command's input entirely and may rest on what a
+		// person cannot know or do (reacting on the very frame, say): so it
+		// starts below an AI that inputs its commands, and above the engine AI.
 		Priors: map[Source]Prior{
 			SrcRankedTop:   {0.75, 30},
 			SrcTrial:       {0.65, 24},
@@ -290,6 +419,7 @@ func DefaultParams() *Params {
 			SrcHumanLocal:  {0.60, 20},
 			SrcHumanLobby:  {0.55, 18},
 			SrcAuthoredAI:  {0.30, 10},
+			SrcCharacterAI: {0.20, 8},
 			SrcEngineAI:    {0.10, 5},
 			SrcSynthesized: {0.05, 3},
 			SrcUnknown:     {0.05, 3},
@@ -317,6 +447,7 @@ func DefaultParams() *Params {
 		HypothesisMinEvidence:   3,
 		HypothesisCasesPerState: 5,
 		HypothesisMaxAttempts:   3,
+		VerifyPerRound:          2,
 	}
 	return p
 }

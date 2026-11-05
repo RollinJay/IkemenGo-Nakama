@@ -3,9 +3,44 @@ package cbr
 // A chain is a sequence of cases forming one exchange, prefixed by the
 // neutral movement cases that led into it. Chains are graded when they
 // resolve, and the grade is credited backward across their cases.
+//
+// A chain can also hold probes: markers of the base AI's decisions (see
+// baseline.go), credited like the CBR layer's played cases into the base
+// AI's record instead of a case. Probes are not cases: they do not count
+// toward the horizon, do not change the backward credit of recorded and
+// played cases (see split), and take no recorded case's place in the
+// lead-in.
+//
+// The lead-in. Before an exchange, the lead-in keeps the last leadInMax
+// neutral decisions that might have led into it; an older one leaves it and
+// resolves as neutral (see chainTracker.onEvict). With the base AI on, the
+// two sides of the comparison with the base AI leave it by one rule: the
+// base AI's decisions (probes) and the moves the CBR layer played count
+// alike, so that a decision leaves the lead-in once leadInMax decisions of
+// either layer have followed it, whichever layer made it. A step the CBR
+// layer played long before an exchange, with many of the base AI's
+// decisions after it, is then as neutral as a step of the base AI's own in
+// its place would be. Without that, the CBR layer's moves would wait for the
+// next exchange while the base AI's decisions in between rotated out, and
+// the base AI's own moves, played by the CBR layer, would measure better
+// than the base AI.
+//
+// The two must also cover the same time. The base AI makes a decision in
+// each new situation it has control in, so its walk across three distance
+// bands is three decisions, while the same walk played by the CBR layer is
+// one move. So a played move counts for as many decisions as the decision
+// situations with control it went through (its span, see driver.follow):
+// the CBR layer's walk across three bands then leaves the lead-in exactly
+// when the base AI's identical walk would, and its start is credited as the
+// base AI's first decision of that walk would be.
+//
+// Recorded cases, the recorded player's demonstrations, keep a count of
+// their own, as they would with no CBR layer playing. With the base AI off
+// there are no probes and no spans, and recorded and played cases count
+// together.
 
 const (
-	leadInMax = 4  // neutral cases kept as a chain prefix
+	leadInMax = 4  // neutral decisions kept as a chain prefix (see addCase)
 	otgWindow = 20 // frames a knockdown stays open for an OTG follow-up
 )
 
@@ -18,6 +53,25 @@ type chainCase struct {
 	attackClass StateType
 	perturbed   bool // injected execution noise affected this case
 	level       int8 // execution level when played
+	// contested: the character's own AI took over during the play (see
+	// Engine.watchDriven), so its result is not the case's.
+	contested bool
+	// failed: the play's command did not come out, so whatever the character
+	// did instead is not one of the move's plays (see Engine.finalizeChain).
+	failed bool
+	// probe marks a decision of the base AI rather than a case.
+	probe bool
+	// key is the decision situation (see baselineKey): for a probe the one
+	// the base AI decided in, for a played case the one it was played in,
+	// where its result counts against the base AI's (see playKey); 0 for a
+	// play with the base AI off, which is compared with nothing.
+	key uint64
+	// offers are a probe's moves on offer (see gate.offers), whose records of
+	// the base AI's results where they were on offer it is credited to too.
+	offers [offerMax]uint64
+	// span is how many decisions beyond its first a played case counts for in
+	// the lead-in (see the lead-in above).
+	span int32
 }
 
 type chain struct {
@@ -25,6 +79,7 @@ type chain struct {
 	session   uint64
 	startTick int64
 	cases     []chainCase
+	probes    int32 // how many of cases are probes
 
 	selfLifeMax  int32
 	powerMax     int32
@@ -142,17 +197,173 @@ func (t *chainTracker) addCase(cc chainCase) {
 		}
 	}
 	if t.active != nil {
-		t.active.cases = append(t.active.cases, cc)
+		t.active.add(cc)
 		return
 	}
 	t.leadIn = append(t.leadIn, cc)
-	if len(t.leadIn) > leadInMax {
-		ev := t.leadIn[0]
-		t.leadIn = t.leadIn[1:]
+	t.trim(t.leadInGroup(cc), cc.startTick)
+}
+
+// trim lets the oldest lead-in entries of a group that count together (see
+// leadInGroup) leave the lead-in, as neutral, for as long as leadInMax
+// decisions or more follow the oldest: the entries after it, each counting
+// for one decision plus its span, and the oldest's own span.
+func (t *chainTracker) trim(g bool, tick int64) {
+	for {
+		first, later := -1, int32(0)
+		for i, l := range t.leadIn {
+			switch {
+			case t.leadInGroup(l) != g:
+			case first < 0:
+				first, later = i, l.span
+			default:
+				later += 1 + l.span
+			}
+		}
+		if first < 0 || later < leadInMax {
+			return
+		}
+		ev := t.leadIn[first]
+		t.leadIn = append(t.leadIn[:first], t.leadIn[first+1:]...)
 		if t.onEvict != nil {
-			t.onEvict(ev, cc.startTick)
+			t.onEvict(ev, tick)
 		}
 	}
+}
+
+// extend adds n to the span of the play of caseID begun at startTick while
+// it is in the lead-in (see driver.follow), then lets older entries leave
+// the lead-in if that makes too many decisions. A play already in an
+// exchange keeps its place there whatever its span.
+func (t *chainTracker) extend(caseID uint64, startTick int64, n int32, tick int64) {
+	for i := len(t.leadIn) - 1; i >= 0; i-- {
+		if cc := &t.leadIn[i]; cc.isPlay(caseID, startTick) {
+			cc.span = max(cc.span+n, 0)
+			if n > 0 {
+				t.trim(t.leadInGroup(*cc), tick)
+			}
+			return
+		}
+	}
+}
+
+// fail marks the play of caseID begun at startTick as one whose command did
+// not come out, wherever it waits for its credit.
+func (t *chainTracker) fail(caseID uint64, startTick int64) {
+	mark := func(cases []chainCase) bool {
+		for i := len(cases) - 1; i >= 0; i-- {
+			if cases[i].isPlay(caseID, startTick) {
+				cases[i].failed = true
+				return true
+			}
+		}
+		return false
+	}
+	if t.active != nil && mark(t.active.cases) || mark(t.leadIn) {
+		return
+	}
+	for _, pr := range t.pending {
+		if mark(pr.ch.cases) {
+			return
+		}
+	}
+}
+
+// isPlay reports whether the entry is the CBR layer's play of caseID begun
+// at startTick.
+func (cc *chainCase) isPlay(caseID uint64, startTick int64) bool {
+	return !cc.probe && cc.rec == nil && cc.caseID == caseID && cc.startTick == startTick
+}
+
+// leadInGroup tells which lead-in entries count together toward leadInMax
+// (see the lead-in at the top of this file): with the base AI on, the
+// decisions compared with each other (probes and played cases) apart from
+// recorded cases; with it off, probes (there are none then) apart from
+// cases.
+func (t *chainTracker) leadInGroup(cc chainCase) bool {
+	if t.p.BaseAI {
+		return cc.rec == nil
+	}
+	return cc.probe
+}
+
+func (ch *chain) add(cc chainCase) {
+	ch.cases = append(ch.cases, cc)
+	if cc.probe {
+		ch.probes++
+	}
+}
+
+// withdraw removes a probe added at tick for situation key, if it is still
+// in the active chain or the lead-in.
+func (t *chainTracker) withdraw(key uint64, tick int64) {
+	drop := func(cases []chainCase) ([]chainCase, bool) {
+		for i := len(cases) - 1; i >= 0; i-- {
+			if cc := cases[i]; cc.probe && cc.key == key && cc.startTick == tick {
+				return append(cases[:i], cases[i+1:]...), true
+			}
+		}
+		return cases, false
+	}
+	if t.active != nil {
+		var ok bool
+		if t.active.cases, ok = drop(t.active.cases); ok {
+			t.active.probes--
+			return
+		}
+	}
+	t.leadIn, _ = drop(t.leadIn)
+}
+
+// contest marks the latest play of a case still in a chain as contested.
+func (t *chainTracker) contest(caseID uint64) {
+	mark := func(cases []chainCase) bool {
+		for i := len(cases) - 1; i >= 0; i-- {
+			if cases[i].caseID == caseID && !cases[i].probe {
+				cases[i].contested = true
+				return true
+			}
+		}
+		return false
+	}
+	if t.active != nil && mark(t.active.cases) {
+		return
+	}
+	mark(t.leadIn)
+}
+
+// split gives each of a chain's entries its place in the backward credit.
+// Recorded and played cases count among themselves, as if there were no
+// probes: pos[i] is case i's position among them and n their number. For the
+// comparison with the base AI, only the CBR layer's played cases count:
+// after[i] is how many of them follow entry i. Probes do not count, so that a
+// probe and a move played in its place take the same share whatever the base
+// AI does next: the base AI gets a probe at every change of state while it
+// has control, many more decisions than the CBR layer makes, which makes one
+// per move it plays, and counting them would hand the base AI's decisions
+// smaller shares than the moves compared with them. Recorded cases do not
+// count either, since they repeat the base AI's decisions when it is
+// recorded as well.
+func (ch *chain) split() (pos, after []int, n int) {
+	pos = make([]int, len(ch.cases))
+	after = make([]int, len(ch.cases))
+	k := 0
+	for i := len(ch.cases) - 1; i >= 0; i-- {
+		cc := &ch.cases[i]
+		if cc.probe || cc.caseID != 0 {
+			after[i] = k
+		}
+		if !cc.probe && cc.caseID != 0 {
+			k++
+		}
+	}
+	for i := range ch.cases {
+		if !ch.cases[i].probe {
+			pos[i] = n
+			n++
+		}
+	}
+	return pos, after, n
 }
 
 func (t *chainTracker) start(s *Snapshot, self, en *CharSnap) {
@@ -171,7 +382,9 @@ func (t *chainTracker) start(s *Snapshot, self, en *CharSnap) {
 		firstHitTick:  -1,
 		timeFrac0:     s.World.TimeFrac(),
 	}
-	ch.cases = append(ch.cases, t.leadIn...)
+	for _, cc := range t.leadIn {
+		ch.add(cc)
+	}
 	t.leadIn = t.leadIn[:0]
 	t.active = ch
 }
@@ -214,7 +427,7 @@ func (t *chainTracker) step(s *Snapshot, tr *tracker) {
 		exchangeEnded := t.prevInExchange && !tr.inExchange
 		knockdownDone := en != nil && ch.sawDown && en.StateType == StLying && tick-ch.downTick >= otgWindow
 		horizon := (t.p.HorizonFrames > 0 && ch.frames >= t.p.HorizonFrames) ||
-			(t.p.HorizonCases > 0 && int32(len(ch.cases)) >= t.p.HorizonCases)
+			(t.p.HorizonCases > 0 && int32(len(ch.cases))-ch.probes >= t.p.HorizonCases)
 		switch {
 		case roundEnded:
 			t.resolve(s, self, en, true, advantageNow(self, en))

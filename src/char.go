@@ -6955,6 +6955,9 @@ func (c *Char) stateChange1(no int32, pn int) bool {
 		}
 	}
 
+	if sysCBR.watching {
+		cbrStateChanged(c)
+	}
 	c.stchtmp = true
 	return true
 }
@@ -12230,9 +12233,7 @@ func (c *Char) actionPrepare() {
 			keptflags := ASF_runfirst | ASF_runlast
 			c.assertFlag &= keptflags
 		}
-		if cbrMaskAILevel(c) {
-			c.setASF(ASF_noailevel)
-		}
+		cbrPrepareAILevel(c)
 
 		// The flags below also reset during hitpause, but are new to Ikemen and don't need the exception above
 		// Reset all types of Clsn modifiers
