@@ -262,10 +262,15 @@ local function warningText(key, fallback)
 end
 
 -- Asks a question and returns true (Yes), false (No) or nil when the player
--- backs out. It looks like the warning screen ([Warning Info]: its overlay
--- and text) on the menu's background, with Yes and No below as items in the
--- menu's style, and uses the menu's keys and sounds. The menu state is a
--- private table, so the main menu's own cursor stays where it was.
+-- backs out. Yes and No are items in the menu's style on the menu's
+-- background, under the warning screen's overlay ([Warning Info]), and the
+-- question is their heading: in the items' font, on the row of the first
+-- item, with Yes and No on the rows after it. The warning screen's text is
+-- laid out for its paragraphs, from the top left, where many screenpacks
+-- have their logo; its text.cbrfight.text and text.cbrtrain.text only word
+-- the questions. It uses the menu's keys and
+-- sounds. The menu state is a private table, so the main menu's own cursor
+-- stays where it was.
 -- first: fade in (the menu faded out before running the mode); last: fade
 -- out after the answer. Backing out always fades out, back to the menu.
 local function cbrAsk(question, first, last)
@@ -278,16 +283,21 @@ local function cbrAsk(question, first, last)
 		{itemname = 'no', displayname = valuename.no or 'No', paramname = 'no'},
 	}
 	local item, cursorPosY, moveTxt = 1, 1, 0
-	local textData = motif.warning_info.text.TextSpriteData
-	textImgReset(textData)
-	textImgSetText(textData, question)
+	local label = main.f_itemnameUpper(question, sec.menu.item.uppercase)
 	local function draw()
 		clearColor(bg.bgclearcolor[1], bg.bgclearcolor[2], bg.bgclearcolor[3])
 		bgDraw(bg.BGDef, 0)
 		rectDraw(motif.warning_info.overlay.RectData)
-		textImgDraw(textData)
+		-- The menu draws each item with the same text sprite, from its
+		-- reset position, clipped to the menu's window: the heading takes
+		-- the first item's row, and the items move a row on.
+		local heading = sec.menu.item.TextSpriteData
+		textImgReset(heading)
+		textImgSetText(heading, label)
+		textImgDraw(heading)
 		main.f_menuCommonDraw(items, item, cursorPosY, moveTxt, m, bg, true,
-			{skipBG0 = true, skipBG1 = true, skipTitle = true})
+			{skipBG0 = true, skipBG1 = true, skipTitle = true,
+				offx = sec.menu.item.spacing[1], offy = sec.menu.item.spacing[2]})
 		bgDraw(bg.BGDef, 1)
 		refresh()
 	end
