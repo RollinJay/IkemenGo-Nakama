@@ -388,19 +388,22 @@ func (d *driver) abort() {
 // instead is not one of the move's plays. When the play began right after
 // input that could complete another command with the case's own (see
 // carryOver) and something else came out, the failure is that leftover
-// input's: it counts neither against the case (see Outcome.unreproducible)
-// nor against its command's spot. A failure from a clean start, with no
-// such input and without the character being hit or guarding, counts
-// against the spot (see Verdict).
+// input's. Only a failure from a clean start, with no such input and
+// without the character being hit or guarding, counts against the case (see
+// Outcome.unreproducible, and a hypothesis's attempts) and against its
+// command's spot (see Verdict): a guard or a hit keeps any command from
+// coming out.
 func (d *driver) execFailed() {
 	c := d.cur
 	switch {
 	case d.carry && d.other:
 		d.execNoted = true
 		d.carried++
+	case d.carry || d.hit:
+		d.execNoted = true
 	default:
 		d.noteExec(false)
-		if c.Command != "" && !d.carry && !d.hit {
+		if c.Command != "" {
 			d.st.failAt(d.vkey, d.vpow)
 		}
 	}

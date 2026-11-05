@@ -198,15 +198,18 @@ func (s *Store) liveHypotheses(state int32) int {
 }
 
 // resolveHypothesisPlay records whether a played hypothesis case produced
-// its state, and classifies the state as reachable only by direct state
-// change once enough plays have all failed.
+// its state. Without the base AI it also classifies the state as reachable
+// only by direct state change once enough plays have all failed. With it,
+// the verdicts of the command's spots decide where the case may take over
+// (see Verdict), the power included, so a super tested below the power it
+// needs is not written off for good.
 func (p *Params) resolveHypothesisPlay(s *Store, c *Case, came bool) {
 	h := s.hypothesis(c.MoveRef)
 	h.Attempts++
 	if came {
 		h.Successes++
 	}
-	if !h.CheatOnly && h.Successes == 0 && h.Attempts >= p.HypothesisMaxAttempts {
+	if !p.BaseAI && !h.CheatOnly && h.Successes == 0 && h.Attempts >= p.HypothesisMaxAttempts {
 		h.CheatOnly = true
 		for _, hc := range s.byID {
 			if hc.Source == SrcSynthesized && hc.MoveRef == c.MoveRef {

@@ -249,8 +249,9 @@ type Params struct {
 	// recorded or left out by their label. A hypothesis needs its command seen
 	// with the state HypothesisMinEvidence times before a case is
 	// synthesized for it; at most HypothesisCasesPerState such cases are
-	// kept per state, and HypothesisMaxAttempts failed plays with no success
-	// classify the state as reachable only by direct state change.
+	// kept per state, and without the base AI, HypothesisMaxAttempts failed
+	// plays from a clean start with no success classify the state as
+	// reachable only by direct state change (with it, the verdicts decide).
 	//
 	// A case whose command nobody was seen to input (a character AI's direct
 	// state change, or a hypothesis) takes over only where its command has

@@ -147,21 +147,31 @@ func TestHumanCommandsResolveHypotheses(t *testing.T) {
 	}
 }
 
+// TestCheatOnlyClassification: without the base AI, a hypothesis whose
+// plays never come out is classified cheat-only and its cases removed. With
+// it, the plays are only counted: the verdicts of the command's spots
+// decide where the case may take over, the power included.
 func TestCheatOnlyClassification(t *testing.T) {
-	p := DefaultParams()
-	st := NewStore("x")
-	c := &Case{ID: 1, Source: SrcSynthesized, Kind: KindCommand, MoveRef: 1234, Inputs: []InputBits{InA}, Start: Feat{RoundState: 2}, StartStateType: StStand}
-	st.Admit(p, []*Case{c})
-	for i := int32(0); i < p.HypothesisMaxAttempts; i++ {
-		p.resolveHypothesisPlay(st, c, false)
-	}
-	h := st.Hypotheses[1234]
-	if !h.CheatOnly || !c.Removed {
-		t.Fatal("a hypothesis that never comes out is classified cheat-only and its cases removed")
-	}
-	st.compact()
-	if st.Len() != 0 {
-		t.Fatal("removed hypothesis cases leave the store at the next compaction")
+	for _, base := range []bool{false, true} {
+		p := DefaultParams()
+		p.BaseAI = base
+		st := NewStore("x")
+		c := &Case{ID: 1, Source: SrcSynthesized, Kind: KindCommand, MoveRef: 1234, Inputs: []InputBits{InA}, Start: Feat{RoundState: 2}, StartStateType: StStand}
+		st.Admit(p, []*Case{c})
+		for i := int32(0); i < p.HypothesisMaxAttempts; i++ {
+			p.resolveHypothesisPlay(st, c, false)
+		}
+		h := st.Hypotheses[1234]
+		if h.CheatOnly == base || c.Removed == base || h.Attempts != p.HypothesisMaxAttempts {
+			t.Fatalf("base AI %v: cheat-only %v, cases removed %v, %d attempts", base, h.CheatOnly, c.Removed, h.Attempts)
+		}
+		if base {
+			continue
+		}
+		st.compact()
+		if st.Len() != 0 {
+			t.Fatal("removed hypothesis cases leave the store at the next compaction")
+		}
 	}
 }
 

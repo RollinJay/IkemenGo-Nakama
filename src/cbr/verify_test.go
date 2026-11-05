@@ -1077,9 +1077,10 @@ func TestLeftoverInputFound(t *testing.T) {
 }
 
 // TestTestFailureWhileGuardingSaysNothing: a test play whose command did not
-// come out because the character had to guard counts as a failed execution
-// of the case, as always, but not against its command's spot, which a
-// person's command could reach all the same.
+// come out because the character had to guard counts neither as a failed
+// execution of the case nor against its command's spot, which a person's
+// command could reach all the same: a guard keeps any command from coming
+// out, and three such plays would shut the case out for good.
 func TestTestFailureWhileGuardingSaysNothing(t *testing.T) {
 	for _, guard := range []bool{false, true} {
 		p := DefaultParams()
@@ -1107,8 +1108,12 @@ func TestTestFailureWhileGuardingSaysNothing(t *testing.T) {
 			ff.frame(f)
 		}
 		v := st.Verdicts[spotKey(200, "a", &standing)]
-		if c.Outcome.ExecFails != 1 {
-			t.Fatalf("guarding %v: setup: the command did not come out, %d failures", guard, c.Outcome.ExecFails)
+		wantFails := int32(1)
+		if guard {
+			wantFails = 0
+		}
+		if c.Outcome.Plays == 0 || c.Outcome.ExecFails != wantFails {
+			t.Fatalf("guarding %v: %d plays, %d failed executions; want some, %d", guard, c.Outcome.Plays, c.Outcome.ExecFails, wantFails)
 		}
 		if failed := v != nil && v.Fails > 0; failed == guard {
 			t.Fatalf("guarding %v: counted against the spot %v", guard, failed)
