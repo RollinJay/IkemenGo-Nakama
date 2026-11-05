@@ -286,21 +286,10 @@ func (r *recorder) step(s *Snapshot, f Feat) {
 		entry, entryCmd = r.lateEntry, r.lateEntryCmd
 	}
 
-	if r.log.flagged {
-		// Nothing more is recorded from this source this match, but the
-		// states it enters directly are still collected as hypotheses.
-		if r.started && !self.CBRDriven && s.World.RoundState == 2 {
-			if self.CmdKnown && (self.StateNo != r.prevStateNo || late) && r.prevCtrl && !self.Ctrl &&
-				self.MoveType == MtAttack && !r.significant(cmds) {
-				r.st.hypothesis(self.StateNo).Seen++
-				r.hypothesisCase(self, tick)
-			}
-			r.noteLate(&prev, self)
-		}
-		r.started = true
-		r.remember(self)
-		return
-	}
+	// A flagged source (see flag) records nothing more this match but the
+	// decisions of the character's AI that the engine checked (openReach);
+	// the states it enters directly are still collected as hypotheses.
+	flagged := r.log.flagged
 	if self.CBRDriven || s.World.RoundState != 2 {
 		r.closeOpen(tick)
 		r.remember(self)
@@ -309,7 +298,9 @@ func (r *recorder) step(s *Snapshot, f Feat) {
 	if !r.started {
 		r.remember(self)
 		r.started = true
-		r.openMovement(tick)
+		if !flagged {
+			r.openMovement(tick)
+		}
 		r.appendInput(self.Input)
 		return
 	}
@@ -337,7 +328,7 @@ func (r *recorder) step(s *Snapshot, f Feat) {
 	// only the engine's own direction-driven states (walk, jump, guard).
 	significant := false
 	if command && self.CmdKnown && !decided {
-		if len(cmds) > 0 {
+		if len(cmds) > 0 && !flagged {
 			if r.source.IsHuman() {
 				r.st.noteCommand(self.StateNo, cmds)
 			} else {
@@ -399,10 +390,17 @@ func (r *recorder) step(s *Snapshot, f Feat) {
 		switch {
 		case decided:
 			r.openReach(s, act, f, tick, entryCmd)
+		case flagged:
+			r.closeOpen(tick)
 		case significant && r.source.assisted():
 			r.openAssisted(s, act, f, tick)
 		default:
 			r.openCommand(s, act, f, tick)
+		}
+	case flagged:
+		// What follows a checked decision ends with it.
+		if regain || length >= r.p.MaxCaseFrames {
+			r.closeOpen(tick)
 		}
 	case regain:
 		r.closeOpen(tick)

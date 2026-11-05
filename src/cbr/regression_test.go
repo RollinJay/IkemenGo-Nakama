@@ -373,3 +373,58 @@ func TestMostRepeatedIsDeterministic(t *testing.T) {
 		t.Fatalf("empty chain: got %d x%d", ref, n)
 	}
 }
+
+// Once a CPU source is flagged as an AI that changes states directly (two
+// attack starts the engine could not check), the decisions of the
+// character's AI that the engine checked are still recorded as its cases,
+// and nothing else is.
+func TestFlaggedSourceKeepsCheckedDecisions(t *testing.T) {
+	eng := New(DefaultParams(), t.TempDir(), 1)
+	eng.SetMotions("A", simMotions)
+	eng.SetPlayer(0, "A", "B")
+	eng.Record(0, SrcEngineAI)
+	ff := &frameFeeder{eng: eng}
+	frame := func(f CharSnap) { f.Routes = simRouteTable; ff.frame(f) }
+	standing := func(n int) {
+		for i := 0; i < n; i++ {
+			frame(CharSnap{StateType: StStand, MoveType: MtIdle, Ctrl: true})
+		}
+	}
+	attack := func(no int32, k EntryKind, cmd string) {
+		frame(CharSnap{StateNo: no, StateTime: 1, MoveType: MtAttack, Entry: k, EntryCommand: cmd})
+		for i := int32(2); i <= 20; i++ {
+			frame(CharSnap{StateNo: no, StateTime: i, MoveType: MtAttack})
+		}
+	}
+	standing(30)
+	attack(1000, EntryUnknown, "")
+	standing(30)
+	attack(1000, EntryUnknown, "")
+	standing(60)
+	attack(200, EntryReachable, "a")
+	standing(60)
+	attack(1100, EntryReachable, "qcf_b")
+	standing(60)
+	ff.end()
+	if err := eng.MatchEnd(); err != nil {
+		t.Fatal(err)
+	}
+	st, err := eng.Store("A")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !st.ChangeStateAI {
+		t.Error("the source was not flagged")
+	}
+	got := map[int32]string{}
+	for _, c := range st.Cases {
+		if c.Source != SrcCharacterAI {
+			t.Errorf("a case of source %v into %d was kept", c.Source, c.MoveRef)
+			continue
+		}
+		got[c.MoveRef] = c.Command
+	}
+	if len(got) != 2 || got[200] != "a" || got[1100] != "qcf_b" {
+		t.Errorf("checked decisions recorded: %v, want 200 by a and 1100 by qcf_b", got)
+	}
+}
