@@ -1161,3 +1161,36 @@ func TestAutoFollowUpIsNoCancel(t *testing.T) {
 		t.Fatalf("with the label it is the move's own: %d cases", n)
 	}
 }
+
+// Moment checks that found no person's route open (the AI's cancels out of
+// a whiff, say) do not block a spot where checks found the route open at
+// that power: there, only the CBR layer's own failed plays do. Below that
+// power, the checks block it as before.
+func TestCheatChecksDoNotBlockAReachableSpot(t *testing.T) {
+	st := NewStore("x")
+	fromJab := &CharSnap{StateNo: 200, StateType: StStand, MoveType: MtAttack}
+	k := spotKey(1000, "qcf_a", fromJab)
+	for i := 0; i < 50; i++ {
+		st.reachAt(k, 0)
+	}
+	for i := 0; i < 3; i++ {
+		st.cheatAt(k, 0)
+	}
+	if got := st.verdictAt(k, 0); got != verdictOpen {
+		t.Fatalf("found open there, and only moment checks failed: %v, want open", got)
+	}
+	for i := 0; i < 3; i++ {
+		st.failAt(k, 0)
+	}
+	if got := st.verdictAt(k, 0); got != verdictBlocked || st.cheating(k, 0) {
+		t.Fatalf("three failed plays: %v, cheating %v; want blocked, unreproducible", got, st.cheating(k, 0))
+	}
+	k2 := spotKey(1100, "qcf_b", fromJab)
+	st.reachAt(k2, 1000)
+	for i := 0; i < 3; i++ {
+		st.cheatAt(k2, 500)
+	}
+	if got := st.verdictAt(k2, 500); got != verdictBlocked || !st.cheating(k2, 500) {
+		t.Fatalf("below the power the route was found open at: %v, cheating %v; want blocked, cheating", got, st.cheating(k2, 500))
+	}
+}

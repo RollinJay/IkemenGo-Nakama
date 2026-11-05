@@ -249,7 +249,11 @@ func (p *Params) resolveHypothesisPlay(s *Store, c *Case, came bool) {
 // blocked at a power once three failures there came at that power or above,
 // unless verified: cheating, when no moment check found the route open there
 // at that power or below, and otherwise unreproducible (the command works
-// there, but its inputs do not bring it about). Every other spot is open: a
+// there, but its inputs do not bring it about). Where a moment check found
+// the route open at that power or below, only failed plays block it: the
+// spot does not tell a hit from a whiff, and the AI's moves the checks
+// found no route open for may have been made where a person's could not
+// (a cancel out of a whiff, say). Every other spot is open: a
 // case needing verification (see Case.mustVerify) is tested there, within
 // Params.VerifyPerRound test plays a round, or tried by exploration, but
 // does not take over. A success settles its own spot only. A state no
@@ -426,6 +430,9 @@ func (s *Store) verdictAt(k VerdictKey, power int32) verdictState {
 		}
 	}
 	if v.failures() == len(v.FailTop) && v.FailTop[len(v.FailTop)-1] >= power {
+		if v.Reachable > 0 && power >= v.ReachPower && v.Fails < int32(len(v.FailTop)) {
+			return verdictOpen
+		}
 		return verdictBlocked
 	}
 	return verdictOpen
