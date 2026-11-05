@@ -258,8 +258,10 @@ jobs:
       - name: Module files are tidy
         run: go mod tidy -diff
 
+      # The CBR AI's simulated fights take longer than go test's default
+      # limit of 10 minutes.
       - name: CBR package tests
-        run: go test ./src/cbr/...
+        run: go test -timeout 45m ./src/cbr/...
 
   build:
     name: prepare release
