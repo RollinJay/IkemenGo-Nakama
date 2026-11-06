@@ -1,0 +1,12 @@
+# What running the kit creates. Never commit it: keys, passwords, the
+# DuckDNS token, the certificates' keys, the database, your settings and the
+# programs.
+/settings.env
+/config/
+/host-profile.json
+/caddy/public-host.env
+/caddy/data/
+/ddns/duckdns.env
+/programs/
+/downloads/
+/dist/

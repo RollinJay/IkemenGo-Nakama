@@ -15,6 +15,8 @@ The steps follow a setup that has run a real community (Hyper DBZ) on a home Lin
 | a name | a domain of yours, or a free dynamic DNS name such as DuckDNS |
 | a router or a firewall | one TCP port, 443, open to the internet |
 
+**Ready-made files.** [server-kit/](server-kit/README.md) has the files this guide builds step by step, ready to use: the scripts, the services, the Caddyfile, a DuckDNS updater, a packager for the zip you share, and a window with buttons for running it all. Its README says how to set it up; this guide explains each step.
+
 **Why not `Ikemen_GO -server`?** The fork's own launcher ([Optional dedicated-server launcher](README.md#optional-dedicated-server-launcher)) also starts Nakama with keys of its own, the console on its computer only and this fork's modules. But you set up its database yourself, and it runs the modules without Nakama Matchmaker's community module, so players can write the records the modules keep: a player who has no rating yet can write one, which the leaderboard then shows ([Server modules](README.md#server-modules)). `nakama-matchmaker-server` does both for you, so this guide uses it.
 
 ## 1. Choose where the server runs

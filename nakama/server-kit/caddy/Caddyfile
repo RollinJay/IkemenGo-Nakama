@@ -1,0 +1,47 @@
+# HTTPS in front of the Nakama server.
+#
+# Players' games connect to https://PUBLIC_HOST:443. The router forwards
+# public port 443 to this PC's port 8443, so Caddy runs without root. Caddy
+# gets the certificate from Let's Encrypt through that same port (its
+# TLS-ALPN check) and passes the requests, and the game's WebSocket, on to
+# Nakama, which listens on 127.0.0.1:7350 only.
+#
+# PUBLIC_HOST comes from public-host.env (set-public-host.sh writes it), and
+# SERVER_KIT is this folder (run-caddy.sh sets both).
+{
+	http_port 8080
+	https_port 8443
+	admin off
+	storage file_system {$SERVER_KIT}/caddy/data
+	# The games use HTTPS only, and Let's Encrypt checks through port 443, so
+	# nothing needs port 80.
+	auto_https disable_redirects
+	cert_issuer acme {
+		disable_http_challenge
+	}
+	# RSA keys: Let's Encrypt's RSA certificates chain to ISRG Root X1, which
+	# every player's system trusts; its ECDSA ones need the newer ISRG Root X2.
+	key_type rsa2048
+	servers {
+		# No HTTP/3: it would advertise UDP 8443, which the router does not forward.
+		protocols h1 h2
+	}
+}
+
+{$PUBLIC_HOST} {
+	# Nakama's http_key lets a caller act as the server (the moderators'
+	# RPCs). Only programs on this PC use it, and they call 127.0.0.1:7350
+	# directly, so refuse it from the internet even if it ever leaks. Nakama
+	# reads it from the query string, parsed as leniently as {query.*} parses
+	# it, and from Basic auth on RPC calls; the game signs in with Basic auth
+	# on /v2/account and calls RPCs with its session (Bearer).
+	@http_key expression `{query.http_key} != ""`
+	respond @http_key 403
+	@rpc_basic {
+		path /v2/rpc*
+		header_regexp Authorization (?i)^\s*basic\s
+	}
+	respond @rpc_basic 403
+
+	reverse_proxy 127.0.0.1:7350
+}
