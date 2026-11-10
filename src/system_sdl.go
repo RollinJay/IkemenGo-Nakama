@@ -381,10 +381,15 @@ func (w *Window) pollEvents() {
 		case sdl.QuitEvent:
 			w.closeflag = true
 		case sdl.KeyboardEvent:
+			key := t.Keysym.Sym
+			if key == sdl.K_AC_BACK && runtime.GOOS == "android" {
+				// Android's Back button, which the game keeps (main.go), works as Escape.
+				key = KeyEscape
+			}
 			if t.State == sdl.PRESSED {
-				OnKeyPressed(t.Keysym.Sym, t.Keysym.Mod)
+				OnKeyPressed(key, t.Keysym.Mod)
 			} else if t.State == sdl.RELEASED {
-				OnKeyReleased(t.Keysym.Sym, t.Keysym.Mod)
+				OnKeyReleased(key, t.Keysym.Mod)
 			}
 		case sdl.WindowEvent:
 			if t.Event == sdl.WINDOWEVENT_EXPOSED {
