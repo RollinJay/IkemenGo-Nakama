@@ -14,13 +14,15 @@ This folder holds the Android app that `build/build.sh Android` packages the gam
   - The on-screen buttons play as a controller named "IKEMEN Touch Controls", with no vendor or product ID and a fixed device ID. SDL keeps that name, so the game can recognise it, and the ID can't collide with a real device.
   - The buttons can be hidden, which also removes their controller.
   - Each button shows the glyph image the game writes for it, or its letter where there is none.
+  - A TV remote can press the buttons (`navigationTargets`, `pressTarget`).
 - **`TouchControls`** (new):
-  - **Setting:** Automatic, Always show or Always hide, chosen from a small settings button. Automatic hides the buttons on Android TV, without a touch screen, and while a real controller is connected.
+  - **Setting:** Automatic, Always show or Always hide, chosen from a small settings button. Automatic hides the buttons while a real controller is connected.
   - **Keyboard button:** shown while the game has a text box open and its keyboard is closed.
-  - **Remote hint:** without a touch screen, as on Android TV, the same case shows "Press OK to type, or Back to cancel" instead.
+  - **TV remote:** never a controller (the engine sets `SDL_TV_REMOTE_AS_JOYSTICK` to 0). Its arrows move a highlight (`FocusRing`) between the buttons on the screen, the settings, keyboard and game folder buttons included. OK presses an on-screen button for as long as it's held (60 ms at least, so that a frame sees it), and clicks any other when it comes up. Keys from gamepads and full keyboards still reach the game.
 - **`SDLActivity`:**
   - **From the game:** it handles commands 0x8001 (a text box opened or closed) and 0x8002 (the glyph images changed) in `onUnhandledMessage`.
   - **To the game:** it calls `nativeShowKeyboard`.
+  - **Keys:** `dispatchKeyEvent` hands a TV remote's arrows and OK to `TouchControls.onRemoteKey` first. A remote's key, like a touch, shows the faded controls again (`showControls`).
   - **Text field:** SDL's `DummyEdit` lives in a layer of its own (`mTextLayout`), which the 5 s fade of the controls leaves alone, and asks the keyboard for no suggestions or corrections.
 - **`AssetExtractor`:**
   - It always replaces `external/script`.

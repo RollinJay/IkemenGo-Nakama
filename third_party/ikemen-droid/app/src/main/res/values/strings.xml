@@ -11,10 +11,9 @@
     <string name="updating_files_msg">Please wait while engine files are synchronized…</string>
     <string name="update_error_title">Update Error</string>
     <string name="touch_controls_title">Touch Controls</string>
-    <string name="touch_controls_auto">Automatic: hidden on a TV or with a controller</string>
+    <string name="touch_controls_auto">Automatic: hidden while a controller is connected</string>
     <string name="touch_controls_show">Always Show</string>
     <string name="touch_controls_hide">Always Hide</string>
     <string name="touch_settings_button">Touch controls settings</string>
     <string name="keyboard_button">Open the keyboard</string>
-    <string name="keyboard_hint_remote">Press OK to type, or Back to cancel</string>
 </resources>

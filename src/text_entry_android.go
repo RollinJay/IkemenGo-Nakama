@@ -17,8 +17,7 @@ var keyboardRequested atomic.Bool
 var confirmDown, cancelDown bool
 
 // screenKeyboardOpen shows the on-screen keyboard for a text box that opened,
-// and tells the app, which shows its keyboard button or, without a touch
-// screen, how to open the keyboard with a remote.
+// and tells the app, which shows its keyboard button meanwhile.
 func screenKeyboardOpen() {
 	showScreenKeyboard()
 	keyboardRequested.Store(false)
@@ -32,12 +31,11 @@ func screenKeyboardClose() {
 	sendToApp(appMsgTextEntry, 0)
 }
 
-// screenKeyboardUpdate works a text box from controllers, a TV remote among
-// them (SDL makes one a controller, its OK the A button and its Back the Back
-// button), while the keyboard is closed. The keyboard, open, takes the
-// remote's keys itself, and Back closes it. A or Start, like the app's
+// screenKeyboardUpdate works a text box from controllers, the touch controls
+// among them, while the keyboard is closed: A or Start, like the app's
 // keyboard button, opens the keyboard again, and Back cancels the box, as
-// Escape does.
+// Escape does. (A TV remote is not a controller: it presses the app's
+// buttons.)
 func screenKeyboardUpdate() {
 	down := controllerButtonDown(sdl.CONTROLLER_BUTTON_A, sdl.CONTROLLER_BUTTON_START)
 	confirmed := down && !confirmDown

@@ -82,6 +82,10 @@ func realMain() {
 		// sdl.SetHint(sdl.HINT_ORIENTATIONS, "LandscapeLeft LandscapeRight")
 		// Back reaches the game, as Escape (system_sdl.go), instead of closing it.
 		sdl.SetHint("SDL_ANDROID_TRAP_BACK_BUTTON", "1")
+		// A TV remote is never a controller: the app moves a highlight around
+		// its on-screen buttons with it (TouchControls), and its Back reaches
+		// the game as the key above.
+		sdl.SetHint("SDL_TV_REMOTE_AS_JOYSTICK", "0")
 		// sdl.SetHint("SDL_JOYSTICK_HIDAPI", "0")
 		// sdl.SetHint("SDL_ANDROID_SEPARATE_MOUSE_AND_TOUCH", "1")
 

@@ -443,6 +443,11 @@ public class SDLActivity extends Activity implements View.OnSystemUiVisibilityCh
 
         // Set up the surface
         mSurface = createSDLSurface(this);
+        // No focus outline around the whole game, which Android draws when
+        // keys rather than touches work the app, as on a TV.
+        if (Build.VERSION.SDK_INT >= 26 /* Android 8.0 (O) */) {
+            mSurface.setDefaultFocusHighlightEnabled(false);
+        }
         mSurface.setZOrderOnTop(false);
         mSurface.setZOrderMediaOverlay(true);
 
@@ -508,7 +513,10 @@ public class SDLActivity extends Activity implements View.OnSystemUiVisibilityCh
         mControllerOverlay = new ControllerOverlay(this);
         RelativeLayout.LayoutParams lp = new RelativeLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT);
         mLayout.addView(mControllerOverlay, lp);
-        mTouchControls = new TouchControls(this, mSharedPrefs, mControllerOverlay, mLayout, mTextLayout);
+        mTouchControls = new TouchControls(this, mSharedPrefs, mControllerOverlay, mLayout, this::showControls);
+        if (USE_FOLDER_SELECT) {
+            mTouchControls.addRemoteButton(mSDButton);
+        }
 
 //        setContentView(mLayout); // WHAT IT WAS
         setContentView(rootLayout);
@@ -544,24 +552,33 @@ public class SDLActivity extends Activity implements View.OnSystemUiVisibilityCh
     @Override
     public boolean dispatchTouchEvent(MotionEvent ev) {
         int action = ev.getAction();
+        if (action == MotionEvent.ACTION_DOWN && mTouchControls != null) {
+            mTouchControls.onTouch();
+        }
         if (action == MotionEvent.ACTION_DOWN || action == MotionEvent.ACTION_MOVE) {
-            if (mLayout != null) {
-                ViewGroup root = (ViewGroup) mLayout.getParent();
-                // Get the index of the last child
-                int lastChildIndex = root.getChildCount() - 1;
-
-                // CRITICAL: Only call bringToFront if the UI is hidden OR not actually on top.
-                // If it is ALREADY on top, calling bringToFront() kills the current touch!
-                if (mLayout.getVisibility() != View.VISIBLE || root.getChildAt(lastChildIndex) != mLayout) {
-                    mLayout.setVisibility(View.VISIBLE);
-                    mLayout.bringToFront();
-                    root.requestLayout();
-                }
-            }
-            mUIHandler.removeCallbacks(hideRunnable);
-            mUIHandler.postDelayed(hideRunnable, 5000);
+            showControls();
         }
         return super.dispatchTouchEvent(ev);
+    }
+
+    // Shows the controls again if they faded, and fades them 5 s from now. A
+    // touch does this, and so does a TV remote's key (TouchControls).
+    private void showControls() {
+        if (mLayout != null) {
+            ViewGroup root = (ViewGroup) mLayout.getParent();
+            // Get the index of the last child
+            int lastChildIndex = root.getChildCount() - 1;
+
+            // CRITICAL: Only call bringToFront if the UI is hidden OR not actually on top.
+            // If it is ALREADY on top, calling bringToFront() kills the current touch!
+            if (mLayout.getVisibility() != View.VISIBLE || root.getChildAt(lastChildIndex) != mLayout) {
+                mLayout.setVisibility(View.VISIBLE);
+                mLayout.bringToFront();
+                root.requestLayout();
+            }
+        }
+        mUIHandler.removeCallbacks(hideRunnable);
+        mUIHandler.postDelayed(hideRunnable, 5000);
     }
 
     public void checkAndPickFolder() {
@@ -772,6 +789,9 @@ public class SDLActivity extends Activity implements View.OnSystemUiVisibilityCh
 
         if (mHIDDeviceManager != null) {
             mHIDDeviceManager.setFrozen(true);
+        }
+        if (mTouchControls != null) {
+            mTouchControls.releaseAll();
         }
         if (!mHasMultiWindow) {
             pauseNativeThread();
@@ -1002,6 +1022,11 @@ public class SDLActivity extends Activity implements View.OnSystemUiVisibilityCh
             keyCode == KeyEvent.KEYCODE_ZOOM_OUT /* API 11 */
             ) {
             return false;
+        }
+        // A TV remote's arrows and OK work the on-screen buttons, and never
+        // reach the game themselves.
+        if (mTouchControls != null && mTouchControls.onRemoteKey(event)) {
+            return true;
         }
         return super.dispatchKeyEvent(event);
     }
@@ -1641,17 +1666,17 @@ public class SDLActivity extends Activity implements View.OnSystemUiVisibilityCh
         }
     }
 
-    /**
-     * This method is called by SDL using JNI.
-     */
-    // The touch controls show their keyboard button, or the remote's hint,
-    // only while the keyboard is closed.
+    // The touch controls show their keyboard button only while the keyboard
+    // is closed.
     static void onScreenKeyboardChanged() {
         if (mSingleton != null && mSingleton.mTouchControls != null) {
             mSingleton.mTouchControls.update();
         }
     }
 
+    /**
+     * This method is called by SDL using JNI.
+     */
     public static boolean showTextInput(int x, int y, int w, int h) {
         // Transfer the task to the main thread as a Runnable
         return mSingleton.commandHandler.post(new ShowTextInputTask(x, y, w, h));

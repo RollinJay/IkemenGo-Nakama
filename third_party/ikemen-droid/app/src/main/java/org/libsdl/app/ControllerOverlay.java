@@ -22,8 +22,10 @@ import android.widget.RelativeLayout;
 import org.ikemen_engine.ikemen_go.R;
 
 import java.io.File;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
@@ -40,6 +42,13 @@ public class ControllerOverlay extends RelativeLayout {
     private static final String[] GLYPH_NAMES = {"a", "b", "c", "x", "y", "z", "d", "w", "start", "menu", "up", "down", "left", "right"};
     private static final int[] GLYPH_VIEWS = {R.id.btn_a, R.id.btn_b, R.id.btn_c, R.id.btn_x, R.id.btn_y, R.id.btn_z, R.id.btn_d, R.id.btn_w,
             R.id.btn_start, R.id.btn_back, R.id.dp_up, R.id.dp_down, R.id.dp_left, R.id.dp_right};
+    // The buttons a TV remote can press (TouchControls), with the input each
+    // plays, as in getButtonsAt: a pad button's key code, or 4000 plus a
+    // trigger's axis. The arrows play the hat; the analog sticks are left out.
+    private static final int[] REMOTE_VIEWS = {R.id.btn_a, R.id.btn_b, R.id.btn_c, R.id.btn_x, R.id.btn_y, R.id.btn_z,
+            R.id.btn_d, R.id.btn_w, R.id.btn_start, R.id.btn_back};
+    private static final int[] REMOTE_CODES = {96, 97, 4005, 99, 100, 103, 102, 4004, 108, 109};
+    private static final int[] ARROW_VIEWS = {R.id.dp_up, R.id.dp_down, R.id.dp_left, R.id.dp_right};
     private final Map<Integer, CharSequence> plainText = new HashMap<>();
     private final Map<Integer, Drawable> plainBackground = new HashMap<>();
     private int hatX, hatY = 0;
@@ -486,6 +495,77 @@ public class ControllerOverlay extends RelativeLayout {
             SDLControllerManager.nativeRemoveJoystick(virtualDeviceId);
             isInitialized = false;
         }
+    }
+
+    /** The buttons shown that a TV remote can press, the arrows included. */
+    List<View> navigationTargets() {
+        List<View> targets = new ArrayList<>();
+        if (getVisibility() != View.VISIBLE) {
+            return targets;
+        }
+        for (int id : REMOTE_VIEWS) {
+            addShown(targets, id);
+        }
+        for (int id : ARROW_VIEWS) {
+            addShown(targets, id);
+        }
+        return targets;
+    }
+
+    private void addShown(List<View> targets, int id) {
+        View v = findViewById(id);
+        if (v != null && v.getVisibility() == View.VISIBLE) {
+            targets.add(v);
+        }
+    }
+
+    /** Whether v is one of the buttons a TV remote can press. */
+    boolean isButton(View v) {
+        int id = v.getId();
+        for (int r : REMOTE_VIEWS) {
+            if (r == id) return true;
+        }
+        for (int r : ARROW_VIEWS) {
+            if (r == id) return true;
+        }
+        return false;
+    }
+
+    /** Registers the buttons' controller, if it isn't, as a touch does. */
+    void ensureController() {
+        if (!isInitialized) {
+            initializeVirtualController();
+        }
+    }
+
+    /**
+     * Presses or releases a button for a TV remote, as a finger on it does:
+     * its pad button or trigger, or for an arrow, the hat.
+     */
+    void pressTarget(View v, boolean down) {
+        if (down) {
+            ensureController();
+        } else if (!isInitialized) {
+            // The buttons were hidden meanwhile, and their controller went.
+            v.setPressed(false);
+            return;
+        }
+        int id = v.getId();
+        for (int i = 0; i < REMOTE_VIEWS.length; i++) {
+            if (REMOTE_VIEWS[i] == id) {
+                handleInput(REMOTE_CODES[i], down);
+                return;
+            }
+        }
+        if (id == R.id.dp_up || id == R.id.dp_down) {
+            hatY = down ? (id == R.id.dp_up ? -1 : 1) : 0;
+        } else if (id == R.id.dp_left || id == R.id.dp_right) {
+            hatX = down ? (id == R.id.dp_left ? -1 : 1) : 0;
+        } else {
+            return;
+        }
+        SDLControllerManager.onNativeHat(virtualDeviceId, 0, hatX, hatY);
+        updateDpadVisual(hatX, hatY);
     }
 
     /**
