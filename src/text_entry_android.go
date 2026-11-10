@@ -79,12 +79,13 @@ func textBoxButtons() (done, cancel bool) {
 }
 
 // showScreenKeyboard starts SDL's text input, which opens the keyboard. SDL's
-// text field goes at the bottom of the screen, so that Android lifts the game
-// above the keyboard rather than covering a text line drawn low, as the
-// lobby's chat is.
+// text field goes at the top of the screen, which the keyboard leaves alone,
+// so that Android doesn't lift the game to show it: a prompt drawn high would
+// go off the top. The game draws itself above the keyboard instead
+// (keyboardCover), the lobby's chat line included.
 func showScreenKeyboard() {
 	if w, h := sys.window.GetSize(); w > 0 && h > 0 {
-		sdl.SetTextInputRect(&sdl.Rect{X: 0, Y: int32(h - h/10), W: int32(w), H: int32(h / 10)})
+		sdl.SetTextInputRect(&sdl.Rect{X: 0, Y: 0, W: int32(w), H: int32(h / 10)})
 	}
 	sdl.StartTextInput()
 }

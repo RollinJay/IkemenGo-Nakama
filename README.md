@@ -61,7 +61,7 @@ On macOS or Linux, double-click `Ikemen_GO.command`.
 On Android, install `ikemen-go.apk` and choose the game's folder when the app asks. In this fork:
 - **Glyphs:** the on-screen buttons show the screenpack's glyphs. Each shows the glyph of the attack it plays through the player's controller mapping, by default the screenpack's `^LK` on A and `^LP` on X. A screenpack can change this in `[Touch Controls]` (see `src/resources/defaultMotif.ini`).
 - **Hiding:** the buttons hide while a controller is connected, which then plays as their player. The small settings button at the top left chooses Automatic, Always show or Always hide.
-- **Keyboard:** it opens with a text box. After Back has closed it, the keyboard button at the top opens it again, and so does a controller button that confirms in the game's menus (the title menu's `menu.done.key`). One that goes back there (`menu.cancel.key`) cancels the text box.
+- **Keyboard:** it opens with a text box, and the game shrinks to the part of the screen above it, so that the box stays in sight. After Back has closed it, the keyboard button at the top opens it again, and so does a controller button that confirms in the game's menus (the title menu's `menu.done.key`). One that goes back there (`menu.cancel.key`) cancels the text box.
 - **TV remote:** it never plays as a controller. As in other Android apps, its arrows move a highlight between the buttons on the screen, and OK presses the highlighted one for as long as it's held. While a text box's keyboard is closed, the highlight goes to the keyboard button.
 - **Back:** works as Escape.
 

@@ -18,6 +18,7 @@ import android.content.res.Configuration;
 import android.graphics.Bitmap;
 import android.graphics.Color;
 import android.graphics.PorterDuff;
+import android.graphics.Rect;
 import android.graphics.drawable.Drawable;
 import android.hardware.Sensor;
 import android.net.Uri;
@@ -74,6 +75,7 @@ public class SDLActivity extends Activity implements View.OnSystemUiVisibilityCh
     public static native void nativeOnSDLReady(String path);
     // The keyboard button: the game opens the keyboard again for its text box.
     public static native void nativeShowKeyboard();
+    public static native void nativeSetKeyboardCover(int pixels);
     private static final String TAG = "SDL";
     private static final int SDL_MAJOR_VERSION = 2;
     private static final int SDL_MINOR_VERSION = 32;
@@ -344,6 +346,11 @@ public class SDLActivity extends Activity implements View.OnSystemUiVisibilityCh
     private final Runnable hideRunnable = () -> {
         if (mLayout != null) mLayout.setVisibility(View.INVISIBLE);
     };
+    // How many pixels at the bottom of the game's surface the on-screen
+    // keyboard covers, as the game last heard (updateKeyboardCover).
+    private int mKeyboardCover;
+    private final Rect mVisibleFrame = new Rect();
+    private final Runnable mKeyboardCoverCheck = this::updateKeyboardCover;
     private Handler mUIHandler = new Handler(android.os.Looper.getMainLooper());
 
     // Update this with the directories you wish to check every time for file updates.
@@ -520,6 +527,12 @@ public class SDLActivity extends Activity implements View.OnSystemUiVisibilityCh
 
 //        setContentView(mLayout); // WHAT IT WAS
         setContentView(rootLayout);
+        // The game draws itself above the on-screen keyboard: watch for it.
+        rootLayout.getViewTreeObserver().addOnGlobalLayoutListener(this::updateKeyboardCover);
+        rootLayout.setOnApplyWindowInsetsListener((v, insets) -> {
+            mUIHandler.post(mKeyboardCoverCheck);
+            return v.onApplyWindowInsets(insets);
+        });
 
         setWindowStyle(false);
 
@@ -1667,10 +1680,36 @@ public class SDLActivity extends Activity implements View.OnSystemUiVisibilityCh
     }
 
     // The touch controls show their keyboard button only while the keyboard
-    // is closed.
+    // is closed, and the game draws itself above the keyboard: measured now,
+    // and again once the keyboard has slid in.
     static void onScreenKeyboardChanged() {
-        if (mSingleton != null && mSingleton.mTouchControls != null) {
+        if (mSingleton == null) {
+            return;
+        }
+        if (mSingleton.mTouchControls != null) {
             mSingleton.mTouchControls.update();
+        }
+        mSingleton.updateKeyboardCover();
+        mSingleton.mUIHandler.removeCallbacks(mSingleton.mKeyboardCoverCheck);
+        mSingleton.mUIHandler.postDelayed(mSingleton.mKeyboardCoverCheck, 500);
+    }
+
+    // Tells the game how many pixels at the bottom of its surface the
+    // on-screen keyboard covers, so that it draws itself above the keyboard:
+    // a text box and what is typed in it stay in sight wherever the game
+    // draws them. SDL's text field sits at the top of the screen, so that
+    // Android doesn't pan the window instead (src/text_entry_android.go).
+    private void updateKeyboardCover() {
+        int cover = 0;
+        if (mScreenKeyboardShown && mSurface != null && mSurface.getHeight() > 0) {
+            getWindow().getDecorView().getWindowVisibleDisplayFrame(mVisibleFrame);
+            int[] loc = new int[2];
+            mSurface.getLocationOnScreen(loc);
+            cover = Math.max(0, loc[1] + mSurface.getHeight() - mVisibleFrame.bottom);
+        }
+        if (cover != mKeyboardCover && !mBrokenLibraries) {
+            mKeyboardCover = cover;
+            nativeSetKeyboardCover(cover);
         }
     }
 
@@ -2289,6 +2328,13 @@ class DummyEdit extends View implements View.OnKeyListener {
         setFocusableInTouchMode(true);
         setFocusable(true);
         setOnKeyListener(this);
+        // It sits at the top of the screen, in sight, so that Android doesn't
+        // pan the game (updateKeyboardCover): no focus outline around it,
+        // which Android draws when keys rather than touches work the app, as
+        // on a TV.
+        if (Build.VERSION.SDK_INT >= 26 /* Android 8.0 (O) */) {
+            setDefaultFocusHighlightEnabled(false);
+        }
     }
 
     @Override

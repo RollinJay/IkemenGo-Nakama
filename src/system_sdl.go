@@ -207,9 +207,18 @@ func (w *Window) GetSize() (int, int) {
 func (w *Window) GetScaledViewportSize() (int32, int32, int32, int32) {
 	winWidth, winHeight := w.GetSize()
 
+	// The game fits in the part of the window the on-screen keyboard leaves
+	// (Android). The viewport's y counts from the bottom, as in OpenGL ES,
+	// Android's renderer.
+	var bottom int32
+	if cover := int(keyboardCover.Load()); cover > 0 && cover < winHeight {
+		bottom = int32(cover)
+		winHeight -= cover
+	}
+
 	// If aspect ratio should not be kept, just return full window
 	if !sys.cfg.Video.KeepAspect {
-		return 0, 0, int32(winWidth), int32(winHeight)
+		return 0, bottom, int32(winWidth), int32(winHeight)
 	}
 
 	var x, y, resizedWidth, resizedHeight int32 = 0, 0, int32(winWidth), int32(winHeight)
@@ -237,7 +246,7 @@ func (w *Window) GetScaledViewportSize() (int32, int32, int32, int32) {
 		y = (int32(winHeight) - resizedHeight) / 2
 	}
 
-	return x, y, resizedWidth, resizedHeight
+	return x, y + bottom, resizedWidth, resizedHeight
 }
 
 func (w *Window) GetClipboardString() string {

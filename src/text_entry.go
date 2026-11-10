@@ -1,6 +1,16 @@
 package main
 
-import "strings"
+import (
+	"strings"
+	"sync/atomic"
+)
+
+// keyboardCover is how many pixels at the bottom of the window the on-screen
+// keyboard covers, which the Android app reports (nativeSetKeyboardCover); 0
+// elsewhere. The game draws itself in the part of the window above it
+// (Window.GetScaledViewportSize), so that a text box and what is typed in it
+// stay in sight, wherever a screenpack draws them.
+var keyboardCover atomic.Int32
 
 // textEntryIdleFrames is how many frames without a read of typed text end a
 // text box. A text box (main.f_drawInput, the lobby's editText) reads it every
