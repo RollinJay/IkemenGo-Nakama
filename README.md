@@ -58,6 +58,12 @@ Download the ZIP archive that matches your operating system and extract its cont
 On Windows, double-click `Ikemen_GO.exe`.
 On macOS or Linux, double-click `Ikemen_GO.command`.
 
+On Android, install `ikemen-go.apk` and choose the game's folder when the app asks. In this fork:
+- **Glyphs:** the on-screen buttons show the screenpack's glyphs. Each shows the glyph of the attack it plays through the player's controller mapping, by default the screenpack's `^LK` on A and `^LP` on X. A screenpack can change this in `[Touch Controls]` (see `src/resources/defaultMotif.ini`).
+- **Hiding:** the buttons hide on Android TV and while a controller is connected, which then plays as their player. The small settings button at the top left chooses Automatic, Always show or Always hide.
+- **Keyboard:** it opens with a text box. After Back has closed it, the keyboard button at the top, or a controller's A or Start, opens it again.
+- **Back:** works as Escape.
+
 ## Developing
 These instructions are for those interested in developing the Ikemen GO engine itself. Instructions for creating custom stages, fonts, characters and other resources can be found in the community forum.
 
