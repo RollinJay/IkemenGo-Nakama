@@ -1,5 +1,7 @@
 package main
 
+import "strings"
+
 // textEntryIdleFrames is how many frames without a read of typed text end a
 // text box. A text box (main.f_drawInput, the lobby's editText) reads it every
 // frame, except in frames that handle a key such as Backspace.
@@ -37,4 +39,24 @@ func (t *textEntry) update() {
 		return
 	}
 	screenKeyboardUpdate()
+}
+
+// menuButtonIndex gives the place of each game button a screenpack's menu
+// keys name (menu.done.key and the like) in a player's 14 inputs, as
+// GetJoystickState and LocalInput return them. Directions are left out.
+var menuButtonIndex = map[string]int{
+	"a": 4, "b": 5, "c": 6, "x": 7, "y": 8, "z": 9,
+	"s": 10, "d": 11, "w": 12, "m": 13,
+}
+
+// menuKeyHeld reports whether state, a player's 14 inputs, holds one of the
+// game buttons that keys names, such as a screenpack's menu.done.key. Case
+// matters: "b" is a button, and "B" the back direction.
+func menuKeyHeld(state [14]bool, keys []string) bool {
+	for _, k := range keys {
+		if i, ok := menuButtonIndex[strings.TrimSpace(k)]; ok && state[i] {
+			return true
+		}
+	}
+	return false
 }

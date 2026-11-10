@@ -116,3 +116,35 @@ func TestTextEntryLastsWhileLuaReadsText(t *testing.T) {
 		t.Error("a new read did not open the text box again")
 	}
 }
+
+func TestMenuKeysFollowTheScreenpack(t *testing.T) {
+	var punch, kick, start, menu, left [14]bool
+	punch[7] = true  // x
+	kick[4] = true   // a
+	start[10] = true // s
+	menu[13] = true  // m
+	left[2] = true   // L, a direction
+	hdbzDone, hdbzCancel := []string{"x", "y", "z", "m"}, []string{"a", "b", "c"}
+	defaultDone, defaultCancel := []string{"a", "b", "c", "x", "y", "z", "s"}, []string{"m"}
+	for _, c := range []struct {
+		name  string
+		state [14]bool
+		keys  []string
+		want  bool
+	}{
+		{"HDBZ: a punch confirms", punch, hdbzDone, true},
+		{"HDBZ: a kick does not confirm", kick, hdbzDone, false},
+		{"HDBZ: a kick goes back", kick, hdbzCancel, true},
+		{"HDBZ: Menu confirms", menu, hdbzDone, true},
+		{"default: Start confirms", start, defaultDone, true},
+		{"default: a kick confirms", kick, defaultDone, true},
+		{"default: Menu goes back", menu, defaultCancel, true},
+		{"default: a punch does not go back", punch, defaultCancel, false},
+		{"a direction is no button", left, []string{"B", "b", "L"}, false},
+		{"spaces around a key", punch, []string{" x "}, true},
+	} {
+		if got := menuKeyHeld(c.state, c.keys); got != c.want {
+			t.Errorf("%s: menuKeyHeld = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
