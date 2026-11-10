@@ -411,12 +411,49 @@ func (w *Window) pollEvents() {
 			// FIX: Map Instance ID (t.Which) to Array Index
 			if idx := findControllerIndex(t.Which); idx != -1 {
 				if controller := input.controllers[idx]; controller != nil {
+					touch := isTouchControls(controller)
 					controller.Close()
 					input.controllers[idx] = nil // Clear the reference
 					resetControllerState(idx)
+					if touch {
+						packControllers(idx)
+					}
 				}
 			}
 		}
+	}
+}
+
+// touchControlsName is the name the Android app gives the controller its
+// on-screen buttons play as (third_party/ikemen-droid's ControllerOverlay).
+const touchControlsName = "IKEMEN Touch Controls"
+
+// isTouchControls reports whether c is the controller the Android app's
+// on-screen buttons play as.
+func isTouchControls(c *sdl.GameController) bool {
+	if c == nil {
+		return false
+	}
+	joy := c.Joystick()
+	return joy != nil && joy.Name() == touchControlsName
+}
+
+// packControllers moves the controllers in the slots from from on down, in
+// order, to fill the free ones. The Android app removes its on-screen
+// buttons' controller when a real one connects, which then takes their slot,
+// and so their player, instead of the next one.
+func packControllers(from int) {
+	next := from
+	for i := from; i < len(input.controllers); i++ {
+		if input.controllers[i] == nil {
+			continue
+		}
+		if i != next {
+			input.controllers[next], input.controllers[i] = input.controllers[i], nil
+			input.controllerstate[next], input.controllerstate[i] = input.controllerstate[i], input.controllerstate[next]
+			resetControllerState(i)
+		}
+		next++
 	}
 }
 
