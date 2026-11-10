@@ -1,0 +1,24 @@
+### macOS junk ###
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+.fseventsd
+.gradle
+.idea
+local.properties
+
+### Shared libraries ###
+*.so
+
+### Assets directory ###
+# Ignore everything in assets
+app/src/main/assets/**
+app/src/main/jniLibs/arm64-v8a/**
+app/build/**
+
+# But keep the manifest and jniLibs folder
+!app/src/main/assets/manifest.txt
+!app/src/main/jniLibs/arm64-v8a/.keep

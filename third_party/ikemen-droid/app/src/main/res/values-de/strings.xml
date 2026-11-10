@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="game_folder_str">Spielordner auswählen</string>
+    <string name="first_run_dialog_title">Initialisierung</string>
+    <string name="first_run_dialog_msg">Spieldateien werden extrahiert… Bitte warten.</string>
+    <string name="extraction_error_title">Extraktionsfehler</string>
+    <string name="exit_str">Beenden</string>
+    <string name="updating_files_title">Dateien-Update</string>
+    <string name="updating_files_msg">Bitte warten, während die Engine-Dateien synchronisiert werden…</string>
+    <string name="update_error_title">Updatefehler</string>
+</resources>

@@ -1,0 +1,13 @@
+<resources>
+    <string name="app_name" translatable="false">I.K.E.M.E.N-Go</string>
+    <string name="prefs_key" translatable="false">"IkemenPrefs"</string>
+    <string name="game_folder_key" translatable="false">game_folder</string>
+    <string name="game_folder_str">Select Game Folder</string>
+    <string name="first_run_dialog_title">First Run</string>
+    <string name="first_run_dialog_msg">Extracting game assets… Please wait.</string>
+    <string name="extraction_error_title">Extraction Error</string>
+    <string name="exit_str">Exit</string>
+    <string name="updating_files_title">Updating Files</string>
+    <string name="updating_files_msg">Please wait while engine files are synchronized…</string>
+    <string name="update_error_title">Update Error</string>
+</resources>

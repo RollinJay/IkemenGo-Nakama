@@ -9,6 +9,9 @@ vendor/*
 /*.sh
 !build/**/*.sh
 *.png
+# The Android app's sources keep their icons and Gradle wrapper.
+!third_party/ikemen-droid/**/*.png
+!third_party/ikemen-droid/gradlew.bat
 save/*
 Ikemen_GO.exe
 Ikemen_GO_Linux

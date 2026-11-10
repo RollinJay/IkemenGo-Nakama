@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="game_folder_str">选择游戏文件夹</string>
+    <string name="first_run_dialog_title">初始化</string>
+    <string name="first_run_dialog_msg">解压游戏文件… 请稍候。</string>
+    <string name="extraction_error_title">文件解压缩错误</string>
+    <string name="exit_str">退出</string>
+    <string name="updating_files_title">自动更新</string>
+    <string name="updating_files_msg">引擎文件正在同步。请稍候…</string>
+    <string name="update_error_title">更新错误</string>
+</resources>
