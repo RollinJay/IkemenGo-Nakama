@@ -234,16 +234,14 @@ After a successful run, these will exist in your repo:
 * `bin/ikemen-go.apk` (the APK)
 * `bin/libmain.so` and `bin/libmain.h` (engine shared library + header)
 * `lib/*.so` (Android runtime dependencies: SDL2, FFmpeg libs, libxmp, etc.)
-* `build/android-apk/ikemen-droid` (cloned Android wrapper project)
+* `build/android-apk/ikemen-droid` (the copy of the Android wrapper project the APK is built in)
 
 ### Configuration knobs (optional)
 
-You can override build metadata and wrapper source:
+You can override build metadata:
 
 ```bash
 APP_VERSION=my-build APP_BUILDTIME=2026.01.13 \
-ANDROID_APK_REPO=https://github.com/Jesuszilla/ikemen-droid.git \
-ANDROID_APK_REF=main \
 docker compose -f build/docker/android/docker-compose.yml run --rm android-build
 ```
 
@@ -255,11 +253,9 @@ BUILD_ANDROID_APK=0 docker compose -f build/docker/android/docker-compose.yml ru
 
 ### Customizing the Android wrapper (package name, manifest, icons, etc.)
 
-The APK is built from the `ikemen-droid` wrapper project, which is cloned into:
-`build/android-apk/ikemen-droid`
+The APK is built from the `ikemen-droid` wrapper project in `third_party/ikemen-droid` (see its `VENDOR.md` for its source and local changes). The build copies it to `build/android-apk/ikemen-droid` and stages the engine's libraries and the game's assets in that copy, so changes to the wrapper go in `third_party/ikemen-droid`.
 
-If you need changes in that wrapper, fork it and point the build to your fork via:
-`ANDROID_APK_REPO` and `ANDROID_APK_REF` (shown above).
+`ANDROID_APK_REPO` can name another local checkout instead, or a git URL, with the branch in `ANDROID_APK_REF`. The Docker build passes neither into its container.
 
 ---
 
