@@ -829,6 +829,7 @@ func (s *System) eventUpdate() bool {
 	}
 	s.beginKeyPoll()
 	s.textEntry.update()
+	touchControlsUpdate()
 	s.window.pollEvents()
 	s.gameEnd = s.window.shouldClose()
 	return !s.gameEnd
