@@ -3864,15 +3864,13 @@ func systemScriptInit(l *lua.LState) {
 		return 1
 	})
 	luaRegister(l, "getKeyText", func(*lua.LState) int {
-		/*Get the last input text associated with the current key event.
+		/*Get the text typed since keys were last reset (resetKey). Reading it
+		  also tells the engine a text box is open, which opens Android's
+		  on-screen keyboard.
 		@function getKeyText
-		@treturn string text If the last key was Insert, returns the clipboard contents,
-		  otherwise returns the textual representation of the last key press. Empty string if none.*/
-		s := ""
-		if sys.keyInput != KeyUnknown {
-			s = sys.keyString
-		}
-		l.Push(lua.LString(s))
+		@treturn string text The text typed since the last resetKey. Empty string if none.*/
+		sys.textEntry.read()
+		l.Push(lua.LString(sys.keyString))
 		return 1
 	})
 	luaRegister(l, "getLastInputController", func(l *lua.LState) int {
@@ -5797,6 +5795,7 @@ func systemScriptInit(l *lua.LState) {
 		/*Clear the last captured key and text input.
 		@function resetKey*/
 		sys.keyInput = KeyUnknown
+		sys.keyInputReleased = false
 		sys.keyString = ""
 		return 0
 	})

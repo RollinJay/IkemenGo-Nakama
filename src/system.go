@@ -133,6 +133,9 @@ type SystemStateVars struct {
 
 	keyInput            Key
 	keyString           string
+	keyInputFresh       bool // keyInput was pressed in the current event poll
+	keyInputReleased    bool // and released in it too (see OnKeyReleased)
+	textEntry           textEntry
 	lastInputController int
 	uiLastInputToken    string
 	uiConsumeInputFrame int32
@@ -824,6 +827,8 @@ func (s *System) eventUpdate() bool {
 	for _, v := range s.shortcutScripts {
 		v.Activate = false
 	}
+	s.beginKeyPoll()
+	s.textEntry.update()
 	s.window.pollEvents()
 	s.gameEnd = s.window.shouldClose()
 	return !s.gameEnd
