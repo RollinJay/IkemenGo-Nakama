@@ -12,16 +12,18 @@ import (
 // own thread (nativeShowKeyboard).
 var keyboardRequested atomic.Bool
 
-// keyboardButtonsDown remembers whether a controller held A or Start at the
-// last frame, so that only a new press opens the keyboard again.
-var keyboardButtonsDown bool
+// confirmDown and cancelDown remember whether a controller held A or Start,
+// and Back, at the last frame, so that only a new press counts.
+var confirmDown, cancelDown bool
 
 // screenKeyboardOpen shows the on-screen keyboard for a text box that opened,
-// and tells the app, which shows its keyboard button meanwhile.
+// and tells the app, which shows its keyboard button or, without a touch
+// screen, how to open the keyboard with a remote.
 func screenKeyboardOpen() {
 	showScreenKeyboard()
 	keyboardRequested.Store(false)
-	keyboardButtonsDown = controllerConfirmDown()
+	confirmDown = controllerButtonDown(sdl.CONTROLLER_BUTTON_A, sdl.CONTROLLER_BUTTON_START)
+	cancelDown = controllerButtonDown(sdl.CONTROLLER_BUTTON_BACK)
 	sendToApp(appMsgTextEntry, 1)
 }
 
@@ -30,13 +32,24 @@ func screenKeyboardClose() {
 	sendToApp(appMsgTextEntry, 0)
 }
 
-// screenKeyboardUpdate opens the keyboard again, after Back closed it, when the
-// app's keyboard button asks or a controller's A or Start is pressed.
+// screenKeyboardUpdate works a text box from controllers, a TV remote among
+// them (SDL makes one a controller, its OK the A button and its Back the Back
+// button), while the keyboard is closed. The keyboard, open, takes the
+// remote's keys itself, and Back closes it. A or Start, like the app's
+// keyboard button, opens the keyboard again, and Back cancels the box, as
+// Escape does.
 func screenKeyboardUpdate() {
-	down := controllerConfirmDown()
-	pressed := down && !keyboardButtonsDown
-	keyboardButtonsDown = down
-	if keyboardRequested.Swap(false) || pressed {
+	down := controllerButtonDown(sdl.CONTROLLER_BUTTON_A, sdl.CONTROLLER_BUTTON_START)
+	confirmed := down && !confirmDown
+	confirmDown = down
+	down = controllerButtonDown(sdl.CONTROLLER_BUTTON_BACK)
+	cancelled := down && !cancelDown
+	cancelDown = down
+	if cancelled {
+		sys.esc = true
+		return
+	}
+	if keyboardRequested.Swap(false) || confirmed {
 		if !sdl.IsTextInputActive() {
 			showScreenKeyboard()
 		}
@@ -54,16 +67,18 @@ func showScreenKeyboard() {
 	sdl.StartTextInput()
 }
 
-// controllerConfirmDown reports whether any controller, the touch controls
-// included, holds A or Start.
-func controllerConfirmDown() bool {
+// controllerButtonDown reports whether any controller, the touch controls
+// included, holds one of buttons.
+func controllerButtonDown(buttons ...sdl.GameControllerButton) bool {
 	for i, c := range input.controllers {
 		state := input.controllerstate[i]
 		if c == nil || state == nil {
 			continue
 		}
-		if state.Buttons[sdl.CONTROLLER_BUTTON_A] != 0 || state.Buttons[sdl.CONTROLLER_BUTTON_START] != 0 {
-			return true
+		for _, b := range buttons {
+			if state.Buttons[b] != 0 {
+				return true
+			}
 		}
 	}
 	return false

@@ -16,7 +16,8 @@ This folder holds the Android app that `build/build.sh Android` packages the gam
   - Each button shows the glyph image the game writes for it, or its letter where there is none.
 - **`TouchControls`** (new):
   - **Setting:** Automatic, Always show or Always hide, chosen from a small settings button. Automatic hides the buttons on Android TV, without a touch screen, and while a real controller is connected.
-  - **Keyboard button:** shown while the game has a text box open.
+  - **Keyboard button:** shown while the game has a text box open and its keyboard is closed.
+  - **Remote hint:** without a touch screen, as on Android TV, the same case shows "Press OK to type, or Back to cancel" instead.
 - **`SDLActivity`:**
   - **From the game:** it handles commands 0x8001 (a text box opened or closed) and 0x8002 (the glyph images changed) in `onUnhandledMessage`.
   - **To the game:** it calls `nativeShowKeyboard`.

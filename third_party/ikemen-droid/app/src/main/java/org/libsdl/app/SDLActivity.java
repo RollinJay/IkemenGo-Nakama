@@ -508,7 +508,7 @@ public class SDLActivity extends Activity implements View.OnSystemUiVisibilityCh
         mControllerOverlay = new ControllerOverlay(this);
         RelativeLayout.LayoutParams lp = new RelativeLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT);
         mLayout.addView(mControllerOverlay, lp);
-        mTouchControls = new TouchControls(this, mSharedPrefs, mControllerOverlay, mLayout);
+        mTouchControls = new TouchControls(this, mSharedPrefs, mControllerOverlay, mLayout, mTextLayout);
 
 //        setContentView(mLayout); // WHAT IT WAS
         setContentView(rootLayout);
@@ -1156,6 +1156,7 @@ public class SDLActivity extends Activity implements View.OnSystemUiVisibilityCh
                     imm.hideSoftInputFromWindow(mTextEdit.getWindowToken(), 0);
 
                     mScreenKeyboardShown = false;
+                    onScreenKeyboardChanged();
 
                     mSurface.requestFocus();
                 }
@@ -1636,12 +1637,21 @@ public class SDLActivity extends Activity implements View.OnSystemUiVisibilityCh
             imm.showSoftInput(mTextEdit, 0);
 
             mScreenKeyboardShown = true;
+            onScreenKeyboardChanged();
         }
     }
 
     /**
      * This method is called by SDL using JNI.
      */
+    // The touch controls show their keyboard button, or the remote's hint,
+    // only while the keyboard is closed.
+    static void onScreenKeyboardChanged() {
+        if (mSingleton != null && mSingleton.mTouchControls != null) {
+            mSingleton.mTouchControls.update();
+        }
+    }
+
     public static boolean showTextInput(int x, int y, int w, int h) {
         // Transfer the task to the main thread as a Runnable
         return mSingleton.commandHandler.post(new ShowTextInputTask(x, y, w, h));

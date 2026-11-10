@@ -5,6 +5,7 @@ import android.app.AlertDialog;
 import android.content.Context;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
+import android.graphics.Color;
 import android.hardware.input.InputManager;
 import android.os.Handler;
 import android.os.Looper;
@@ -14,6 +15,7 @@ import android.view.ViewGroup;
 import android.widget.ImageButton;
 import android.widget.ImageView;
 import android.widget.RelativeLayout;
+import android.widget.TextView;
 
 import org.ikemen_engine.ikemen_go.R;
 
@@ -24,7 +26,8 @@ import java.io.File;
  * (automatic, always shown or always hidden), Android TV and the controllers
  * connected, and keeps the settings and keyboard buttons that go with them.
  * The game tells it when a text box opens or closes, and when it wrote the
- * buttons' glyph images.
+ * buttons' glyph images. Without a touch screen, as on Android TV, a hint
+ * says how to work a text box with a remote while the keyboard is closed.
  */
 class TouchControls implements InputManager.InputDeviceListener {
     static final int MODE_AUTO = 0;
@@ -37,12 +40,13 @@ class TouchControls implements InputManager.InputDeviceListener {
     private final ControllerOverlay overlay;
     private final ImageButton settingsButton;
     private final ImageButton keyboardButton;
+    private final TextView remoteHint;
     private final InputManager inputManager;
     private final boolean touchscreen;
     private final boolean tv;
     private boolean textEntry;
 
-    TouchControls(Activity activity, SharedPreferences prefs, ControllerOverlay overlay, ViewGroup layout) {
+    TouchControls(Activity activity, SharedPreferences prefs, ControllerOverlay overlay, ViewGroup layout, ViewGroup textLayout) {
         this.activity = activity;
         this.prefs = prefs;
         this.overlay = overlay;
@@ -56,6 +60,20 @@ class TouchControls implements InputManager.InputDeviceListener {
         keyboardButton = addButton(layout, R.drawable.ic_keyboard, R.string.keyboard_button, 56,
                 RelativeLayout.CENTER_HORIZONTAL, 0.7f);
         keyboardButton.setOnClickListener(v -> SDLActivity.nativeShowKeyboard());
+        // In the layer the controls' fading leaves alone: nothing touches a TV
+        // to bring them back.
+        remoteHint = new TextView(activity);
+        remoteHint.setText(R.string.keyboard_hint_remote);
+        remoteHint.setTextColor(Color.WHITE);
+        remoteHint.setTextSize(TypedValue.COMPLEX_UNIT_SP, 20);
+        remoteHint.setBackgroundColor(0xAA000000);
+        remoteHint.setPadding(dp(16), dp(8), dp(16), dp(8));
+        RelativeLayout.LayoutParams hintParams = new RelativeLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        hintParams.addRule(RelativeLayout.ALIGN_PARENT_TOP);
+        hintParams.addRule(RelativeLayout.CENTER_HORIZONTAL);
+        hintParams.setMargins(dp(8), dp(16), dp(8), dp(8));
+        textLayout.addView(remoteHint, hintParams);
 
         inputManager = (InputManager) activity.getSystemService(Context.INPUT_SERVICE);
         inputManager.registerInputDeviceListener(this, new Handler(Looper.getMainLooper()));
@@ -91,13 +109,18 @@ class TouchControls implements InputManager.InputDeviceListener {
         return prefs.getInt(PREF_MODE, MODE_AUTO);
     }
 
-    /** Shows or hides each part, for the setting and what is connected now. */
+    /**
+     * Shows or hides each part, for the setting, what is connected now, and
+     * whether a text box is open with its keyboard closed.
+     */
     void update() {
         int mode = mode();
         boolean automatic = touchscreen && !tv && ControllerOverlay.getPhysicalJoystickCount() == 0;
         overlay.setShown(mode == MODE_SHOW || (mode == MODE_AUTO && automatic));
         settingsButton.setVisibility(touchscreen ? View.VISIBLE : View.GONE);
-        keyboardButton.setVisibility(touchscreen && textEntry ? View.VISIBLE : View.GONE);
+        boolean keyboardClosed = textEntry && !SDLActivity.mScreenKeyboardShown;
+        keyboardButton.setVisibility(touchscreen && keyboardClosed ? View.VISIBLE : View.GONE);
+        remoteHint.setVisibility(!touchscreen && keyboardClosed ? View.VISIBLE : View.GONE);
     }
 
     /** A text box opened or closed in the game. */

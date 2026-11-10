@@ -16,4 +16,5 @@
     <string name="touch_controls_hide">Always Hide</string>
     <string name="touch_settings_button">Touch controls settings</string>
     <string name="keyboard_button">Open the keyboard</string>
+    <string name="keyboard_hint_remote">Press OK to type, or Back to cancel</string>
 </resources>
