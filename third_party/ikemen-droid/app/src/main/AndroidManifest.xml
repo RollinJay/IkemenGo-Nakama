@@ -26,6 +26,11 @@
         android:name="android.hardware.gamepad"
         android:required="false" />
 
+    <!-- Android TV: the game lists itself on the TV's home screen too -->
+    <uses-feature
+        android:name="android.software.leanback"
+        android:required="false" />
+
     <!-- External mouse input events -->
     <uses-feature
         android:name="android.hardware.type.pc"
@@ -72,6 +77,7 @@
     -->
     <application android:label="@string/app_name"
         android:icon="@mipmap/ic_launcher"
+        android:banner="@drawable/banner"
         android:localeConfig="@xml/locales_config"
         android:allowBackup="true"
         android:theme="@style/AppTheme"
@@ -98,6 +104,7 @@
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
+                <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
             </intent-filter>
             <!-- Drop file event -->
             <!--

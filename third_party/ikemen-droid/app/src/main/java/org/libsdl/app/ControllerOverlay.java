@@ -1,27 +1,52 @@
 package org.libsdl.app;
 
 import android.content.Context;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
+import android.graphics.Canvas;
+import android.graphics.ColorFilter;
+import android.graphics.Paint;
+import android.graphics.PixelFormat;
+import android.graphics.Rect;
+import android.graphics.RectF;
+import android.graphics.drawable.Drawable;
+import android.graphics.drawable.LayerDrawable;
 import android.view.InputDevice;
 import android.view.LayoutInflater;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
+import android.widget.Button;
 import android.widget.RelativeLayout;
 
 import org.ikemen_engine.ikemen_go.R;
 
+import java.io.File;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
 
 public class ControllerOverlay extends RelativeLayout {
-    private int virtualDeviceId;
+    // The controller the buttons play as. The game recognises it by its name
+    // (touchControlsName in src/system_sdl.go); without a vendor and product
+    // ID, SDL keeps that name and maps its buttons from their mask. Its device
+    // ID is one no real device has.
+    static final String DEVICE_NAME = "IKEMEN Touch Controls";
+    private static final int virtualDeviceId = 0x49444D00;
+
+    // The buttons whose images the game writes as <name>.png, with the text
+    // and background they have without one.
+    private static final String[] GLYPH_NAMES = {"a", "b", "c", "x", "y", "z", "d", "w", "start", "menu", "up", "down", "left", "right"};
+    private static final int[] GLYPH_VIEWS = {R.id.btn_a, R.id.btn_b, R.id.btn_c, R.id.btn_x, R.id.btn_y, R.id.btn_z, R.id.btn_d, R.id.btn_w,
+            R.id.btn_start, R.id.btn_back, R.id.dp_up, R.id.dp_down, R.id.dp_left, R.id.dp_right};
+    private final Map<Integer, CharSequence> plainText = new HashMap<>();
+    private final Map<Integer, Drawable> plainBackground = new HashMap<>();
     private int hatX, hatY = 0;
     private final Map<Integer, Set<Integer>> pointerStates = new HashMap<>(); // PointerID -> Keycode/Axis
     private boolean isInitialized = false;
 
-    public int getPhysicalJoystickCount() {
+    public static int getPhysicalJoystickCount() {
         int count = 0;
         int[] deviceIds = InputDevice.getDeviceIds();
         for (int id : deviceIds) {
@@ -37,7 +62,7 @@ public class ControllerOverlay extends RelativeLayout {
     }
 
     // Helper to distinguish real controllers from "Ghost" sensors
-    private boolean isRealGamepad(InputDevice device) {
+    static boolean isRealGamepad(InputDevice device) {
         if (device == null) return false;
 
         int sources = device.getSources();
@@ -415,7 +440,6 @@ public class ControllerOverlay extends RelativeLayout {
 
     public void initializeVirtualController() {
         android.util.Log.i("ControllerOverlay", "DEBUG: initializing virtual joystick...");
-        virtualDeviceId = getPhysicalJoystickCount();
         pointerStates.clear();
         hatX = 0;
         hatY = 0;
@@ -439,6 +463,96 @@ public class ControllerOverlay extends RelativeLayout {
     }
 
     private int ensureJoystickAlive() {
-        return SDLControllerManager.nativeAddJoystick(virtualDeviceId, "Xbox 360 Controller", "Gamepad", 0x045E, 0x028E, false, 0xFFF, 6, 0x3F, 1, 0);
+        return SDLControllerManager.nativeAddJoystick(virtualDeviceId, DEVICE_NAME, DEVICE_NAME, 0, 0, false, 0xFFF, 6, 0x3F, 1, 0);
+    }
+
+    /**
+     * Shows or hides the buttons. Hidden, their controller goes, so that a
+     * real one takes its player; the next touch after they show again brings
+     * it back.
+     */
+    public void setShown(boolean shown) {
+        if (shown) {
+            setVisibility(View.VISIBLE);
+            return;
+        }
+        setVisibility(View.GONE);
+        pointerStates.clear();
+        leftJoyPointerId = -1;
+        rightJoyPointerId = -1;
+        hatX = 0;
+        hatY = 0;
+        if (isInitialized) {
+            SDLControllerManager.nativeRemoveJoystick(virtualDeviceId);
+            isInitialized = false;
+        }
+    }
+
+    /**
+     * Shows on each button the glyph image the game wrote for it in dir, or
+     * its letter where it wrote none.
+     */
+    public void loadGlyphs(File dir) {
+        for (int i = 0; i < GLYPH_NAMES.length; i++) {
+            View v = findViewById(GLYPH_VIEWS[i]);
+            if (!(v instanceof Button)) continue;
+            Button button = (Button) v;
+            if (!plainText.containsKey(GLYPH_VIEWS[i])) {
+                plainText.put(GLYPH_VIEWS[i], button.getText());
+                plainBackground.put(GLYPH_VIEWS[i], button.getBackground());
+            }
+            Drawable plain = plainBackground.get(GLYPH_VIEWS[i]);
+            Bitmap glyph = BitmapFactory.decodeFile(new File(dir, GLYPH_NAMES[i] + ".png").getPath());
+            if (glyph == null) {
+                button.setText(plainText.get(GLYPH_VIEWS[i]));
+                button.setBackground(plain);
+            } else {
+                button.setText("");
+                Drawable image = new GlyphDrawable(glyph);
+                button.setBackground(plain == null ? image : new LayerDrawable(new Drawable[] {plain, image}));
+            }
+        }
+    }
+
+    // A glyph fitted inside its bounds, a fifth of the way in, its pixels kept
+    // sharp as the game draws them.
+    static class GlyphDrawable extends Drawable {
+        private final Bitmap bitmap;
+        private final Paint paint = new Paint();
+        private final Rect src;
+        private final RectF dst = new RectF();
+
+        GlyphDrawable(Bitmap bitmap) {
+            this.bitmap = bitmap;
+            src = new Rect(0, 0, bitmap.getWidth(), bitmap.getHeight());
+            paint.setFilterBitmap(false);
+        }
+
+        @Override
+        public void draw(Canvas canvas) {
+            Rect b = getBounds();
+            float inset = Math.min(b.width(), b.height()) * 0.2f;
+            float scale = Math.min((b.width() - 2 * inset) / bitmap.getWidth(), (b.height() - 2 * inset) / bitmap.getHeight());
+            float w = bitmap.getWidth() * scale / 2f, h = bitmap.getHeight() * scale / 2f;
+            dst.set(b.exactCenterX() - w, b.exactCenterY() - h, b.exactCenterX() + w, b.exactCenterY() + h);
+            canvas.drawBitmap(bitmap, src, dst, paint);
+        }
+
+        @Override
+        public void setAlpha(int alpha) {
+            paint.setAlpha(alpha);
+            invalidateSelf();
+        }
+
+        @Override
+        public void setColorFilter(ColorFilter colorFilter) {
+            paint.setColorFilter(colorFilter);
+            invalidateSelf();
+        }
+
+        @Override
+        public int getOpacity() {
+            return PixelFormat.TRANSLUCENT;
+        }
     }
 }

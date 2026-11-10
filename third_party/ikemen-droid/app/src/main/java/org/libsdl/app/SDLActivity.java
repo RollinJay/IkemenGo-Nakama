@@ -72,6 +72,8 @@ public class SDLActivity extends Activity implements View.OnSystemUiVisibilityCh
         System.loadLibrary("main"); // match the Go shared lib name, usually libmain.so
     }
     public static native void nativeOnSDLReady(String path);
+    // The keyboard button: the game opens the keyboard again for its text box.
+    public static native void nativeShowKeyboard();
     private static final String TAG = "SDL";
     private static final int SDL_MAJOR_VERSION = 2;
     private static final int SDL_MINOR_VERSION = 32;
@@ -227,6 +229,9 @@ public class SDLActivity extends Activity implements View.OnSystemUiVisibilityCh
     protected static DummyEdit mTextEdit;
     protected static boolean mScreenKeyboardShown;
     protected static ViewGroup mLayout;
+    // Holds SDL's text field (DummyEdit) outside mLayout, which the touch
+    // controls' fading hides, so that the keyboard keeps its field.
+    protected static ViewGroup mTextLayout;
     protected static SDLClipboardHandler mClipboardHandler;
     protected static Hashtable<Integer, PointerIcon> mCursors;
     protected static int mLastCursorID;
@@ -316,6 +321,7 @@ public class SDLActivity extends Activity implements View.OnSystemUiVisibilityCh
         mSurface = null;
         mTextEdit = null;
         mLayout = null;
+        mTextLayout = null;
         mClipboardHandler = null;
         mCursors = new Hashtable<Integer, PointerIcon>();
         mLastCursorID = 0;
@@ -334,6 +340,7 @@ public class SDLActivity extends Activity implements View.OnSystemUiVisibilityCh
     private static String mBasePath;
     private Button mSDButton;
     private ControllerOverlay mControllerOverlay;
+    private TouchControls mTouchControls;
     private final Runnable hideRunnable = () -> {
         if (mLayout != null) mLayout.setVisibility(View.INVISIBLE);
     };
@@ -448,6 +455,13 @@ public class SDLActivity extends Activity implements View.OnSystemUiVisibilityCh
 //        mLayout = new RelativeLayout(this);
 //        mLayout.addView(mSurface);
 
+        mTextLayout = new RelativeLayout(this);
+        mTextLayout.setClickable(false);
+        mTextLayout.setFocusable(false);
+        rootLayout.addView(mTextLayout, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
+        ));
+
         mLayout = new RelativeLayout(this);
         mLayout.setClickable(false);
         mLayout.setFocusable(false);
@@ -494,6 +508,7 @@ public class SDLActivity extends Activity implements View.OnSystemUiVisibilityCh
         mControllerOverlay = new ControllerOverlay(this);
         RelativeLayout.LayoutParams lp = new RelativeLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT);
         mLayout.addView(mControllerOverlay, lp);
+        mTouchControls = new TouchControls(this, mSharedPrefs, mControllerOverlay, mLayout);
 
 //        setContentView(mLayout); // WHAT IT WAS
         setContentView(rootLayout);
@@ -695,7 +710,7 @@ public class SDLActivity extends Activity implements View.OnSystemUiVisibilityCh
                     // Start actual extraction thread
                     new Thread(() -> {
                         try {
-                            AssetExtractor.extractAll(getAssets(), baseDir);
+                            AssetExtractor.extractAll(getAssets(), baseDir, UPDATE_FILE_CHECK_DIRS);
                             runOnUiThread(() -> {
                                 progress.dismiss();
                                 onSDLReady();
@@ -892,6 +907,11 @@ public class SDLActivity extends Activity implements View.OnSystemUiVisibilityCh
     protected void onDestroy() {
         Log.v(TAG, "onDestroy()");
 
+        if (mTouchControls != null) {
+            mTouchControls.close();
+            mTouchControls = null;
+        }
+
         if (mHIDDeviceManager != null) {
             HIDDeviceManager.release(mHIDDeviceManager);
             mHIDDeviceManager = null;
@@ -1043,6 +1063,9 @@ public class SDLActivity extends Activity implements View.OnSystemUiVisibilityCh
     static final int COMMAND_SET_KEEP_SCREEN_ON = 5;
 
     protected static final int COMMAND_USER = 0x8000;
+    // Commands from the game (src/util_android.go).
+    static final int COMMAND_TEXT_ENTRY = COMMAND_USER + 1;   // 1: a text box opened, 0: closed
+    static final int COMMAND_TOUCH_GLYPHS = COMMAND_USER + 2; // the buttons' glyph images changed
 
     protected static boolean mFullscreenModeActive;
 
@@ -1055,6 +1078,17 @@ public class SDLActivity extends Activity implements View.OnSystemUiVisibilityCh
      * @return if the message was handled in overridden method.
      */
     protected boolean onUnhandledMessage(int command, Object param) {
+        if (mTouchControls == null) {
+            return false;
+        }
+        switch (command) {
+            case COMMAND_TEXT_ENTRY:
+                mTouchControls.setTextEntry(param instanceof Integer && (Integer) param != 0);
+                return true;
+            case COMMAND_TOUCH_GLYPHS:
+                mTouchControls.reloadGlyphs();
+                return true;
+        }
         return false;
     }
 
@@ -1590,7 +1624,7 @@ public class SDLActivity extends Activity implements View.OnSystemUiVisibilityCh
             if (mTextEdit == null) {
                 mTextEdit = new DummyEdit(SDL.getContext());
 
-                mLayout.addView(mTextEdit, params);
+                (mTextLayout != null ? mTextLayout : mLayout).addView(mTextEdit, params);
             } else {
                 mTextEdit.setLayoutParams(params);
             }
@@ -2253,8 +2287,12 @@ class DummyEdit extends View implements View.OnKeyListener {
     public InputConnection onCreateInputConnection(EditorInfo outAttrs) {
         ic = new SDLInputConnection(this, true);
 
+        // Without suggestions or corrections, which the keyboard sends as
+        // bursts of Backspaces and text that a game reads one key a frame.
         outAttrs.inputType = InputType.TYPE_CLASS_TEXT |
-                             InputType.TYPE_TEXT_FLAG_MULTI_LINE;
+                             InputType.TYPE_TEXT_FLAG_MULTI_LINE |
+                             InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS |
+                             InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD;
         outAttrs.imeOptions = EditorInfo.IME_FLAG_NO_EXTRACT_UI |
                               EditorInfo.IME_FLAG_NO_FULLSCREEN /* API 11 */;
 
