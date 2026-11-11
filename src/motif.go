@@ -1381,6 +1381,7 @@ type Motif struct {
 	LobbyBgDef      BgDefProperties                     `ini:"lobbybgdef"`
 	Border          BorderInfoProperties                `ini:"border"`
 	Glyphs          map[string]*GlyphProperties         `ini:"glyphs" literal:"true" insensitivekeys:"false" sff:"GlyphsSff"`
+	TouchControls   TouchControlsProperties             `ini:"touch_controls"`
 	fntIndexByKey   map[string]int                      // filepath|height -> index
 	inheritedKeys   map[string]bool                     // normalized .anim/.spr paths assigned by overrideParams inheritance
 	ch              MotifChallenger

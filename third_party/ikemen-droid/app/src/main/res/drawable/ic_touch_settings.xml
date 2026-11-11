@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The touch controls' settings: three sliders. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M3,5h18v2H3z M3,11h18v2H3z M3,17h18v2H3z" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M7,3h3v6H7z M14,9h3v6h-3z M9,15h3v6H9z" />
+</vector>

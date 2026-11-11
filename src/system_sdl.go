@@ -207,9 +207,18 @@ func (w *Window) GetSize() (int, int) {
 func (w *Window) GetScaledViewportSize() (int32, int32, int32, int32) {
 	winWidth, winHeight := w.GetSize()
 
+	// The game fits in the part of the window the on-screen keyboard leaves
+	// (Android). The viewport's y counts from the bottom, as in OpenGL ES,
+	// Android's renderer.
+	var bottom int32
+	if cover := int(keyboardCover.Load()); cover > 0 && cover < winHeight {
+		bottom = int32(cover)
+		winHeight -= cover
+	}
+
 	// If aspect ratio should not be kept, just return full window
 	if !sys.cfg.Video.KeepAspect {
-		return 0, 0, int32(winWidth), int32(winHeight)
+		return 0, bottom, int32(winWidth), int32(winHeight)
 	}
 
 	var x, y, resizedWidth, resizedHeight int32 = 0, 0, int32(winWidth), int32(winHeight)
@@ -237,7 +246,7 @@ func (w *Window) GetScaledViewportSize() (int32, int32, int32, int32) {
 		y = (int32(winHeight) - resizedHeight) / 2
 	}
 
-	return x, y, resizedWidth, resizedHeight
+	return x, y + bottom, resizedWidth, resizedHeight
 }
 
 func (w *Window) GetClipboardString() string {
@@ -381,10 +390,15 @@ func (w *Window) pollEvents() {
 		case sdl.QuitEvent:
 			w.closeflag = true
 		case sdl.KeyboardEvent:
+			key := t.Keysym.Sym
+			if key == sdl.K_AC_BACK && runtime.GOOS == "android" {
+				// Android's Back button, which the game keeps (main.go), works as Escape.
+				key = KeyEscape
+			}
 			if t.State == sdl.PRESSED {
-				OnKeyPressed(t.Keysym.Sym, t.Keysym.Mod)
+				OnKeyPressed(key, t.Keysym.Mod)
 			} else if t.State == sdl.RELEASED {
-				OnKeyReleased(t.Keysym.Sym, t.Keysym.Mod)
+				OnKeyReleased(key, t.Keysym.Mod)
 			}
 		case sdl.WindowEvent:
 			if t.Event == sdl.WINDOWEVENT_EXPOSED {
@@ -406,12 +420,49 @@ func (w *Window) pollEvents() {
 			// FIX: Map Instance ID (t.Which) to Array Index
 			if idx := findControllerIndex(t.Which); idx != -1 {
 				if controller := input.controllers[idx]; controller != nil {
+					touch := isTouchControls(controller)
 					controller.Close()
 					input.controllers[idx] = nil // Clear the reference
 					resetControllerState(idx)
+					if touch {
+						packControllers(idx)
+					}
 				}
 			}
 		}
+	}
+}
+
+// touchControlsName is the name the Android app gives the controller its
+// on-screen buttons play as (third_party/ikemen-droid's ControllerOverlay).
+const touchControlsName = "IKEMEN Touch Controls"
+
+// isTouchControls reports whether c is the controller the Android app's
+// on-screen buttons play as.
+func isTouchControls(c *sdl.GameController) bool {
+	if c == nil {
+		return false
+	}
+	joy := c.Joystick()
+	return joy != nil && joy.Name() == touchControlsName
+}
+
+// packControllers moves the controllers in the slots from from on down, in
+// order, to fill the free ones. The Android app removes its on-screen
+// buttons' controller when a real one connects, which then takes their slot,
+// and so their player, instead of the next one.
+func packControllers(from int) {
+	next := from
+	for i := from; i < len(input.controllers); i++ {
+		if input.controllers[i] == nil {
+			continue
+		}
+		if i != next {
+			input.controllers[next], input.controllers[i] = input.controllers[i], nil
+			input.controllerstate[next], input.controllerstate[i] = input.controllerstate[i], input.controllerstate[next]
+			resetControllerState(i)
+		}
+		next++
 	}
 }
 

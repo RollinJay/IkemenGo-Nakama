@@ -114,9 +114,14 @@ func OnKeyReleased(key Key, mk ModifierKey) {
 	if key != KeyUnknown {
 		sys.keyState[key] = false
 		// sys.keyInput is used as an edge-triggered "new key press" signal for Lua (getKey()).
+		// A key pressed in this same event poll, as Android's on-screen keyboard
+		// sends each one, stays until the next poll, so that Lua sees it.
 		if sys.keyInput == key {
-			sys.keyInput = KeyUnknown
-			sys.keyString = ""
+			if sys.keyInputFresh {
+				sys.keyInputReleased = true
+			} else {
+				sys.keyInput = KeyUnknown
+			}
 		}
 	}
 }
@@ -129,6 +134,8 @@ func OnKeyPressed(key Key, mk ModifierKey) {
 		}
 		sys.keyState[key] = true
 		sys.keyInput = key
+		sys.keyInputFresh = true
+		sys.keyInputReleased = false
 		escPressed := key == KeyEscape && (mk&ModCtrlAlt) == 0
 		sys.esc = sys.esc || escPressed
 		sys.escPending = sys.escPending || (sys.gameRunning && escPressed)
@@ -160,8 +167,26 @@ func OnKeyPressed(key Key, mk ModifierKey) {
 	}
 }
 
+// maxKeyString caps the text typed since Lua last cleared it (resetKey).
+const maxKeyString = 1024
+
+// OnTextEntered queues typed text until Lua clears it (resetKey): Android's
+// on-screen keyboard can send several characters in one event poll, and
+// characters outside ASCII come without a key press.
 func OnTextEntered(s string) {
-	sys.keyString = s
+	if len(sys.keyString)+len(s) <= maxKeyString {
+		sys.keyString += s
+	}
+}
+
+// beginKeyPoll runs before each frame's event poll: a key that was pressed
+// and released in the previous poll, which Lua has seen since, is cleared.
+func (s *System) beginKeyPoll() {
+	if s.keyInputReleased {
+		s.keyInput = KeyUnknown
+		s.keyInputReleased = false
+	}
+	s.keyInputFresh = false
 }
 
 // Return the state of all keyboard keys for a player

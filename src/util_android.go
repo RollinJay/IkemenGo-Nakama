@@ -168,6 +168,35 @@ func Java_org_libsdl_app_SDLActivity_nativeOnSDLReady(env *C.JNIEnv, clazz C.jcl
 	}
 }
 
+// nativeShowKeyboard is the app's keyboard button, shown while a text box is
+// open: the next frame opens the on-screen keyboard again (textEntry).
+//
+//export Java_org_libsdl_app_SDLActivity_nativeShowKeyboard
+func Java_org_libsdl_app_SDLActivity_nativeShowKeyboard(env *C.JNIEnv, clazz C.jclass) {
+	keyboardRequested.Store(true)
+}
+
+// nativeSetKeyboardCover is the app telling how many pixels at the bottom of
+// the game's surface the on-screen keyboard covers, 0 once it closes. The game
+// draws itself above it (keyboardCover).
+//
+//export Java_org_libsdl_app_SDLActivity_nativeSetKeyboardCover
+func Java_org_libsdl_app_SDLActivity_nativeSetKeyboardCover(env *C.JNIEnv, clazz C.jclass, pixels C.jint) {
+	keyboardCover.Store(int32(pixels))
+}
+
+// Commands for the app's SDLActivity.onUnhandledMessage; SDL leaves those from
+// 0x8000 to apps.
+const (
+	appMsgTextEntry   = 0x8001 // a text box opened (1) or closed (0)
+	appMsgTouchGlyphs = 0x8002 // the touch buttons' glyph images changed
+)
+
+// sendToApp sends the app a command, which it handles on its own thread.
+func sendToApp(command, param int) {
+	C.SDL_AndroidSendMessage(C.Uint32(command), C.int(param))
+}
+
 func Logcat(s string) {
 	cs := C.CString(s)
 	C.__android_log_write(C.ANDROID_LOG_INFO, C.CString("ikemen"), cs)

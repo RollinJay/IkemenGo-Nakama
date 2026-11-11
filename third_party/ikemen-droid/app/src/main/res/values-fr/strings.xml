@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="game_folder_str">Dossier de jeu</string>
+    <string name="first_run_dialog_title">Premier lancement</string>
+    <string name="first_run_dialog_msg">Extraction des fichiers du jeu… Veuillez patienter.</string>
+    <string name="extraction_error_title">Erreur d\'extraction</string>
+    <string name="exit_str">Quitter</string>
+    <string name="updating_files_title">Mise à jour de fichiers</string>
+    <string name="updating_files_msg">Veuillez patienter pendant la synchronisation des fichiers du jeu…</string>
+    <string name="update_error_title">Erreur de mise à jour</string>
+</resources>

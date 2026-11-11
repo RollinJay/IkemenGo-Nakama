@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="game_folder_str">ゲームフォルダを選る</string>
+    <string name="first_run_dialog_title">最初期設定</string>
+    <string name="first_run_dialog_msg">ゲームファイルを抜きています… しばらくお待ち下さい。</string>
+    <string name="extraction_error_title">抽出エラー</string>
+    <string name="exit_str">終了</string>
+    <string name="updating_files_title">自動更新</string>
+    <string name="updating_files_msg">エンジンのファイルが同期を取っています。しばらくお待ち下さい…</string>
+    <string name="update_error_title">アップデートエラー</string>
+</resources>

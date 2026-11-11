@@ -83,8 +83,9 @@ SCREENPACK_DIR="$REPO_ROOT/$BUILDDIR/screenpack"
 
 # Android APK packaging (ikemen-droid)
 BUILD_ANDROID_APK="${BUILD_ANDROID_APK:-1}"  # 1=yes, 0=no
-# ANDROID_APK_REPO can be a git URL (default) OR a local directory path to an existing ikemen-droid checkout.
-ANDROID_APK_REPO="${ANDROID_APK_REPO:-https://github.com/Jesuszilla/ikemen-droid.git}"
+# ANDROID_APK_REPO is the app project: the copy in third_party/ikemen-droid (see its VENDOR.md)
+# unless it names another local checkout, or a git URL (with ANDROID_APK_REF).
+ANDROID_APK_REPO="${ANDROID_APK_REPO:-$REPO_ROOT/third_party/ikemen-droid}"
 ANDROID_APK_REF="${ANDROID_APK_REF:-main}"
 ANDROID_APK_DIR="$REPO_ROOT/$BUILDDIR/android-apk/ikemen-droid"
 ANDROID_APK_OUT="${ANDROID_APK_OUT:-$REPO_ROOT/bin/ikemen-go.apk}"

@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="game_folder_str">Seleccione Carpeta del Juego</string>
+    <string name="first_run_dialog_title">Primera Vez</string>
+    <string name="first_run_dialog_msg">Descomprimiendo Recursos del Juego… Por favor espere.</string>
+    <string name="extraction_error_title">Error de descompresión</string>
+    <string name="exit_str">Salir</string>
+    <string name="updating_files_title">Actualizando Archivos</string>
+    <string name="updating_files_msg">Por favor espere mientras los archivos del motor se sincronizan…</string>
+    <string name="update_error_title">Error de actualización</string>
+</resources>
