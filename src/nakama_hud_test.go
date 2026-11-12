@@ -19,6 +19,7 @@ func bitmapFont(chars string) *Fnt {
 type fakeTTF struct{ has string }
 
 func (fakeTTF) SetColor(red float32, green float32, blue float32, alpha float32) {}
+func (fakeTTF) SetBlending(eq BlendEquation, src, dst BlendFunc)                 {}
 func (fakeTTF) SetPalFX(spfx ShaderPalFX)                                        {}
 func (fakeTTF) Width(scale float32, spacingXAdd float32, fs string, argv ...interface{}) float32 {
 	return 0
@@ -29,6 +30,7 @@ func (fakeTTF) Printf(x, y float32, xscl, yscl float32, spacingXAdd float32, ali
 	return nil
 }
 func (fakeTTF) UpdateResolution(windowWidth int, windowHeight int) {}
+func (fakeTTF) SetCustomShader(shader CustomShaderRenderData)      {}
 func (f fakeTTF) hasRune(r rune) bool                              { return strings.ContainsRune(f.has, r) }
 
 func nameSlot(f *Fnt, bank int32) *FightScreenName {

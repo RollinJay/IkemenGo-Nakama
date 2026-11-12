@@ -4,20 +4,29 @@ import (
 	"container/list"
 	_ "embed"
 	"math"
+	"strings"
 
 	mgl "github.com/go-gl/mathgl/mgl32"
 )
 
 type Texture interface {
 	SetData(data []byte)
-	SetSubData(data []byte, x, y, width, height, stride int32)
+	SetSubData(data []byte)
+	SetSubData2(data []byte, x, y, width, height, stride int32)
 	SetDataG(data []byte, mag, min, ws, wt TextureSamplingParam)
 	SetPixelData(data []float32)
 	IsValid() bool
 	GetWidth() int32
 	GetHeight() int32
+	GetUV() [4]float32
 	CopyData(src *Texture)
 	MarkNonSwappable()
+}
+
+type PalTexture struct {
+	textures  []*Texture
+	size      uint32
+	emptySlot *list.List
 }
 
 type Renderer interface {
@@ -51,7 +60,8 @@ type Renderer interface {
 	SetMeshOutlinePipeline(invertFrontFace bool, meshOutline float32)
 	ReleaseModelPipeline()
 	newTexture(width, height, depth int32, filter bool) (t Texture, err error)
-	newPaletteTexture() (t Texture)
+	newPaletteTexture(slot [2]uint32, offset [2]int32, uvst [4]float32) (t Texture)
+	newSubTexture(tex Texture, width, height int32, uvst [4]float32) (t Texture)
 	newModelTexture(width, height, depth int32, filter bool) (t Texture, err error)
 	newDataTexture(width, height int32) (t Texture, err error)
 	newHDRTexture(width, height int32) (t Texture, err error)
@@ -59,6 +69,9 @@ type Renderer interface {
 
 	ReadPixels(data []uint8, width, height int)
 	SetViewport(x, y, width, height int32)
+	BeginScreenshot(width, height int)
+	FinishScreenshot(data []uint8, width, height int) bool
+
 	EnableScissor(x, y, width, height int32)
 	DisableScissor()
 
@@ -82,10 +95,12 @@ type Renderer interface {
 	SetShadowFrameTexture(i uint32)
 	SetShadowFrameCubeTexture(i uint32)
 	SetVertexData(values ...float32)
+	SetQuadVertices(v *[16]float32) // One quad as 4 vertices of x, y, u, v, drawn with RenderQuad
 	SetModelVertexData(bufferIndex uint32, values []byte)
 	SetModelIndexData(bufferIndex uint32, values ...uint32)
 
 	RenderQuad()
+	RenderQuadBatch(vertexCount int32)
 	RenderElements(mode PrimitiveMode, count, offset int)
 	RenderShadowMapElements(mode PrimitiveMode, count, offset int)
 	RenderCubeMap(envTexture Texture, cubeTexture Texture)
@@ -104,6 +119,23 @@ var vertShader string
 
 //go:embed shaders/sprite.frag.glsl
 var fragShader string
+
+//go:embed shaders/sprite_lib.frag.glsl
+var spriteLibShader string
+
+// Replaces the sprite library include with the embedded library, as glslc does for Vulkan
+func expandShaderIncludes(src string) string {
+	if !strings.Contains(src, "sprite_lib.frag.glsl") {
+		return src
+	}
+	lines := strings.Split(src, "\n")
+	for i, l := range lines {
+		if strings.TrimSpace(l) == `#include "sprite_lib.frag.glsl"` {
+			lines[i] = spriteLibShader
+		}
+	}
+	return strings.Join(lines, "\n")
+}
 
 //go:embed shaders/model.vert.glsl
 var modelVertShader string
@@ -142,8 +174,13 @@ var vertexFontShader string
 var gfx Renderer
 var gfxFont FontRenderer
 
-// Counter for unique texture cache serial numbers
-var textureSerialNumber uint64
+// Pre-allocated CPU-side scratch buffers reused to avoid allocations in the render hot path
+var (
+	quadVertexScratch []float32
+	tileScratch       []float32
+	quadDrawScratch   [16]float32
+	rectDrawScratch   [16]float32
+)
 
 // Blend constants
 type BlendFunc int
@@ -207,6 +244,7 @@ type RenderParams struct {
 	rxadd          float32
 	xas, yas       float32
 	rot            Rotation
+	parallaxRot    bool   // Apply the BG scale after rotation
 	tint           uint32 // Sprite tint for shadows
 	blendMode      TransType
 	blendAlpha     [2]int32
@@ -256,21 +294,37 @@ func (st *ShaderTexture) step() {
 }
 
 type CustomShader struct {
-	name   string
-	params [16]float32
-	time   int32
-	sTime  float32
-	tex1   ShaderTexture
-	tex2   ShaderTexture
+	name       string // The name chars use to refer to the shader
+	key        string // Engine-wide shader key made from its unique path
+	params     [16]float32
+	time       int32
+	sTime      float32
+	tex1       ShaderTexture
+	tex2       ShaderTexture
+	shadow     bool
+	reflection bool
+	afterimage bool
+}
+
+// Switching to a different shader drops the previous one's params, textures and elapsed time
+func (cs *CustomShader) set(name, key string) {
+	if key != cs.key {
+		cs.clear()
+	}
+	cs.name, cs.key = name, key
 }
 
 func (cs *CustomShader) clear() {
 	cs.name = ""
+	cs.key = ""
 	cs.params = [16]float32{}
 	cs.time = 0
 	cs.sTime = 0
 	cs.tex1.clear()
 	cs.tex2.clear()
+	cs.shadow = true
+	cs.reflection = true
+	cs.afterimage = true
 }
 
 type CustomShaderRenderData struct {
@@ -282,27 +336,69 @@ type CustomShaderRenderData struct {
 	tex2   Texture
 }
 
+func (cs *CustomShader) interpolatedSTime(act bool) float32 {
+	// Interpolate only while the object can act
+	if act && cs.sTime > 0 {
+		return cs.sTime - (1 - sys.tickInterpolation())
+	}
+	return cs.sTime
+}
+
+func (cs *CustomShader) renderData(act bool) CustomShaderRenderData {
+	return CustomShaderRenderData{
+		name:   cs.key,
+		params: cs.params,
+		time:   cs.time,
+		sTime:  cs.interpolatedSTime(act),
+		tex1:   cs.tex1.GetTexture(),
+		tex2:   cs.tex2.GetTexture(),
+	}
+}
+
+func (cs CustomShaderRenderData) setUniforms() {
+	var timeSec float32
+	if sys.middleOfMatch() {
+		// Global shader time is interpolated between game ticks
+		timeSec = float32(sys.gameTime()) - (1 - sys.tickInterpolation())
+		if timeSec < 0 {
+			timeSec = 0
+		}
+	} else {
+		timeSec = float32(sys.frameCounter)
+	}
+	gfx.SetUniformF("iTime", timeSec/60.0)
+	gfx.SetUniformF("sTime", cs.sTime)
+	gfx.SetUniformF("iResolution", float32(sys.scrrect[2]), float32(sys.scrrect[3]))
+	gfx.SetUniformF("aspectRatio", sys.getCurrentAspect()/sys.getFightAspect())
+	gfx.SetCustomUniforms(cs.params)
+}
+
 func (rp *RenderParams) IsValid() bool {
 	return rp.tex != nil && rp.tex.IsValid() && rp.size[0] != 0 && rp.size[1] != 0 &&
 		IsFinite(rp.x+rp.y+rp.xts+rp.xbs+rp.ys+rp.vs+rp.rxadd+rp.rot.angle+rp.rcx+rp.rcy)
 }
 
-func drawQuads(modelview mgl.Mat4, x1, y1, x2, y2, x3, y3, x4, y4 float32) {
+func drawQuads(modelview mgl.Mat4, x1, y1, x2, y2, x3, y3, x4, y4 float32, uvst [4]float32, isTrapez bool) {
 	gfx.SetUniformMatrix("modelview", modelview[:])
-	gfx.SetUniformF("x1x2x4x3", x1, x2, x4, x3) // this uniform is optional
+	if isTrapez {
+		gfx.SetUniformF("x1x2x4x3", x1, x2, x4, x3) // this uniform is optional
+	} else {
+		gfx.SetUniformF("x1x2x4x3", 0, 0, 0, 0)
+	}
 
 	// This effectively side-steps a low-level rectangle rasterization edge case,
 	// that caused visible and frequent artifacts on the diagonal.
 	// See: https://github.com/ikemen-engine/Ikemen-GO/issues/3583
 	uvBias := float32(0.000002)
 
-	gfx.SetVertexData(
-		x2, y2, 1, 1-uvBias,
-		x3, y3, 1, 0,
-		x1, y1, uvBias, 1-uvBias,
-		x4, y4, uvBias, 0,
-	)
+	quadDrawScratch = [16]float32{
+		x2, y2, uvst[2], uvst[3] - uvBias,
+		x3, y3, uvst[2], uvst[1],
+		x1, y1, uvBias + uvst[0], uvst[3] - uvBias,
+		x4, y4, uvBias + uvst[0], uvst[1],
+	}
 
+	gfx.SetQuadVertices(&quadDrawScratch)
 	gfx.RenderQuad()
 }
 
@@ -310,31 +406,29 @@ func applyRotation(modelview mgl.Mat4, rp RenderParams) mgl.Mat4 {
 	aspectGame := sys.getCurrentAspect()
 	aspectWindow := float32(sys.scrrect[2]) / float32(sys.scrrect[3])
 
-	rotMatrix := func() mgl.Mat4 {
-		return mgl.Rotate3DX(-rp.rot.xangle * math.Pi / 180.0).
-			Mul3(mgl.Rotate3DY(rp.rot.yangle * math.Pi / 180.0)).
-			Mul3(mgl.Rotate3DZ(rp.rot.angle * math.Pi / 180.0)).
-			Mat4()
-	}
+	rotMatrix := mgl.Rotate3DX(-rp.rot.xangle * math.Pi / 180.0).
+		Mul3(mgl.Rotate3DY(rp.rot.yangle * math.Pi / 180.0)).
+		Mul3(mgl.Rotate3DZ(rp.rot.angle * math.Pi / 180.0)).
+		Mat4()
 
 	if Abs(aspectGame-aspectWindow) > 0.01 {
 		if aspectWindow > aspectGame {
 			// Window wider: normalize X
 			scaleX := aspectWindow / aspectGame
 			modelview = modelview.Mul4(mgl.Scale3D(scaleX, rp.vs, 1)) // pre-scale
-			modelview = modelview.Mul4(rotMatrix())                   // rotate
+			modelview = modelview.Mul4(rotMatrix)                     // rotate
 			modelview = modelview.Mul4(mgl.Scale3D(1/scaleX, 1, 1))   // restore
 		} else {
 			// Window taller: normalize Y
 			scaleY := aspectGame / aspectWindow
 			modelview = modelview.Mul4(mgl.Scale3D(1, scaleY*rp.vs, 1))
-			modelview = modelview.Mul4(rotMatrix())
+			modelview = modelview.Mul4(rotMatrix)
 			modelview = modelview.Mul4(mgl.Scale3D(1, 1/scaleY, 1))
 		}
 	} else {
 		// Same aspect: simple rotation
 		modelview = modelview.Mul4(mgl.Scale3D(1, rp.vs, 1))
-		modelview = modelview.Mul4(rotMatrix())
+		modelview = modelview.Mul4(rotMatrix)
 	}
 
 	return modelview
@@ -414,7 +508,7 @@ func transformTextQuad(x1, y1, x2, y2, x3, y3, x4, y4, rxadd float32,
 	toTextSpace := func(x, y float32) (float32, float32) {
 		return x / sx, (screenH - y) / sy
 	}
-	transformPoint := func(modelview mgl.Mat4, x, y float32) (float32, float32) {
+	transformPointPersp := func(modelview mgl.Mat4, x, y float32) (float32, float32) {
 		v := modelview.Mul4x1(mgl.Vec4{x, y, 0, 1})
 		if v.W() != 0 {
 			invW := 1 / v.W()
@@ -453,10 +547,10 @@ func transformTextQuad(x1, y1, x2, y2, x3, y3, x4, y4, rxadd float32,
 		modelview = applyRotation(modelview, rp)
 		modelview = modelview.Mul4(mgl.Translate3D(-rp.rcx, -rp.rcy, 0))
 
-		blx, bly = transformPoint(modelview, blx, bly)
-		brx, bry = transformPoint(modelview, brx, bry)
-		trx, try = transformPoint(modelview, trx, try)
-		tlx, tly = transformPoint(modelview, tlx, tly)
+		blx, bly = transformPointPersp(modelview, blx, bly)
+		brx, bry = transformPointPersp(modelview, brx, bry)
+		trx, try = transformPointPersp(modelview, trx, try)
+		tlx, tly = transformPointPersp(modelview, tlx, tly)
 	} else {
 		if rp.rxadd != 0 {
 			// Match the unrotated sprite path by shifting the bottom edge
@@ -478,8 +572,39 @@ func transformTextQuad(x1, y1, x2, y2, x3, y3, x4, y4, rxadd float32,
 	return x1, y1, x2, y2, x3, y3, x4, y4
 }
 
-// Render a quad with optional horizontal tiling
-func renderSpriteHTile(modelview mgl.Mat4, x1, y1, x2, y2, x3, y3, x4, y4, dy, width float32, rp RenderParams) {
+// Helper to transform a point by a 4x4 matrix
+func transformPoint(mat mgl.Mat4, x, y float32) (float32, float32) {
+	v := mat.Mul4x1(mgl.Vec4{x, y, 0, 1})
+	return v[0], v[1]
+}
+
+// Helper to append a quad as two triangles to the batch
+func appendTransformedQuadTriangles(batch []float32, mat mgl.Mat4, x1, y1, x2, y2, x3, y3, x4, y4 float32, uvst [4]float32) []float32 {
+	uvBias := float32(0.000002)
+	p2x, p2y := transformPoint(mat, x2, y2)
+	p3x, p3y := transformPoint(mat, x3, y3)
+	p1x, p1y := transformPoint(mat, x1, y1)
+	p4x, p4y := transformPoint(mat, x4, y4)
+
+	// Vertices are laid out in triangle strip order, matching the single quad order
+	if len(batch) > 0 {
+		lastX, lastY, lastU, lastV := batch[len(batch)-4], batch[len(batch)-3], batch[len(batch)-2], batch[len(batch)-1]
+		batch = append(batch, lastX, lastY, lastU, lastV)
+		batch = append(batch, p2x, p2y, 1, 1-uvBias)
+	}
+
+	batch = append(batch,
+		p2x, p2y, uvst[2], uvst[3]-uvBias,
+		p3x, p3y, uvst[2], uvst[1],
+		p1x, p1y, uvBias+uvst[0], uvst[3]-uvBias,
+		p4x, p4y, uvBias+uvst[0], uvst[1],
+	)
+
+	return batch
+}
+
+// Draws or accumulates every visible horizontal tile of one row
+func emitHTiles(batch *[]float32, modelview mgl.Mat4, x1, y1, x2, y2, x3, y3, x4, y4, dy, width float32, rp RenderParams) {
 	//            p3
 	//    p4 o-----o-----o- - -o
 	//      /      |      \     ` .
@@ -529,10 +654,20 @@ func renderSpriteHTile(modelview mgl.Mat4, x1, y1, x2, y2, x3, y3, x4, y4, dy, w
 		}
 	}
 
-	// Draw all quads in one loop
+	// Read the caller's current slice value into a local copy
+	var b []float32
+	if batch != nil {
+		b = *batch
+	}
+	trapez := Abs(Abs(rp.xts)-Abs(rp.xbs)) > 0.001
+
+	// Collect or draw all quads in one loop
 	for n := left; n < right; n++ {
 		x1d, x2d := x1+float32(n)*botdist, x2+float32(n)*botdist
 		x3d, x4d := x3+float32(n)*topdist, x4+float32(n)*topdist
+
+		// This tile's modelview, applying projection/rotation around its own pivot
+		// when the sprite is rotated.
 		mat := modelview
 		if !rp.rot.IsZero() {
 			mat = applyProjection(mat, rp, int(n), botdist, dy)
@@ -544,48 +679,33 @@ func renderSpriteHTile(modelview mgl.Mat4, x1, y1, x2, y2, x3, y3, x4, y4, dy, w
 			mat = mat.Mul4(mgl.Translate3D(-rotCenterX, -rotCenterY, 0))
 		}
 
-		drawQuads(mat, x1d, y1, x2d, y2, x3d, y3, x4d, y4)
+		if batch != nil {
+			// Append verts to batch draw later
+			b = appendTransformedQuadTriangles(b, mat, x1d, y1, x2d, y2, x3d, y3, x4d, y4, rp.tex.GetUV())
+		} else {
+			// Draw each tile immediately
+			drawQuads(mat, x1d, y1, x2d, y2, x3d, y3, x4d, y4, rp.tex.GetUV(), trapez)
+		}
+	}
+
+	// Write the possibly regrown slice back into the caller's variable
+	if batch != nil {
+		*batch = b
 	}
 }
 
-func renderSpriteQuad(modelview mgl.Mat4, rp RenderParams) {
-	x1, y1 := rp.x, rp.rcy+((rp.y-rp.ys*float32(rp.size[1]))-rp.rcy)*rp.vs
-	x2, y2 := x1+rp.xbs*float32(rp.size[0]), y1
-	x3, y3 := rp.x+rp.xts*float32(rp.size[0]), rp.rcy+(rp.y-rp.rcy)*rp.vs
-	x4, y4 := rp.x, y3
-
-	//var pers float32
-	//if Abs(rp.xts) < Abs(rp.xbs) {
-	//	pers = Abs(rp.xts) / Abs(rp.xbs)
-	//} else {
-	//	pers = Abs(rp.xbs) / Abs(rp.xts)
-	//}
-
-	if !rp.rot.IsZero() && rp.tile.xflag == 0 && rp.tile.yflag == 0 {
-		// TODO: This block makes shadows ignore their own yscale when in perspective
-		// However, when we disable it, regular shadows are scaled incorrectly even with the smallest roation
-		// So for now let's split the difference and keep the code only outside projection
-		if rp.vs != 1 && rp.projectionMode == 0 {
-			y1 = rp.rcy + ((rp.y - rp.ys*float32(rp.size[1])) - rp.rcy)
-			y2 = y1
-			y3 = rp.y
-			y4 = y3
-		}
-
-		modelview = applyProjection(modelview, rp, 0, 1, 0)
-		modelview = applyShear(modelview, rp.rxadd, rp.ys*float32(rp.size[1]))
-		modelview = applyRotation(modelview, rp)
-		modelview = modelview.Mul4(mgl.Translate3D(-(rp.rcx + rp.rcOffset[0]), -(rp.rcy + rp.rcOffset[1]), 0))
-
-		drawQuads(modelview, x1, y1, x2, y2, x3, y3, x4, y4)
-		return
-	}
+// Drives the Y-tiling loops and emits each visible row through emitHTiles
+// batch is nil for immediate draws, otherwise it is the vertex scratch being grown
+func emitTiles(batch *[]float32, modelview mgl.Mat4, rp RenderParams, x1, y1, x2, y2, x3, y3, x4, y4 float32) {
 	if rp.tile.yflag == 1 && rp.xbs != 0 {
 		x1 += rp.rxadd * rp.ys * float32(rp.size[1])
 		x2 = x1 + rp.xbs*float32(rp.size[0])
 		x1d, y1d, x2d, y2d, x3d, y3d, x4d, y4d := x1, y1, x2, y2, x3, y3, x4, y4
 		n := 0
-		var xy []float32
+
+		// Clear scratch buffer
+		xy := tileScratch[:0]
+
 		for {
 			x1d, y1d = x4d, y4d+rp.ys*rp.vs*((float32(rp.tile.yspacing)+float32(rp.size[1]))/rp.yas-float32(rp.size[1]))
 			x2d, y2d = x3d, y1d
@@ -606,6 +726,7 @@ func renderSpriteQuad(modelview mgl.Mat4, rp RenderParams) {
 			n += 1
 			xy = append(xy, x1d, x2d, x3d, x4d, y1d, y2d, y3d, y4d)
 		}
+
 		for {
 			if len(xy) == 0 {
 				break
@@ -613,10 +734,14 @@ func renderSpriteQuad(modelview mgl.Mat4, rp RenderParams) {
 			x1d, x2d, x3d, x4d, y1d, y2d, y3d, y4d, xy = xy[len(xy)-8], xy[len(xy)-7], xy[len(xy)-6], xy[len(xy)-5], xy[len(xy)-4], xy[len(xy)-3], xy[len(xy)-2], xy[len(xy)-1], xy[:len(xy)-8]
 			if (0 > y1d || 0 > y4d) &&
 				(y1d > float32(-sys.scrrect[3]) || y4d > float32(-sys.scrrect[3])) {
-				renderSpriteHTile(modelview, x1d, y1d, x2d, y2d, x3d, y3d, x4d, y4d, y1d-y1, float32(rp.size[0]), rp)
+				emitHTiles(batch, modelview, x1d, y1d, x2d, y2d, x3d, y3d, x4d, y4d, y1d-y1, float32(rp.size[0]), rp)
 			}
 		}
+
+		// Update scratch buffer with new capacity
+		tileScratch = xy
 	}
+
 	if rp.tile.yflag == 0 || rp.xts != 0 {
 		x1 += rp.rxadd * rp.ys * float32(rp.size[1])
 		x2 = x1 + rp.xbs*float32(rp.size[0])
@@ -632,7 +757,7 @@ func renderSpriteQuad(modelview mgl.Mat4, rp RenderParams) {
 			}
 			if (0 > y1 || 0 > y4) &&
 				(y1 > float32(-sys.scrrect[3]) || y4 > float32(-sys.scrrect[3])) {
-				renderSpriteHTile(modelview, x1, y1, x2, y2, x3, y3, x4, y4, y1-oy, float32(rp.size[0]), rp)
+				emitHTiles(batch, modelview, x1, y1, x2, y2, x3, y3, x4, y4, y1-oy, float32(rp.size[0]), rp)
 			}
 			if rp.tile.yflag != 1 && n != 0 {
 				n--
@@ -649,6 +774,105 @@ func renderSpriteQuad(modelview mgl.Mat4, rp RenderParams) {
 				break
 			}
 			y1 = y2
+		}
+	}
+}
+
+// TODO: There's some redundancy between all the quad drawing functions right now
+func renderSpriteQuad(modelview mgl.Mat4, rp RenderParams) {
+	if rp.parallaxRot {
+		if rp.xts == 0 || rp.ys == 0 || rp.xas == 0 || rp.yas == 0 {
+			return
+		}
+		// Keep AIR scaling inside the rotation and apply the BG scaling outside it
+		sx, sy := rp.xts/rp.xas, rp.ys/rp.yas
+		width := float32(rp.size[0]) * rp.xas
+		xLeft := rp.rcx - width/2
+		xRight := xLeft + width
+		yTop := rp.rcy + (rp.y-rp.rcy)/sy
+		yBottom := yTop - float32(rp.size[1])*rp.yas
+		modelview = applyProjection(modelview, rp, 0, 1, 0)
+		// Keep shear outside the BG scale and rotation, as in the regular rotated path
+		modelview = applyShear(modelview, rp.rxadd, rp.ys*float32(rp.size[1]))
+		modelview = modelview.Mul4(mgl.Scale3D(sx, sy, 1))
+		modelview = applyRotation(modelview, rp)
+		modelview = modelview.Mul4(mgl.Translate3D(-rp.rcx, -rp.rcy, 0))
+		drawQuads(modelview, xLeft, yBottom, xRight, yBottom, xRight, yTop, xLeft, yTop, rp.tex.GetUV(), false)
+		return
+	}
+
+	x1, y1 := rp.x, rp.rcy+((rp.y-rp.ys*float32(rp.size[1]))-rp.rcy)*rp.vs
+	x2, y2 := x1+rp.xbs*float32(rp.size[0]), y1
+	x3, y3 := rp.x+rp.xts*float32(rp.size[0]), rp.rcy+(rp.y-rp.rcy)*rp.vs
+	x4, y4 := rp.x, y3
+
+	tiled := rp.tile.xflag != 0 || rp.tile.yflag != 0
+	trapez := Abs(Abs(rp.xts)-Abs(rp.xbs)) > 0.001
+	rotated := !rp.rot.IsZero()
+
+	switch {
+	case tiled && trapez:
+		// Trapezoids (e.g. parallax floors) draw immediately because they cannot be batched at the moment
+		emitTiles(nil, modelview, rp, x1, y1, x2, y2, x3, y3, x4, y4)
+
+	case tiled:
+		// Rectangular tiles bake vertices then batch render later
+		// Clear scratch buffer
+		batch := quadVertexScratch[:0]
+		emitTiles(&batch, modelview, rp, x1, y1, x2, y2, x3, y3, x4, y4)
+
+		if len(batch) > 0 {
+			// Vertices are already transformed, so use identity matrix
+			identity := mgl.Ident4()
+			gfx.SetUniformMatrix("modelview", identity[:])
+			gfx.SetUniformF("x1x2x4x3", 0, 0, 0, 0)
+			gfx.SetVertexData(batch...)
+			gfx.RenderQuadBatch(int32(len(batch) / 4)) // 4 floats per vertex
+		}
+
+		// Update scratch buffer with new capacity
+		quadVertexScratch = batch
+
+	case rotated:
+		// Non-tiled, rotated: single quad with full transform
+		// TODO: This block makes shadows ignore their own yscale when in perspective
+		// However, when we disable it, regular shadows are scaled incorrectly even with the smallest roation
+		// So for now let's split the difference and keep the code only outside projection
+		if rp.vs != 1 && rp.projectionMode == 0 {
+			y1 = rp.rcy + ((rp.y - rp.ys*float32(rp.size[1])) - rp.rcy)
+			y2 = y1
+			y3 = rp.y
+			y4 = y3
+		}
+
+		modelview = applyProjection(modelview, rp, 0, 1, 0)
+		modelview = applyShear(modelview, rp.rxadd, rp.ys*float32(rp.size[1]))
+		modelview = applyRotation(modelview, rp)
+		modelview = modelview.Mul4(mgl.Translate3D(-(rp.rcx + rp.rcOffset[0]), -(rp.rcy + rp.rcOffset[1]), 0))
+		drawQuads(modelview, x1, y1, x2, y2, x3, y3, x4, y4, rp.tex.GetUV(), trapez)
+
+	default:
+		// Non-tiled, not rotated: shear must be baked into coordinates directly since no
+		// rotation matrix runs - matches the tiled path's handling
+		if rp.rxadd != 0 {
+			x1 += rp.rxadd * rp.ys * float32(rp.size[1])
+			x2 = x1 + rp.xbs*float32(rp.size[0])
+		}
+
+		// Trapezoid convergence adjustment, same as emitHTiles does per row
+		// No-op for rectangles (topdist == botdist), but required for parallax
+		topdist := (x3 - x4) / rp.xas
+		botdist := (x2 - x1) / rp.xas
+		if Abs(topdist) >= 0.01 {
+			db := (x4 - rp.rcx) * (botdist - topdist) / Abs(topdist)
+			x1 += db
+			x2 += db
+		}
+
+		// Skip the draw call entirely if this quad is fully above or fully below the visible
+		// screen range - matches the tiled path's vertical visibility culling
+		if (0 > y1 || 0 > y4) && (y1 > float32(-sys.scrrect[3]) || y4 > float32(-sys.scrrect[3])) {
+			drawQuads(modelview, x1, y1, x2, y2, x3, y3, x4, y4, rp.tex.GetUV(), trapez)
 		}
 	}
 }
@@ -690,14 +914,7 @@ func RenderSprite(rp RenderParams) {
 	initRenderSpriteQuad(&rp)
 
 	// PalFX and color setup
-	spfx := ShaderPalFX{
-		neg:      false,
-		add:      [3]float32{0, 0, 0},
-		mult:     [3]float32{1, 1, 1},
-		gray:     0,
-		hue:      0,
-		invblend: 0,
-	}
+	spfx := NewShaderPalFX()
 	if rp.pfx != nil {
 		spfx = rp.pfx.getFinalPalFx(rp.blendMode, rp.blendAlpha)
 	}
@@ -735,18 +952,6 @@ func RenderSprite(rp RenderParams) {
 	}
 
 	if rp.customShader.name != "" {
-		var timeSec float32
-		if sys.middleOfMatch() {
-			timeSec = float32(sys.gameTime())
-		} else {
-			timeSec = float32(sys.frameCounter)
-		}
-		gfx.SetUniformF("iTime", timeSec/60.0)
-		gfx.SetUniformF("sTime", rp.customShader.sTime)
-		gfx.SetUniformF("iResolution", float32(sys.scrrect[2]), float32(sys.scrrect[3]))
-		aspectRatio := sys.getCurrentAspect() / sys.getFightAspect()
-		gfx.SetUniformF("aspectRatio", aspectRatio)
-
 		if gfx.NeedsGrabPass() {
 			grabTex := gfx.ResolveBackBuffer()
 			if grabTex != nil {
@@ -759,7 +964,7 @@ func RenderSprite(rp RenderParams) {
 		if rp.customShader.tex2 != nil {
 			gfx.SetTexture("tex2", rp.customShader.tex2)
 		}
-		gfx.SetCustomUniforms(rp.customShader.params)
+		rp.customShader.setUniforms()
 	}
 	// Texture binding
 	gfx.SetTexture("tex", rp.tex)
@@ -782,18 +987,20 @@ func RenderSprite(rp RenderParams) {
 		renderSpriteQuad(modelview, rp)
 	}
 
-	renderWithBlending(renderPass, rp.blendMode, rp.blendAlpha, rp.paltex != nil, &spfx, rp.paltex == nil)
+	renderWithBlending(renderPass, rp.blendMode, rp.blendAlpha, rp.paltex == nil, &spfx, rp.paltex == nil)
 
 	gfx.DisableScissor()
 }
 
 func renderWithBlending(
 	render func(eq BlendEquation, src, dst BlendFunc, a float32),
-	blendMode TransType, blendAlpha [2]int32, correctAlpha bool,
+	blendMode TransType, blendAlpha [2]int32, premultiplied bool,
 	spfx *ShaderPalFX, isrgba bool) {
 
+	// Premultiplied data has alpha baked into its color, so the source factor must not re-apply it
+	// Paletted sprites and flat fills are straight, so they do need it
 	blendSourceFactor := BlendSrcAlpha
-	if !correctAlpha {
+	if premultiplied {
 		blendSourceFactor = BlendOne
 	}
 
@@ -950,7 +1157,8 @@ func renderWithBlending(
 					v3, ml, al := Max(255*(gc-(src+dst)), 512)/128, src, src+dst
 					rM, gM, bM := spfx.mult[0]*ml, spfx.mult[1]*ml, spfx.mult[2]*ml
 					spfx.mult[0], spfx.mult[1], spfx.mult[2] = rM, gM, bM
-					render(Blend, blendSourceFactor, BlendOne, al*Pow(v3, 3))
+					// Keep this factor bounded so palette alpha still scales the add pass.
+					render(Blend, blendSourceFactor, BlendOne, Clamp(al*Pow(v3, 3), 0, 1))
 				} else {
 					render(Blend, blendSourceFactor, BlendOne, src)
 				}
@@ -960,22 +1168,21 @@ func renderWithBlending(
 }
 
 func FillRect(rect [4]int32, color uint32, alpha [2]int32, fx *PalFX) {
+	FillRectTrans(rect, color, TT_add, alpha, fx)
+}
+
+// FillRectTrans fills a rectangle with the given blending, as in stage backgrounds.
+func FillRectTrans(rect [4]int32, color uint32, trans TransType, alpha [2]int32, fx *PalFX) {
+	if trans == TT_default {
+		trans = TT_add
+	}
 	r := float32(color>>16&0xff) / 255
 	g := float32(color>>8&0xff) / 255
 	b := float32(color&0xff) / 255
 
 	// PalFX setup
-	spfx := ShaderPalFX{
-		neg:      false,
-		add:      [3]float32{0, 0, 0},
-		mult:     [3]float32{1, 1, 1},
-		gray:     0,
-		hue:      0,
-		invblend: 0,
-	}
-
 	// This call is safe even if fx is nil. Defaults to just AllPalFX
-	spfx = fx.getFinalPalFx(TT_add, alpha)
+	spfx := fx.getFinalPalFx(trans, alpha)
 
 	modelview := mgl.Translate3D(0, float32(sys.scrrect[3]), 0)
 	proj := gfx.OrthographicProjectionMatrix(0, float32(sys.scrrect[2]), 0, float32(sys.scrrect[3]), -65535, 65535)
@@ -987,12 +1194,13 @@ func FillRect(rect [4]int32, color uint32, alpha [2]int32, fx *PalFX) {
 	gfx.SetSpritePipeline("")
 
 	// Set geometry
-	gfx.SetVertexData(
+	rectDrawScratch = [16]float32{
 		x2, y2, 1, 1,
 		x2, y1, 1, 0,
 		x1, y2, 0, 1,
 		x1, y1, 0, 0,
-	)
+	}
+	gfx.SetQuadVertices(&rectDrawScratch)
 
 	// Static uniforms
 	gfx.SetUniformMatrix("modelview", modelview[:])
@@ -1020,7 +1228,7 @@ func FillRect(rect [4]int32, color uint32, alpha [2]int32, fx *PalFX) {
 		gfx.RenderQuad()
 	}
 
-	renderWithBlending(renderPass, TT_add, alpha, true, &spfx, true)
+	renderWithBlending(renderPass, trans, alpha, false, &spfx, true)
 }
 
 type TextureAtlas struct {
@@ -1044,7 +1252,7 @@ func (ta *TextureAtlas) bytesPerPixel() int32 {
 func (ta *TextureAtlas) clearTexture(tex Texture, width, height int32) {
 	bpp := ta.bytesPerPixel()
 	clearData := make([]byte, int(width*height*bpp))
-	tex.SetSubData(clearData, 0, 0, width, height, width*bpp)
+	tex.SetSubData2(clearData, 0, 0, width, height, width*bpp)
 }
 
 func extrudeAtlasImage(data []byte, width, height, stride, bpp int32) ([]byte, int32, bool) {
@@ -1152,7 +1360,7 @@ func (ta *TextureAtlas) AddImage(width, height, stride int32, data []byte) ([4]f
 	if !ok {
 		return [4]float32{}, false
 	}
-	ta.texture.SetSubData(paddedData, x-1, y-1, width+2, height+2, paddedStride)
+	ta.texture.SetSubData2(paddedData, x-1, y-1, width+2, height+2, paddedStride)
 
 	return [4]float32{
 		float32(x) / float32(ta.width),
@@ -1221,7 +1429,7 @@ func (ta *TextureAtlas) FindPlaceToInsert(width, height int32) (int32, int32, bo
 }
 
 func (ta *TextureAtlas) Resize(width, height int32) {
-	if width < ta.width || height < ta.height {
+	if width < ta.width {
 		panic("New width cannot be smaller than old width")
 	}
 	if height < ta.height {
@@ -1260,4 +1468,43 @@ func NewShaderPalFX() ShaderPalFX {
 		hue:      0,
 		invblend: 0,
 	}
+}
+
+func CreatePalTexture(size uint32) {
+	sys.palTexture.size = size
+	sys.palTexture.textures = make([]*Texture, 0, 1)
+	sys.palTexture.emptySlot = list.New()
+	AddPalTexture()
+}
+
+func AddPalTexture() {
+	index := uint32(len(sys.palTexture.textures))
+	for i := uint32(0); i < sys.palTexture.size; i++ {
+		sys.palTexture.emptySlot.PushBack([2]uint32{index, uint32(i)})
+	}
+	t, _ := gfx.newTexture(int32(sys.palTexture.size), int32(sys.palTexture.size), 32, false)
+	t.SetData(nil)
+	sys.palTexture.textures = append(sys.palTexture.textures, &t)
+}
+
+func NewPaletteTexture() Texture {
+	if sys.palTexture.emptySlot.Len() == 0 {
+		AddPalTexture()
+	}
+	slot := sys.palTexture.emptySlot.Remove(sys.palTexture.emptySlot.Front()).([2]uint32)
+	offset := [2]int32{int32((slot[1] / sys.palTexture.size) * 256), int32(slot[1] % sys.palTexture.size)}
+	uvst := [4]float32{
+		(float32(offset[0]) + 0.5) / float32(sys.palTexture.size),
+		(float32(offset[1]) + 0.5) / float32(sys.palTexture.size),
+		float32(256) / float32(sys.palTexture.size),
+		float32(1) / float32(sys.palTexture.size),
+	}
+	t := gfx.newPaletteTexture(slot, offset, uvst)
+	return t
+}
+
+type SpriteTextureAtlas struct {
+	textureSize int32
+	textures8   []*TextureAtlas
+	textures32  []*TextureAtlas
 }

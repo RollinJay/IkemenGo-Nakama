@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -93,82 +94,6 @@ func toUserData(l *lua.LState, argi int) interface{} {
 }
 func userDataError(l *lua.LState, argi int, udtype interface{}) {
 	l.RaiseError("\nArgument %v is not a userdata of type: %T\n", argi, udtype)
-}
-
-// Converts a hitflag to a LString.
-// Previously in hitdefvar, moved here
-// for reusability in gethitvar
-func flagLStr(flag int32) lua.LString {
-	str := ""
-	if flag&int32(HF_H) != 0 {
-		str += "H"
-	}
-	if flag&int32(HF_L) != 0 {
-		str += "L"
-	}
-	if flag&int32(HF_A) != 0 {
-		str += "A"
-	}
-	if flag&int32(HF_F) != 0 {
-		str += "F"
-	}
-	if flag&int32(HF_D) != 0 {
-		str += "D"
-	}
-	if flag&int32(HF_P) != 0 {
-		str += "P"
-	}
-	if flag&int32(HF_MNS) != 0 {
-		str += "-"
-	}
-	if flag&int32(HF_PLS) != 0 {
-		str += "+"
-	}
-	return lua.LString(str)
-}
-
-// Converts an attr (statetype, attacktype) to a LString.
-// Used in gethitvar("attr.flag").
-func attrLStr(attr int32) lua.LString {
-	str := ""
-	if attr == 0 {
-		return lua.LString(str)
-	} // no attr? return an empty string
-	st := attr & int32(ST_MASK)  // state type
-	at := attr & ^int32(ST_MASK) // attack type (everything that's not statetype)
-	// flag1
-	if st&int32(ST_S) != 0 {
-		str += "S"
-	}
-	if st&int32(ST_C) != 0 {
-		str += "C"
-	}
-	if st&int32(ST_A) != 0 {
-		str += "A"
-	}
-	str += ", "
-	// first char
-	if at&int32(AT_AN) != 0 {
-		str += "N"
-	}
-	if at&int32(AT_AS) != 0 {
-		str += "S"
-	}
-	if at&int32(AT_AH) != 0 {
-		str += "H"
-	}
-	// second char
-	if at&int32(AT_AA) != 0 {
-		str += "A"
-	}
-	if at&int32(AT_AT) != 0 {
-		str += "T"
-	}
-	if at&int32(AT_AP) != 0 {
-		str += "P"
-	}
-
-	return lua.LString(str)
 }
 
 // Helper: flatten anonymous embedded structs into a parent table while
@@ -962,6 +887,104 @@ func luaKeyToString(k lua.LValue) string {
 	}
 }
 
+func luaRandom(l *lua.LState, next func() int32) int {
+	r := float64(next())
+	if nilArg(l, 1) {
+		l.Push(lua.LNumber(r / float64(IMax)))
+		return 1
+	}
+	min, max := 1.0, math.Floor(float64(l.CheckNumber(1)))
+	if !nilArg(l, 2) {
+		min, max = max, math.Floor(float64(l.CheckNumber(2)))
+	}
+	if max < min {
+		l.RaiseError("bad argument #2 to 'random' (interval is empty)")
+	}
+	n := max - min + 1
+	if math.IsNaN(n) || math.IsInf(n, 0) || n <= 0 || n > float64(IMax) {
+		l.RaiseError("bad argument to 'random' (interval is too large)")
+	}
+	l.Push(lua.LNumber(min + math.Floor(r/(math.Floor(float64(IMax)/n)+1))))
+	return 1
+}
+
+// Compiles and executes a temporary ZSS state controller block
+// against the specified character.
+func runStateController(target *Char, src string) error {
+	if target == nil {
+		return fmt.Errorf("runStateController: target is nil")
+	}
+
+	pn := target.playerNo
+	if pn < 0 || pn >= len(sys.cgi) {
+		return fmt.Errorf("runStateController: invalid player number: %d", pn)
+	}
+
+	// Use the target player's existing command list
+	root := sys.getCharRoot(pn)
+	if root == nil {
+		return fmt.Errorf("runStateController: player %d does not exist", pn)
+	}
+	if root.cmd == nil || pn >= len(root.cmd) {
+		return fmt.Errorf("runStateController: command list is unavailable for player %d", pn)
+	}
+
+	// This function is intended to be called from the system Lua debug input
+	// outside normal bytecode execution
+	if len(sys.bcVarStack) != 0 || len(sys.bcStack) != 0 {
+		return fmt.Errorf("runStateController: bytecode is already executing")
+	}
+
+	cc := newCharCompiler()
+	cc.playerNo = pn
+	cc.targetGi = &sys.cgi[pn]
+	cc.cmdl = &root.cmd[pn]
+
+	states := make(map[int32]*StateBytecode, 1)
+
+	const stateNo int32 = 0
+	zss := fmt.Sprintf(
+		"[Statedef %d]\n"+
+			"ignorehitpause {\n"+
+			"%s\n"+
+			"}\n",
+		stateNo,
+		src,
+	)
+
+	if err := cc.stateCompileZSS(
+		states,
+		"<debug>",
+		zss,
+		sys.cgi[pn].constants,
+	); err != nil {
+		return fmt.Errorf("runStateController: compile error: %w", err)
+	}
+
+	sb, ok := states[stateNo]
+	if !ok {
+		return fmt.Errorf("runStateController: temporary state was not generated")
+	}
+
+	// StateBytecode.run changes these globals while evaluating the
+	// controller. Restore them after the debug command finishes.
+	oldWorkingState := sys.workingState
+	oldWorkingChar := sys.workingChar
+	oldBCVar := sys.bcVar
+	oldSctrlIndex := target.currentSctrlIndex
+
+	defer func() {
+		sys.workingState = oldWorkingState
+		sys.workingChar = oldWorkingChar
+		sys.bcVar = oldBCVar
+		target.currentSctrlIndex = oldSctrlIndex
+	}()
+
+	sb.run(target)
+
+	return nil
+}
+
 // -------------------------------------------------------------------------------------------------
 // Register external functions to be called from Lua scripts
 func systemScriptInit(l *lua.LState) {
@@ -971,6 +994,12 @@ func systemScriptInit(l *lua.LState) {
 	nakamaScriptInit(l)
 	matchReplayScriptInit(l)
 	localReplayScriptInit(l)
+	mathLib := l.GetGlobal("math")
+	l.SetField(mathLib, "random", l.NewFunction(func(l *lua.LState) int { return luaRandom(l, Random) }))
+	// The engine owns the synchronized seed; scripts cannot reseed it.
+	l.SetField(mathLib, "randomseed", l.NewFunction(func(l *lua.LState) int { return 0 }))
+	// Never saved or synchronized, so only for looks that can't change shared state.
+	localRand := rand.New(rand.NewSource(time.Now().UnixNano()))
 	luaRegister(l, "addChar", func(l *lua.LState) int {
 		/*Add a character definition to the select screen.
 		@function addChar
@@ -1070,7 +1099,9 @@ func systemScriptInit(l *lua.LState) {
 		return 0
 	})
 	luaRegister(l, "animCopy", func(l *lua.LState) int {
-		/*Create a copy of an animation.
+		/*Create a copy with independent animation state, palette mapping and PalFX.
+		  Image textures and palette colors remain shared; use `animPaletteCopy` to
+		  make palette colors independent as well.
 		@function animCopy
 		@tparam Anim anim Animation userdata.
 		@treturn Anim|nil copy New `Anim` userdata containing a copy of `anim`,
@@ -1120,9 +1151,16 @@ func systemScriptInit(l *lua.LState) {
 		if !nilArg(l, 2) {
 			layer = int16(numArg(l, 2))
 		}
+		if a.anim == nil {
+			return 0
+		}
 		aSnap := *a
+		transType, srcAlpha, dstAlpha := a.anim.transType, a.anim.srcAlpha, a.anim.dstAlpha
 		layerLocal := layer
 		sys.luaQueueLayerDraw(int(layerLocal), func() {
+			// Keep frame updates, but preserve the alpha selected when the draw was queued.
+			aSnap.anim = aSnap.anim.ShallowCopy()
+			aSnap.anim.transType, aSnap.anim.srcAlpha, aSnap.anim.dstAlpha = transType, srcAlpha, dstAlpha
 			(&aSnap).Draw(layerLocal)
 		})
 		return 0
@@ -1280,7 +1318,7 @@ func systemScriptInit(l *lua.LState) {
 		@treturn Anim anim Newly created animation userdata.*/
 		s, ok := toUserData(l, 1).(*Sff)
 		if !ok {
-			s = newSff()
+			s = newSff(SffTypeOther)
 			//userDataError(l, 1, s)
 		}
 		var anim *Anim
@@ -1316,6 +1354,28 @@ func systemScriptInit(l *lua.LState) {
 			l.RaiseError("\nanimNew: expected string or *Animation, got %v\n", l.Get(2).Type())
 		}
 		l.Push(newUserData(l, anim))
+		return 1
+	})
+	luaRegister(l, "animPaletteCopy", func(l *lua.LState) int {
+		/*Make an animation's palette data independent from other instances.
+		@function animPaletteCopy
+		@tparam Anim anim Animation userdata. Image textures remain shared.
+		@treturn Anim|nil anim The same userdata, or `nil` if no valid animation exists.
+		  Copies palette colors, mappings and caches without changing playback or PalFX.
+		  Subsequent `animPaletteSet` calls affect only this instance's palette data.*/
+		if nilArg(l, 1) {
+			l.Push(lua.LNil)
+			return 1
+		}
+		a, ok := toUserData(l, 1).(*Anim)
+		if !ok {
+			userDataError(l, 1, a)
+		}
+		if !a.PaletteCopy() {
+			l.Push(lua.LNil)
+		} else {
+			l.Push(l.Get(1))
+		}
 		return 1
 	})
 	luaRegister(l, "animPaletteGet", func(*lua.LState) int {
@@ -1377,7 +1437,6 @@ func systemScriptInit(l *lua.LState) {
 		/*Prepare an animation so that each character can apply its own palette.
 		@function animPrepare
 		@tparam Anim anim Source animation userdata.
-		@tparam int32 charRef 0-based character index in the select list.
 		@treturn Anim preparedAnim Either a copy with adjusted palette data (when palette
 		  usage is enabled) or the original `anim` when palette handling is disabled.*/
 		a, ok := toUserData(l, 1).(*Anim)
@@ -1387,20 +1446,6 @@ func systemScriptInit(l *lua.LState) {
 		}
 		if sys.usePalette {
 			copyAnim := a.Copy()
-			char := sys.sel.GetChar(int(numArg(l, 2)))
-			for _, c := range copyAnim.anim.frames {
-				if c.Group < 0 || c.Number < 0 {
-					continue
-				}
-				spr, ok := copyAnim.anim.sff.sprites[[2]uint16{uint16(c.Group), uint16(c.Number)}]
-				if !ok || spr == nil {
-					continue
-				}
-				// Remove base palette
-				if len(char.pal) > 0 && spr.palidx == 0 {
-					spr.Pal = nil
-				}
-			}
 			l.Push(newUserData(l, copyAnim))
 		} else {
 			l.Push(newUserData(l, a))
@@ -1473,11 +1518,12 @@ func systemScriptInit(l *lua.LState) {
 		return 0
 	})
 	luaRegister(l, "animSetAlpha", func(*lua.LState) int {
-		/*Set alpha blending for an animation.
+		/*Set alpha blending for an animation. A source factor of 0 or more uses additive
+		blending; -1 restores the animation's own blending.
 		@function animSetAlpha
 		@tparam Anim anim Animation userdata.
-		@tparam int16 src Source alpha factor (0–256, engine-specific).
-		@tparam int16 dst Destination alpha factor (0–256, engine-specific).*/
+		@tparam int16 src Source alpha factor (0–256), or -1 to use the animation's blending.
+		@tparam int16 dst Destination alpha factor (0–256), ignored when src is -1.*/
 		a, ok := toUserData(l, 1).(*Anim)
 		if !ok {
 			userDataError(l, 1, a)
@@ -1887,6 +1933,26 @@ func systemScriptInit(l *lua.LState) {
 		a.SetTile(tx, ty, sx, sy)
 		return 0
 	})
+	luaRegister(l, "animSetTrans", func(*lua.LState) int {
+		/*Set blending for an animation, as with trans and alpha in stage backgrounds.
+		@function animSetTrans
+		@tparam Anim anim Animation userdata.
+		@tparam string trans `default`, `none`, `add`, `add1`, `addalpha`, `sub` or `subadd`.
+		@tparam[opt] int32 src Source alpha factor (0–255). Omit to use the trans default.
+		@tparam[opt] int32 dst Destination alpha factor (0–255).*/
+		a, ok := toUserData(l, 1).(*Anim)
+		if !ok {
+			userDataError(l, 1, a)
+		}
+		var alpha []int32
+		if !nilArg(l, 3) {
+			alpha = []int32{int32(numArg(l, 3)), int32(numArg(l, 4))}
+		}
+		if a.anim != nil {
+			a.SetTrans(transBlend(strArg(l, 2), alpha))
+		}
+		return 0
+	})
 	luaRegister(l, "animSetVelocity", func(*lua.LState) int {
 		/*Set the base velocity of an animation.
 		@function animSetVelocity
@@ -2211,12 +2277,12 @@ func systemScriptInit(l *lua.LState) {
 		c := sys.chars[sys.debugWC.playerNo]
 		if st == -1 {
 			for _, ch := range c {
-				ch.setSCF(SCF_disabled)
+				ch.setSCF(SCF_disabled, true)
 			}
 		} else if c[0].selfStatenoExist(BytecodeInt(st)) == BytecodeBool(true) {
 			for _, ch := range c {
 				if ch.scf(SCF_disabled) {
-					ch.unsetSCF(SCF_disabled)
+					ch.setSCF(SCF_disabled, false)
 				}
 			}
 			c[0].changeState(st, -1, -1, "")
@@ -2940,10 +3006,18 @@ func systemScriptInit(l *lua.LState) {
 		// Synchronize timing to prevent speed fluctuations when changing FPS (entering matches)
 		sys.resetFrameTime()
 
-		load := func() error {
+		load := func(allowRetry bool) error {
 			sys.loader.runTread()
 			for sys.loader.state != LS_Complete {
 				if sys.loader.state == LS_Error {
+					// Let users fix the file and retry without exiting Ikemen
+					// Not in netplay (would desync) or for TurnsLoading background preloads
+					if allowRetry && sys.cfg.Debug.RetryLoadOnError && sys.loader.err != nil && !sys.netplay() && !sys.turnsPreloadActive() &&
+						ShowRetryDialog(retryLoadMessage(sys.loader.err)) {
+						sys.loader.retryAfterError()
+						sys.loader.runTread()
+						continue
+					}
 					return sys.loader.err
 				} else if sys.loader.state == LS_Cancel {
 					return nil
@@ -2981,7 +3055,7 @@ func systemScriptInit(l *lua.LState) {
 				}
 
 				// Load characters and stage
-				if err := load(); err != nil {
+				if err := load(true); err != nil {
 					return -1, err
 				}
 				if sys.loader.state == LS_Cancel {
@@ -3021,17 +3095,16 @@ func systemScriptInit(l *lua.LState) {
 
 				for i, c := range sys.chars {
 					if len(c) > 0 {
-						// Skip BG-loaded Turns mode chars so CharList bookkeeping doesn't try to replace nonexistent entries on later rounds.
-						if sys.cfg.Config.TurnsLoading && sys.tmode[i&1] == TM_Turns && c[0].teamside == -1 {
-							continue
-						}
 						// Add or replace in charList
 						if sys.roundNo == 1 {
 							sys.charList.add(c[0])
 						} else if c[0].roundsExisted() == 0 {
 							// BG-loaded Turns switching updates CharList inside activateNextTurnsFighters().
-							if !(sys.cfg.Config.TurnsLoading && sys.tmode[i&1] == TM_Turns) && !sys.charList.replace(c[0], i, 0) {
-								panic(fmt.Errorf("failed to replace player: %v", i))
+							if !(sys.cfg.Config.TurnsLoading && sys.tmode[i&1] == TM_Turns) {
+								// Wipe the outgoing root and its helpers from CharList, then add the incoming root
+								// This is safer than the old replace()
+								sys.removePlayerFromCharList(i)
+								sys.charList.add(c[0])
 							}
 						}
 
@@ -3051,6 +3124,9 @@ func systemScriptInit(l *lua.LState) {
 						}
 					}
 				}
+
+				// Verify CharList still matches sys.chars after the previous block
+				sys.charList.audit()
 
 				// If first round
 				if sys.roundNo == 1 {
@@ -3170,7 +3246,7 @@ func systemScriptInit(l *lua.LState) {
 					// The next Turns member is loaded in the background during the previous round.
 					// If the round ended before that load finished, wait here before promotion.
 					if sys.loader.state != LS_NotYet && sys.loader.state != LS_Complete {
-						if err := load(); err != nil {
+						if err := load(false); err != nil { // Never retry loading
 							l.RaiseError(err.Error())
 						}
 					}
@@ -3192,7 +3268,6 @@ func systemScriptInit(l *lua.LState) {
 					sys.statsLog.finalizeMatch()
 				}
 				// Cleanup
-				sys.restorePauseVolume()
 				sys.timerStart = 0
 				sys.timerRounds = []int32{}
 				sys.scoreStart = [2]float32{}
@@ -3208,6 +3283,7 @@ func systemScriptInit(l *lua.LState) {
 					sys.bgm.Stop()
 					sys.playBgmFlg = false
 				}
+				sys.matchStoryboards.destroy()
 				sys.clearMatchSound()
 				sys.allPalFX = newPalFX()
 				sys.bgPalFX = newPalFX()
@@ -3375,14 +3451,12 @@ func systemScriptInit(l *lua.LState) {
 		tbl.RawSetString("pal", subt)
 		// default palettes
 		subt = l.NewTable()
-		pals := make(map[int32]bool)
 		var n int
 		if len(c.pal_defaults) > 0 {
 			for _, v := range c.pal_defaults {
 				if v > 0 && int(v) <= len(c.pal) {
 					n++
 					subt.RawSetInt(n, lua.LNumber(v))
-					pals[v] = true
 				}
 			}
 		}
@@ -4163,15 +4237,14 @@ func systemScriptInit(l *lua.LState) {
 			}
 		}
 		if sff == nil {
-			sff = newSff()
+			sff = newSff(SffTypeOther)
 		}
 		raw, err := LoadText(def)
 		if err != nil {
 			l.RaiseError("\nCan't load anim table %v: %v\n", def, err.Error())
 			return 0
 		}
-		lines, i := SplitAndTrim(NormalizeNewlines(raw), "\n"), 0
-		at := ReadAnimationTable(def, sff, &sff.palList, lines, &i, true)
+		at := ReadAnimationTable(def, sff, &sff.palList, NormalizeNewlines(raw), true)
 		// Build Lua table with NUMERIC keys (so it prints like [110] => userdata ...)
 		tbl := l.NewTable()
 		// Deterministic iteration order
@@ -4937,18 +5010,34 @@ func systemScriptInit(l *lua.LState) {
 		l.Push(lua.LString(content))
 		return 1
 	})
+	luaRegister(l, "localRandom", func(l *lua.LState) int {
+		/*Return a random number that only this game instance sees, like `math.random`.
+		  It isn't synchronized in netplay or replays, so use it only for looks.
+		@function localRandom
+		@tparam[opt] number min Lowest value, or the highest when it's the only argument.
+		@tparam[opt] number max Highest value.
+		@treturn number value A number in [0, 1) without arguments, else an integer in [1, min] or [min, max].*/
+		return luaRandom(l, func() int32 { return localRand.Int31n(IMax-1) + 1 })
+	})
 	luaRegister(l, "mapSet", func(*lua.LState) int {
 		/*[redirectable] Set the character's map value.
 		@function mapSet
 		@tparam string name Map name to modify.
-		@tparam float32 value Map value to set.
+		@tparam number|string value Map value to set.
 		@tparam[opt] string mapType Map operation type. `"add"` adds to the existing value,
 		  anything else replaces it.*/
 		var scType int32
 		if !nilArg(l, 3) && strArg(l, 3) == "add" {
 			scType = 1
 		}
-		sys.debugWC.mapSet(strArg(l, 1), float32(numArg(l, 2)), scType)
+		// Typed from the Lua value: numbers stay numeric, anything else is text
+		var mv TypedValue
+		if num, ok := l.Get(2).(lua.LNumber); ok {
+			mv = TypedValue{Type: VT_Float, Num: float64(num)}
+		} else {
+			mv = TypedValue{Type: VT_String, Str: strArg(l, 2)}
+		}
+		sys.debugWC.mapSetValue(strArg(l, 1), mv, scType)
 		return 0
 	})
 	luaRegister(l, "motifIsInherited", func(l *lua.LState) int {
@@ -5342,19 +5431,126 @@ func systemScriptInit(l *lua.LState) {
 			}
 			for j := range sys.chars[pn-1][0].cmd {
 				sys.chars[pn-1][0].cmd[j].BufReset()
-				sys.chars[pn-1][0].setASF(ASF_nohardcodedkeys)
+				sys.chars[pn-1][0].setASF(ASF_nohardcodedkeys, true)
 			}
 		} else {
 			for _, p := range sys.chars {
 				if len(p) > 0 {
 					for j := range p[0].cmd {
 						p[0].cmd[j].BufReset()
-						p[0].setASF(ASF_nohardcodedkeys)
+						p[0].setASF(ASF_nohardcodedkeys, true)
 					}
 				}
 			}
 		}
 		return 0
+	})
+	luaRegister(l, "playerVariables", func(l *lua.LState) int {
+		/*Return the variables currently stored by a character.
+		@function playerVariables
+		@tparam int32 playerID ID of an existing player or helper (as returned by `id()`).
+		@treturn table|nil variables Table containing `cnsvar`, `cnsfvar`, `sysvar`,
+		`sysfvar`, and `map`. Each field is an array of `{key = ..., value = ...}`
+		records. Numeric variable keys are integers; map keys are strings.
+		Returns `nil` for an invalid or nonexistent player ID.*/
+		idValue := numArg(l, 1)
+		if math.IsNaN(idValue) || math.IsInf(idValue, 0) || idValue < 0 ||
+			idValue >= 2147483648 || math.Trunc(idValue) != idValue {
+			l.Push(lua.LNil)
+			return 1
+		}
+		c := sys.playerID(int32(idValue))
+		if c == nil {
+			l.Push(lua.LNil)
+			return 1
+		}
+
+		newRow := func(key, value lua.LValue) *lua.LTable {
+			row := l.NewTable()
+			row.RawSetString("key", key)
+			row.RawSetString("value", value)
+			return row
+		}
+		toNumber := func(n float64) lua.LValue {
+			if math.IsNaN(n) {
+				return lua.LString("(NaN)")
+			}
+			if math.IsInf(n, 1) {
+				return lua.LString("(Inf)")
+			}
+			if math.IsInf(n, -1) {
+				return lua.LString("(-Inf)")
+			}
+			return lua.LNumber(n)
+		}
+		toRows := func(keys []int32, valueAt func(int32) lua.LValue) *lua.LTable {
+			sort.Slice(keys, func(i, j int) bool { return keys[i] < keys[j] })
+			rows := l.NewTable()
+			for _, key := range keys {
+				rows.Append(newRow(lua.LNumber(key), valueAt(key)))
+			}
+			return rows
+		}
+		out := l.NewTable()
+
+		intKeys := make([]int32, 0, len(c.cnsvar))
+		for key := range c.cnsvar {
+			intKeys = append(intKeys, key)
+		}
+		out.RawSetString("cnsvar", toRows(intKeys, func(key int32) lua.LValue {
+			return lua.LNumber(c.cnsvar[key])
+		}))
+
+		floatKeys := make([]int32, 0, len(c.cnsfvar))
+		for key := range c.cnsfvar {
+			floatKeys = append(floatKeys, key)
+		}
+		out.RawSetString("cnsfvar", toRows(floatKeys, func(key int32) lua.LValue {
+			return toNumber(float64(c.cnsfvar[key]))
+		}))
+
+		sysIntKeys := make([]int32, 0, len(c.cnssysvar))
+		for key := range c.cnssysvar {
+			sysIntKeys = append(sysIntKeys, key)
+		}
+		out.RawSetString("sysvar", toRows(sysIntKeys, func(key int32) lua.LValue {
+			return lua.LNumber(c.cnssysvar[key])
+		}))
+
+		sysFloatKeys := make([]int32, 0, len(c.cnssysfvar))
+		for key := range c.cnssysfvar {
+			sysFloatKeys = append(sysFloatKeys, key)
+		}
+		out.RawSetString("sysfvar", toRows(sysFloatKeys, func(key int32) lua.LValue {
+			return toNumber(float64(c.cnssysfvar[key]))
+		}))
+
+		mapKeys := make([]string, 0, len(c.mapArray))
+		for key := range c.mapArray {
+			mapKeys = append(mapKeys, key)
+		}
+		sort.Strings(mapKeys)
+		mapRows := l.NewTable()
+		for _, key := range mapKeys {
+			entry := c.mapArray[key]
+			var value lua.LValue
+			switch entry.Type {
+			case VT_String:
+				value = lua.LString(entry.Str)
+			case VT_Bool:
+				value = lua.LBool(entry.Num != 0)
+			case VT_None:
+				value = lua.LNumber(0)
+			case VT_Undefined:
+				value = lua.LString("(Undefined)")
+			default:
+				value = toNumber(entry.Num)
+			}
+			mapRows.Append(newRow(lua.LString(key), value))
+		}
+		out.RawSetString("map", mapRows)
+		l.Push(out)
+		return 1
 	})
 	luaRegister(l, "playSnd", func(l *lua.LState) int {
 		/*[redirectable] Play the character's sound.
@@ -5367,7 +5563,7 @@ func systemScriptInit(l *lua.LState) {
 		@tparam[opt=false] boolean lowpriority If `true`, sound can be overridden by higher-priority sounds.
 		@tparam[opt=1.0] float32 freqmul Frequency multiplier (pitch).
 		@tparam[opt=false] boolean loop If `true`, sound loops (ignored if `loopcount` is non-zero).
-		@tparam[opt=0.0] float32 pan Stereo panning (engine-specific range, usually -1.0 to 1.0).
+		@tparam[opt=0.0] float32 pan Offset from the character; negative is backward, positive is forward.
 		@tparam[opt=0] int32 priority Priority level (higher plays over lower).
 		@tparam[opt=0] int loopstart Loop start position.
 		@tparam[opt=0] int loopend Loop end position.
@@ -5377,7 +5573,7 @@ func systemScriptInit(l *lua.LState) {
 		@tparam[opt=false] boolean stopOnChangeState If `true`, stop this sound when the character changes state.*/
 
 		params := newPlaySndParams()
-		params.xPos = &sys.debugWC.pos[0]
+		params.sourceID = sys.debugWC.id
 		params.localScale = sys.debugWC.localscl
 
 		var lp bool
@@ -5651,6 +5847,25 @@ func systemScriptInit(l *lua.LState) {
 		r.SetLocalcoord(float32(numArg(l, 2)), float32(numArg(l, 3)))
 		return 0
 	})
+	luaRegister(l, "rectSetTrans", func(*lua.LState) int {
+		/*Set blending for a rectangle, as with trans and alpha in stage backgrounds.
+		`default` keeps the regular alpha blending.
+		@function rectSetTrans
+		@tparam Rect rect Rectangle userdata.
+		@tparam string trans `default`, `none`, `add`, `add1`, `addalpha`, `sub` or `subadd`.
+		@tparam[opt] int32 src Source alpha factor (0–255). Omit to keep the current alpha.
+		@tparam[opt] int32 dst Destination alpha factor (0–255).*/
+		r, ok := toUserData(l, 1).(*Rect)
+		if !ok {
+			userDataError(l, 1, r)
+		}
+		tt, _ := transBlend(strArg(l, 2), nil)
+		r.SetTrans(tt)
+		if !nilArg(l, 3) {
+			r.SetAlpha([2]int32{int32(numArg(l, 3)), int32(numArg(l, 4))})
+		}
+		return 0
+	})
 	luaRegister(l, "rectSetWindow", func(*lua.LState) int {
 		/*Set the rectangle's clipping window.
 		@function rectSetWindow
@@ -5732,7 +5947,7 @@ func systemScriptInit(l *lua.LState) {
 	luaRegister(l, "removeDizzy", func(*lua.LState) int {
 		/*[redirectable] Clear the character's dizzy state.
 		@function removeDizzy*/
-		sys.debugWC.unsetSCF(SCF_dizzy)
+		sys.debugWC.setSCF(SCF_dizzy, false)
 		return 0
 	})
 	luaRegister(l, "replayRecord", func(*lua.LState) int {
@@ -5896,6 +6111,37 @@ func systemScriptInit(l *lua.LState) {
 		}
 		l.Push(lua.LBool(sys.motif.hi.active))
 		return 1
+	})
+	luaRegister(l, "runStateController", func(l *lua.LState) int {
+		/*Compile and immediately execute ZSS state controllers for a character.
+		@function runStateController
+		@tparam int32 playerID ID of an existing player or helper (as returned by `id()`).
+		@tparam string source ZSS state controller source (for example,
+		`PosSet{x: 100; y: 0}`).
+		@treturn boolean success `true` when compilation and execution completed,
+		`false` if the player ID is invalid or compilation fails.
+		@treturn string|nil err Error message on failure, or `nil` on success.*/
+		id := int32(numArg(l, 1))
+		src := strArg(l, 2)
+
+		target := sys.playerID(id)
+		if target == nil {
+			l.Push(lua.LBool(false))
+			l.Push(lua.LString(fmt.Sprintf(
+				"runStateController: player ID %d does not exist", id,
+			)))
+			return 2
+		}
+
+		if err := runStateController(target, src); err != nil {
+			l.Push(lua.LBool(false))
+			l.Push(lua.LString(err.Error()))
+			return 2
+		}
+
+		l.Push(lua.LBool(true))
+		l.Push(lua.LNil)
+		return 2
 	})
 	luaRegister(l, "runStoryboard", func(*lua.LState) int {
 		/*Run the currently loaded storyboard for one frame.
@@ -6665,14 +6911,14 @@ func systemScriptInit(l *lua.LState) {
 			if l.GetTop() >= 2 {
 				isActPal = boolArg(l, 2)
 			}
-			sff, err := loadSff(strArg(l, 1), false, true, isActPal)
+			sff, err := loadSff(strArg(l, 1), SffTypeOther, true, isActPal)
 			if err != nil {
 				l.RaiseError("\nCan't load %v: %v\n", strArg(l, 1), err.Error())
 			}
 			sys.runMainThreadTask()
 			l.Push(newUserData(l, sff))
 		} else {
-			l.Push(newUserData(l, newSff()))
+			l.Push(newUserData(l, newSff(SffTypeOther)))
 		}
 		return 1
 	})
@@ -6709,7 +6955,7 @@ func systemScriptInit(l *lua.LState) {
 		@tparam int32 group Sound group number.
 		@tparam int32 number Sound number within the group.
 		@tparam[opt=100] int32 volumescale Volume scale (percent).
-		@tparam[opt=0.0] float32 pan Stereo panning (engine-specific range).
+		@tparam[opt=0.0] float32 pan Offset from screen center; negative is left, positive is right.
 		@tparam[opt=0] int loopstart Loop start position.
 		@tparam[opt=0] int loopend Loop end position.
 		@tparam[opt=0] int startposition Start position.
@@ -6789,7 +7035,7 @@ func systemScriptInit(l *lua.LState) {
 	luaRegister(l, "stopSnd", func(l *lua.LState) int {
 		/*[redirectable] Stop all character's sounds.
 		@function stopSnd*/
-		sys.charSoundChannels[sys.debugWC.playerNo].SetSize(0) // TODO: Why does this use the hard reset?
+		sys.charSoundChannels[sys.debugWC.playerNo].StopAll()
 		return 0
 	})
 	luaRegister(l, "synchronize", func(*lua.LState) int {
@@ -7217,15 +7463,39 @@ func systemScriptInit(l *lua.LState) {
 		return 0
 	})
 	luaRegister(l, "textImgSetTextWrap", func(*lua.LState) int {
-		/*Enable or disable word wrapping for a text sprite.
+		/*Set text wrapping for a text sprite.
 		@function textImgSetTextWrap
 		@tparam TextSprite ts Text sprite userdata.
-		@tparam boolean wrap If `true`, enables text wrapping.*/
+		@tparam boolean|string|number wrap `true`/`false`, or a textwrap value such as `w`, `c` or `n`.*/
 		ts, ok := toUserData(l, 1).(*TextSprite)
 		if !ok {
 			userDataError(l, 1, ts)
 		}
-		ts.textWrap = boolArg(l, 2)
+		switch v := l.Get(2).(type) {
+		case lua.LString, lua.LNumber:
+			ts.SetTextWrap(v.String())
+		default:
+			ts.textWrap, ts.wrapChars = boolArg(l, 2), false
+		}
+		return 0
+	})
+	luaRegister(l, "textImgSetTrans", func(*lua.LState) int {
+		/*Set blending for a text sprite, as with trans and alpha in stage backgrounds.
+		`default` keeps the alpha of the font color.
+		@function textImgSetTrans
+		@tparam TextSprite ts Text sprite userdata.
+		@tparam string trans `default`, `none`, `add`, `add1`, `addalpha`, `sub` or `subadd`.
+		@tparam[opt] int32 src Source alpha factor (0–255). Omit to use the trans default.
+		@tparam[opt] int32 dst Destination alpha factor (0–255).*/
+		ts, ok := toUserData(l, 1).(*TextSprite)
+		if !ok {
+			userDataError(l, 1, ts)
+		}
+		var alpha []int32
+		if !nilArg(l, 3) {
+			alpha = []int32{int32(numArg(l, 3)), int32(numArg(l, 4))}
+		}
+		ts.trans, ts.alpha = transBlend(strArg(l, 2), alpha)
 		return 0
 	})
 	luaRegister(l, "textImgSetVelocity", func(*lua.LState) int {
@@ -7308,9 +7578,6 @@ func systemScriptInit(l *lua.LState) {
 		/*Toggle display of collision boxes.
 		@function toggleClsnDisplay
 		@tparam[opt] boolean state If provided, sets collision box display on/off; otherwise toggles it.*/
-		if !sys.debugModeAllowed() {
-			return 0
-		}
 		if !nilArg(l, 1) {
 			sys.clsnDisplay = boolArg(l, 1)
 		} else {
@@ -7468,11 +7735,7 @@ func systemScriptInit(l *lua.LState) {
 			return 0
 		}
 		for _, ch := range sys.chars[pn-1] {
-			if ch.scf(SCF_disabled) {
-				ch.unsetSCF(SCF_disabled)
-			} else {
-				ch.setSCF(SCF_disabled)
-			}
+			ch.setSCF(SCF_disabled, !ch.scf(SCF_disabled))
 		}
 		return 0
 	})
@@ -7829,6 +8092,14 @@ func triggerFunctions(l *lua.LState) {
 		l.Push(lua.LNumber(sys.debugWC.animPN + 1))
 		return 1
 	})
+	luaRegister(l, "animPrefix", func(*lua.LState) int {
+		if sys.debugWC.animFfx == "" {
+			l.Push(lua.LString("s"))
+		} else {
+			l.Push(lua.LString(sys.debugWC.animFfx))
+		}
+		return 1
+	})
 	luaRegister(l, "animTime", func(*lua.LState) int {
 		l.Push(lua.LNumber(sys.debugWC.animTime()))
 		return 1
@@ -7892,6 +8163,8 @@ func triggerFunctions(l *lua.LState) {
 					}
 				case "position":
 					ln = lua.LNumber(int32(sys.bgm.streamer.Position()))
+				case "samplerate":
+					ln = lua.LNumber(float32(sys.bgm.sampleRate))
 				case "startposition":
 					ln = lua.LNumber(int32(sys.bgm.startPos))
 				case "volume":
@@ -8019,7 +8292,7 @@ func triggerFunctions(l *lua.LState) {
 	})
 	luaRegister(l, "const", func(*lua.LState) int {
 		c := sys.debugWC
-		var ln lua.LNumber
+		var ln lua.LValue
 		switch strings.ToLower(strArg(l, 1)) {
 		case "data.life":
 			ln = lua.LNumber(c.gi().data.life)
@@ -8277,7 +8550,12 @@ func triggerFunctions(l *lua.LState) {
 		case "movement.down.friction.threshold":
 			ln = lua.LNumber(c.gi().movement.down.friction_threshold)
 		default:
-			ln = lua.LNumber(c.gi().constants[strings.ToLower(strArg(l, 1))])
+			mv := c.gi().constants[strings.ToLower(strArg(l, 1))]
+			if mv.Type == VT_String {
+				ln = lua.LString(mv.Str)
+			} else {
+				ln = lua.LNumber(mv.Num)
+			}
 		}
 		l.Push(ln)
 		return 1
@@ -8419,6 +8697,12 @@ func triggerFunctions(l *lua.LState) {
 				lv = lua.LNumber(e.anim.curelemtime)
 			case "animplayerno":
 				lv = lua.LNumber(e.animPN + 1)
+			case "animprefix":
+				if e.anim_ffx == "" {
+					lv = lua.LString("s")
+				} else {
+					lv = lua.LString(e.anim_ffx)
+				}
 			case "animtime":
 				lv = lua.LNumber(e.anim.AnimTime())
 			case "spriteplayerno":
@@ -8469,6 +8753,8 @@ func triggerFunctions(l *lua.LState) {
 				lv = lua.LNumber(e.velocity[2])
 			case "xshear":
 				lv = lua.LNumber(e.xshear)
+			case "shader":
+				lv = lua.LString(e.customShader.name)
 			default:
 				l.RaiseError("\nInvalid argument: %v\n", vname)
 			}
@@ -8740,7 +9026,7 @@ func triggerFunctions(l *lua.LState) {
 		case "fall.recover":
 			lv = lua.LBool(c.ghv.fall_recover)
 		case "fall.time":
-			lv = lua.LNumber(c.fallTime)
+			lv = lua.LNumber(c.ghv.fall_time)
 		case "fall.recovertime":
 			lv = lua.LNumber(c.ghv.fall_recovertime)
 		case "fall.kill":
@@ -8762,7 +9048,7 @@ func triggerFunctions(l *lua.LState) {
 		case "fall.envshake.decay":
 			lv = lua.LNumber(c.ghv.fall_envshake_decay)
 		case "attr":
-			lv = attrLStr(c.ghv.attr)
+			lv = lua.LString(attrString(c.ghv.attr))
 		case "dizzypoints":
 			lv = lua.LNumber(c.ghv.dizzypoints)
 		case "guardpoints":
@@ -8828,13 +9114,17 @@ func triggerFunctions(l *lua.LState) {
 		case "down.recover":
 			lv = lua.LBool(c.ghv.down_recover)
 		case "guardflag":
-			lv = flagLStr(c.ghv.guardflag)
+			lv = lua.LString(flagString(c.ghv.guardflag))
 		case "keepstate":
 			lv = lua.LBool(c.ghv.keepstate)
 		case "projid":
 			lv = lua.LNumber(c.ghv.projid)
 		case "guardko":
 			lv = lua.LBool(c.ghv.guardko)
+		case "sparkx":
+			lv = lua.LNumber(c.ghv.sparkxy[0])
+		case "sparky":
+			lv = lua.LNumber(c.ghv.sparkxy[1])
 		default:
 			l.RaiseError("\nInvalid argument: %v\n", strArg(l, 1))
 		}
@@ -8966,11 +9256,7 @@ func triggerFunctions(l *lua.LState) {
 		return 1
 	})
 	luaRegister(l, "hitDefAttr", func(*lua.LState) int {
-		if sys.debugWC.ss.moveType == MT_A {
-			l.Push(attrLStr(sys.debugWC.hitdef.attr))
-		} else {
-			l.Push(lua.LString(""))
-		}
+		l.Push(lua.LString(attrString(sys.debugWC.hitdef.attr)))
 		return 1
 	})
 	luaRegister(l, "hitDefVar", func(*lua.LState) int {
@@ -8997,7 +9283,7 @@ func triggerFunctions(l *lua.LState) {
 		case "guarddamage":
 			l.Push(lua.LNumber(c.hitdef.guarddamage))
 		case "guardflag":
-			l.Push(flagLStr(c.hitdef.guardflag))
+			l.Push(lua.LString(flagString(c.hitdef.guardflag)))
 		case "guardsound.group":
 			l.Push(lua.LNumber(c.hitdef.guardsound[0]))
 		case "guardsound.number":
@@ -9005,7 +9291,7 @@ func triggerFunctions(l *lua.LState) {
 		case "hitdamage":
 			l.Push(lua.LNumber(c.hitdef.hitdamage))
 		case "hitflag":
-			l.Push(flagLStr(c.hitdef.hitflag))
+			l.Push(lua.LString(flagString(c.hitdef.hitflag)))
 		case "hitsound.group":
 			l.Push(lua.LNumber(c.hitdef.hitsound[0]))
 		case "hitsound.number":
@@ -9149,6 +9435,10 @@ func triggerFunctions(l *lua.LState) {
 	})
 	luaRegister(l, "inGuardDist", func(*lua.LState) int {
 		l.Push(lua.LBool(sys.debugWC.inguarddist))
+		return 1
+	})
+	luaRegister(l, "inRunState", func(*lua.LState) int {
+		l.Push(lua.LBool(sys.debugWC.inRunState))
 		return 1
 	})
 	luaRegister(l, "inputTime", func(l *lua.LState) int {
@@ -9449,7 +9739,16 @@ func triggerFunctions(l *lua.LState) {
 		return 1
 	})
 	luaRegister(l, "map", func(*lua.LState) int {
-		l.Push(lua.LNumber(sys.debugWC.mapArray[strings.ToLower(strArg(l, 1))]))
+		name := strings.ToLower(strArg(l, 1))
+		if !nilArg(l, 2) {
+			name = sys.debugWC.mapIndexedKey(name, int32(numArg(l, 2)))
+		}
+		mv := sys.debugWC.mapArray[name]
+		if mv.Type == VT_String {
+			l.Push(lua.LString(mv.Str))
+		} else {
+			l.Push(lua.LNumber(mv.Num))
+		}
 		return 1
 	})
 	luaRegister(l, "matchNo", func(*lua.LState) int {
@@ -9556,15 +9855,7 @@ func triggerFunctions(l *lua.LState) {
 		return 1
 	})
 	luaRegister(l, "moveType", func(*lua.LState) int {
-		var s string
-		switch sys.debugWC.ss.moveType {
-		case MT_I:
-			s = "I"
-		case MT_A:
-			s = "A"
-		case MT_H:
-			s = "H"
-		}
+		s := sys.debugWC.ss.moveType.TriggerValue()
 		l.Push(lua.LString(s))
 		return 1
 	})
@@ -9711,15 +10002,7 @@ func triggerFunctions(l *lua.LState) {
 	})
 	luaRegister(l, "p2MoveType", func(*lua.LState) int {
 		if p2 := sys.debugWC.p2(); p2 != nil {
-			var s string
-			switch p2.ss.moveType {
-			case MT_I:
-				s = "I"
-			case MT_A:
-				s = "A"
-			case MT_H:
-				s = "H"
-			}
+			s := p2.ss.moveType.TriggerValue()
 			l.Push(lua.LString(s))
 		} else {
 			l.Push(lua.LString(""))
@@ -9736,17 +10019,7 @@ func triggerFunctions(l *lua.LState) {
 	})
 	luaRegister(l, "p2StateType", func(*lua.LState) int {
 		if p2 := sys.debugWC.p2(); p2 != nil {
-			var s string
-			switch p2.ss.stateType {
-			case ST_S:
-				s = "S"
-			case ST_C:
-				s = "C"
-			case ST_A:
-				s = "A"
-			case ST_L:
-				s = "L"
-			}
+			s := p2.ss.stateType.TriggerValue()
 			l.Push(lua.LString(s))
 		} else {
 			l.Push(lua.LString(""))
@@ -9851,17 +10124,7 @@ func triggerFunctions(l *lua.LState) {
 		return 1
 	})
 	luaRegister(l, "physics", func(*lua.LState) int {
-		var s string
-		switch sys.debugWC.ss.physics {
-		case ST_S:
-			s = "S"
-		case ST_C:
-			s = "C"
-		case ST_A:
-			s = "A"
-		case ST_N:
-			s = "N"
-		}
+		s := sys.debugWC.ss.physics.TriggerValue()
 		l.Push(lua.LString(s))
 		return 1
 	})
@@ -9909,15 +10172,7 @@ func triggerFunctions(l *lua.LState) {
 		return 1
 	})
 	luaRegister(l, "prevMoveType", func(*lua.LState) int {
-		var s string
-		switch sys.debugWC.ss.prevMoveType {
-		case MT_I:
-			s = "I"
-		case MT_A:
-			s = "A"
-		case MT_H:
-			s = "H"
-		}
+		s := sys.debugWC.ss.prevMoveType.TriggerValue()
 		l.Push(lua.LString(s))
 		return 1
 	})
@@ -9926,17 +10181,7 @@ func triggerFunctions(l *lua.LState) {
 		return 1
 	})
 	luaRegister(l, "prevStateType", func(*lua.LState) int {
-		var s string
-		switch sys.debugWC.ss.prevStateType {
-		case ST_S:
-			s = "S"
-		case ST_C:
-			s = "C"
-		case ST_A:
-			s = "A"
-		case ST_L:
-			s = "L"
-		}
+		s := sys.debugWC.ss.prevStateType.TriggerValue()
 		l.Push(lua.LString(s))
 		return 1
 	})
@@ -10004,6 +10249,12 @@ func triggerFunctions(l *lua.LState) {
 				lv = lua.LNumber(p.animNo)
 			case "animelem":
 				lv = lua.LNumber(p.anim.curelem + 1)
+			case "animprefix":
+				if p.anim_ffx == "" {
+					lv = lua.LString("s")
+				} else {
+					lv = lua.LString(p.anim_ffx)
+				}
 			case "angle":
 				lv = lua.LNumber(p.rot.angle)
 			case "angle x":
@@ -10011,7 +10262,7 @@ func triggerFunctions(l *lua.LState) {
 			case "angle y":
 				lv = lua.LNumber(p.rot.yangle)
 			case "attr":
-				lv = attrLStr(p.hitdef.attr) // Return string like HitDefAttr
+				lv = lua.LString(attrString(p.hitdef.attr)) // Return string like HitDefAttr
 			case "drawpal group":
 				lv = lua.LNumber(sys.debugWC.projDrawPal(p)[0])
 			case "drawpal index":
@@ -10019,11 +10270,11 @@ func triggerFunctions(l *lua.LState) {
 			case "facing":
 				lv = lua.LNumber(p.facing)
 			case "guardflag":
-				lv = flagLStr(p.hitdef.guardflag) // Return string like HitDefVar
+				lv = lua.LString(flagString(p.hitdef.guardflag)) // Return string like HitDefVar
 			case "highbound":
 				lv = lua.LNumber(p.heightbound[1])
 			case "hitflag":
-				lv = flagLStr(p.hitdef.hitflag) // Return string like HitDefVar
+				lv = lua.LString(flagString(p.hitdef.hitflag)) // Return string like HitDefVar
 			case "lowbound":
 				lv = lua.LNumber(p.heightbound[0])
 			case "pausemovetime":
@@ -10098,6 +10349,8 @@ func triggerFunctions(l *lua.LState) {
 				lv = lua.LNumber(p.velmul[2])
 			case "xshear":
 				lv = lua.LNumber(p.xshear)
+			case "shader":
+				lv = lua.LString(p.customShader.name)
 			default:
 				l.RaiseError("\nInvalid argument: %v\n", vname)
 			}
@@ -10121,45 +10374,7 @@ func triggerFunctions(l *lua.LState) {
 		return 1
 	})
 	luaRegister(l, "reversalDefAttr", func(*lua.LState) int {
-		attr, str := sys.debugWC.hitdef.reversal_attr, ""
-		if sys.debugWC.ss.moveType == MT_A {
-			if attr&int32(ST_S) != 0 {
-				str += "S"
-			}
-			if attr&int32(ST_C) != 0 {
-				str += "C"
-			}
-			if attr&int32(ST_A) != 0 {
-				str += "A"
-			}
-			if attr&int32(AT_NA) != 0 {
-				str += ", NA"
-			}
-			if attr&int32(AT_NT) != 0 {
-				str += ", NT"
-			}
-			if attr&int32(AT_NP) != 0 {
-				str += ", NP"
-			}
-			if attr&int32(AT_SA) != 0 {
-				str += ", SA"
-			}
-			if attr&int32(AT_ST) != 0 {
-				str += ", ST"
-			}
-			if attr&int32(AT_SP) != 0 {
-				str += ", SP"
-			}
-			if attr&int32(AT_HA) != 0 {
-				str += ", HA"
-			}
-			if attr&int32(AT_HT) != 0 {
-				str += ", HT"
-			}
-			if attr&int32(AT_HP) != 0 {
-				str += ", HP"
-			}
-		}
+		str := attrString(sys.debugWC.hitdef.reversal_attr &^ (-1 << 31))
 		l.Push(lua.LString(str))
 		return 1
 	})
@@ -10342,6 +10557,8 @@ func triggerFunctions(l *lua.LState) {
 				}
 			case "priority":
 				lv = lua.LNumber(ch.sfx.priority)
+			case "samplerate":
+				lv = lua.LNumber(float32(ch.sound.format.SampleRate))
 			case "startposition":
 				lv = lua.LNumber(ch.sfx.startPos)
 			case "volumescale":
@@ -10352,6 +10569,10 @@ func triggerFunctions(l *lua.LState) {
 			}
 		}
 		l.Push(lv)
+		return 1
+	})
+	luaRegister(l, "spritePlayerNo", func(*lua.LState) int {
+		l.Push(lua.LNumber(sys.debugWC.spritePN + 1))
 		return 1
 	})
 	luaRegister(l, "spriteVar", func(l *lua.LState) int {
@@ -10404,6 +10625,10 @@ func triggerFunctions(l *lua.LState) {
 			switch strings.ToLower(vname) {
 			case "actionno":
 				ln = lua.LNumber(bg.actionno)
+			case "animelem":
+				ln = lua.LNumber(bg.anim.curelem)
+			case "animelemtime":
+				ln = lua.LNumber(bg.anim.curelemtime)
 			case "animloopcount":
 				ln = lua.LNumber(bg.anim.loopcount)
 			case "animtime":
@@ -10440,7 +10665,12 @@ func triggerFunctions(l *lua.LState) {
 		return 1
 	})
 	luaRegister(l, "stageConst", func(*lua.LState) int {
-		l.Push(lua.LNumber(sys.stage.constants[strings.ToLower(strArg(l, 1))]))
+		mv := sys.stage.constants[strings.ToLower(strArg(l, 1))]
+		if mv.Type == VT_String {
+			l.Push(lua.LString(mv.Str))
+		} else {
+			l.Push(lua.LNumber(mv.Num))
+		}
 		return 1
 	})
 	luaRegister(l, "stageFrontEdgeDist", func(*lua.LState) int {
@@ -10477,6 +10707,10 @@ func triggerFunctions(l *lua.LState) {
 			l.Push(lua.LNumber(sys.stage.stageCamera.boundhigh))
 		case "camera.boundlow":
 			l.Push(lua.LNumber(sys.stage.stageCamera.boundlow))
+		case "camera.zboundtop":
+			l.Push(lua.LNumber(sys.stage.stageCamera.zboundtop))
+		case "camera.zboundbot":
+			l.Push(lua.LNumber(sys.stage.stageCamera.zboundbot))
 		case "camera.verticalfollow":
 			l.Push(lua.LNumber(sys.stage.stageCamera.verticalfollow))
 		case "camera.floortension":
@@ -10487,8 +10721,12 @@ func triggerFunctions(l *lua.LState) {
 			l.Push(lua.LNumber(sys.stage.stageCamera.tensionlow))
 		case "camera.tension":
 			l.Push(lua.LNumber(sys.stage.stageCamera.tension))
+		case "camera.ztension":
+			l.Push(lua.LNumber(sys.stage.stageCamera.ztension))
 		case "camera.tensionvel":
 			l.Push(lua.LNumber(sys.stage.stageCamera.tensionvel))
+		case "camera.ztensionvel":
+			l.Push(lua.LNumber(sys.stage.stageCamera.ztensionvel))
 		case "camera.cuthigh":
 			l.Push(lua.LNumber(sys.stage.stageCamera.cuthigh))
 		case "camera.cutlow":
@@ -10511,6 +10749,8 @@ func triggerFunctions(l *lua.LState) {
 			l.Push(lua.LBool(sys.stage.stageCamera.ytensionenable))
 		case "camera.autocenter":
 			l.Push(lua.LBool(sys.stage.stageCamera.autocenter))
+		case "camera.zautocenter":
+			l.Push(lua.LBool(sys.stage.stageCamera.zautocenter))
 		case "camera.lowestcap":
 			l.Push(lua.LBool(sys.stage.stageCamera.lowestcap))
 		case "playerinfo.leftbound":
@@ -10544,7 +10784,7 @@ func triggerFunctions(l *lua.LState) {
 		case "scaling.topscale":
 			l.Push(lua.LNumber(sys.stage.stageCamera.ztopscale))
 		case "scaling.botscale":
-			l.Push(lua.LNumber(sys.stage.stageCamera.ztopscale))
+			l.Push(lua.LNumber(sys.stage.stageCamera.zbotscale))
 		case "bound.screenleft":
 			l.Push(lua.LNumber(sys.stage.screenleft))
 		case "bound.screenright":
@@ -10587,6 +10827,8 @@ func triggerFunctions(l *lua.LState) {
 			l.Push(lua.LNumber(sys.stage.sdw.offset[0]))
 		case "shadow.offset.y":
 			l.Push(lua.LNumber(sys.stage.sdw.offset[1]))
+		case "shadow.shader":
+			l.Push(lua.LString(sys.stage.sdw.shader.name))
 		case "reflection.intensity":
 			l.Push(lua.LNumber(sys.stage.reflection.intensity))
 		case "reflection.yscale":
@@ -10609,6 +10851,8 @@ func triggerFunctions(l *lua.LState) {
 			l.Push(lua.LNumber(int32((sys.stage.reflection.color & 0xFF00) >> 8)))
 		case "reflection.color.b":
 			l.Push(lua.LNumber(int32(sys.stage.reflection.color & 0xFF)))
+		case "reflection.shader":
+			l.Push(lua.LString(sys.stage.reflection.shader.name))
 		default:
 			l.Push(lua.LString(""))
 		}
@@ -10623,17 +10867,7 @@ func triggerFunctions(l *lua.LState) {
 		return 1
 	})
 	luaRegister(l, "stateType", func(*lua.LState) int {
-		var s string
-		switch sys.debugWC.ss.stateType {
-		case ST_S:
-			s = "S"
-		case ST_C:
-			s = "C"
-		case ST_A:
-			s = "A"
-		case ST_L:
-			s = "L"
-		}
+		s := sys.debugWC.ss.stateType.TriggerValue()
 		l.Push(lua.LString(s))
 		return 1
 	})
@@ -10650,17 +10884,7 @@ func triggerFunctions(l *lua.LState) {
 		return 1
 	})
 	luaRegister(l, "teamMode", func(*lua.LState) int {
-		var s string
-		switch sys.tmode[sys.debugWC.playerNo&1] {
-		case TM_Single:
-			s = "single"
-		case TM_Simul:
-			s = "simul"
-		case TM_Turns:
-			s = "turns"
-		case TM_Tag:
-			s = "tag"
-		}
+		s := sys.tmode[sys.debugWC.playerNo&1].TriggerValue()
 		l.Push(lua.LString(s))
 		return 1
 	})
@@ -10797,4 +11021,10 @@ func triggerFunctions(l *lua.LState) {
 		l.Push(ln)
 		return 1
 	})
+}
+
+// Builds the retry prompt shown when RetryLoadOnError is enabled
+func retryLoadMessage(err error) string {
+	return strings.TrimSpace(err.Error()) + "\n\nThe file could not be loaded because of the error above.\n" +
+		"This error may be recoverable. Have you fixed the file and want to retry?"
 }

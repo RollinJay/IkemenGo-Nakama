@@ -19,7 +19,7 @@ import (
 type cbrRouteWorld struct {
 	t      testing.TB
 	root   *Char
-	states map[int32]StateBytecode
+	states map[int32]*StateBytecode
 	set    *cbrRouteSet
 	slot   *cbrSlot
 }
@@ -258,7 +258,7 @@ func cbrCompileWorld(t testing.TB, negOne, st string, zss bool) *cbrRouteWorld {
 			t.Fatal(err)
 		}
 	}
-	root := &Char{id: 56, playerNo: 0, controller: -1, localcoord: 320, localscl: 1,
+	root := &Char{id: 56, playerNo: 0, controller: -1, localscl: 1,
 		life: 1000, lifeMax: 1000, powerMax: 3000, cpucmd: -1, facing: 1}
 	root.keyctrl = [4]bool{true, true, true, true}
 	root.cnsvar, root.cnsfvar = map[int32]int32{}, map[int32]float32{}
@@ -267,7 +267,7 @@ func cbrCompileWorld(t testing.TB, negOne, st string, zss bool) *cbrRouteWorld {
 	sys.cfg.Common.Cmd, sys.cfg.Common.States = nil, nil
 	sys.ignoreMostErrors = true
 	sys.fightScreen.round = &FightScreenRound{} // the round is in progress
-	states, err := newCharCompiler().Compile(0, filepath.Join(dir, "test.def"), map[string]float32{})
+	states, err := newCharCompiler().Compile(root, filepath.Join(dir, "test.def"), &sys.cgi[0])
 	if err != nil {
 		t.Fatalf("compile: %v", err)
 	}
@@ -290,12 +290,12 @@ func cbrCompileWorld(t testing.TB, negOne, st string, zss bool) *cbrRouteWorld {
 func (w *cbrRouteWorld) enter(no int32) {
 	c := w.root
 	c.ss.sb = w.states[no]
-	c.ss.sb.ctrlsps = make([]int32, len(c.ss.sb.ctrlsps))
+	c.ss.ps = make([]int32, len(c.ss.sb.ctrlsps))
 	c.ss.no, c.ss.prevno, c.ss.time = no, 0, 10
 	c.ss.stateType, c.ss.moveType = ST_S, MT_I
-	c.unsetSCF(SCF_ctrl)
+	c.setSCF(SCF_ctrl, false)
 	if no == 0 {
-		c.setSCF(SCF_ctrl)
+		c.setSCF(SCF_ctrl, true)
 	} else {
 		c.ss.moveType = MT_A
 	}
@@ -510,7 +510,7 @@ func TestCBRMomentCheck(t *testing.T) {
 	}{
 		{"AI jab with control: the person's jab needs control", 0, 1, nil,
 			cbrEntry{kind: cbr.EntryReachable, cmd: "x"}, 200},
-		{"AI jab without control", 0, 1, func() { c.unsetSCF(SCF_ctrl) },
+		{"AI jab without control", 0, 1, func() { c.setSCF(SCF_ctrl, false) },
 			cbrEntry{kind: cbr.EntryCheat}, 200},
 		{"AI-only state", 0, 2, nil, cbrEntry{kind: cbr.EntryCheat}, 3000},
 		{"AI super below the power", 0, 3, func() { c.power = 500 },
@@ -615,7 +615,7 @@ func TestCBRMomentCheck(t *testing.T) {
 func TestCBRHelperRedirectIsLabelled(t *testing.T) {
 	w := cbrCompileWorld(t, cbrTestNegOne, cbrTestStates, false)
 	c := w.root
-	h := &Char{id: 57, playerNo: 0, helperIndex: 1, controller: -1, localcoord: 320, localscl: 1}
+	h := &Char{id: 57, playerNo: 0, helperIndex: 1, controller: -1, localscl: 1}
 	h.cnsvar, h.cnsfvar = map[int32]int32{}, map[int32]float32{}
 	sys.chars[0] = append(sys.chars[0], h)
 	sys.charList.idMap[h.id] = h
@@ -624,6 +624,7 @@ func TestCBRHelperRedirectIsLabelled(t *testing.T) {
 		clear(h.cnsvar)
 		h.cnsvar[v] = 1
 		h.ss.sb = w.states[9000]
+		h.ss.ps = make([]int32, len(h.ss.sb.ctrlsps))
 		h.ss.no = 9000
 		h.minus = 0
 		w.frame()
@@ -645,7 +646,7 @@ func TestCBRHelperRedirectIsLabelled(t *testing.T) {
 	} {
 		w.enter(0)
 		if !tc.ctrl {
-			c.unsetSCF(SCF_ctrl)
+			c.setSCF(SCF_ctrl, false)
 		}
 		if got := runHelper(tc.v); got != tc.want || c.ss.no != tc.state {
 			t.Errorf("%s: %v into %d, want %v into %d", tc.name, got, c.ss.no, tc.want, tc.state)
@@ -785,7 +786,7 @@ func TestCBRMomentCheckZSS(t *testing.T) {
 		state int32
 	}{
 		{"AI jab with control", 0, 1, nil, cbrEntry{kind: cbr.EntryReachable, cmd: "x"}, 200},
-		{"AI jab without control", 0, 1, func() { c.unsetSCF(SCF_ctrl) }, cbrEntry{kind: cbr.EntryCheat}, 200},
+		{"AI jab without control", 0, 1, func() { c.setSCF(SCF_ctrl, false) }, cbrEntry{kind: cbr.EntryCheat}, 200},
 		{"AI-only state", 0, 2, nil, cbrEntry{kind: cbr.EntryCheat}, 3000},
 		{"AI super below the power", 0, 3, func() { c.power = 999 }, cbrEntry{kind: cbr.EntryCheat}, 3100},
 		{"AI super at the power", 0, 3, func() { c.power = 1000 }, cbrEntry{kind: cbr.EntryReachable, cmd: "super"}, 3100},
@@ -793,7 +794,7 @@ func TestCBRMomentCheckZSS(t *testing.T) {
 		{"AI special cancelling a jab that hit", 200, 4, func() { c.mctime = 2 }, cbrEntry{kind: cbr.EntryReachable, cmd: "qcf_x"}, 1000},
 		{"AI special out of a jab that missed", 200, 4, nil, cbrEntry{kind: cbr.EntryCheat}, 1000},
 		{"AI into a state a let variable's route enters", 0, 6, nil, cbrEntry{kind: cbr.EntryReachable, cmd: "y"}, 400},
-		{"... without control", 0, 6, func() { c.unsetSCF(SCF_ctrl) }, cbrEntry{kind: cbr.EntryCheat}, 400},
+		{"... without control", 0, 6, func() { c.setSCF(SCF_ctrl, false) }, cbrEntry{kind: cbr.EntryCheat}, 400},
 		{"AI into a state only a route after a busy function enters", 0, 7, nil, cbrEntry{kind: cbr.EntryUnknown}, 230},
 		{"person's special (function and local variable, live)", 0, 0, func() { w.person(); w.press("qcf_x") }, cbrEntry{kind: cbr.EntryInput, cmd: "qcf_x"}, 1000},
 		{"AI cancel after contact", 200, 5, func() { c.mctime = 1 }, cbrEntry{kind: cbr.EntryReachable, cmd: "x"}, 210},
@@ -831,7 +832,7 @@ func TestCBRMomentCheckZSS(t *testing.T) {
 // base (a folder holding chars/ and data/ as the game's) with the common
 // files of the default configuration, and returns a function compiling one
 // into player 1's slot as a CPU-controlled root standing in state 0.
-func cbrRealCharCompiler(t testing.TB, base string) func(def string) (*Char, map[int32]StateBytecode, error) {
+func cbrRealCharCompiler(t testing.TB, base string) func(def string) (*Char, map[int32]*StateBytecode, error) {
 	t.Helper()
 	t.Chdir(base)
 	cbrTestRuntime(t)
@@ -854,27 +855,32 @@ func cbrRealCharCompiler(t testing.TB, base string) func(def string) (*Char, map
 	// The common effects' prefix, which the common states use
 	sys.ffx = map[string]*FightFx{"go": {}}
 	// The common constants, as Char.load reads them for each character
-	constants := map[string]float32{}
+	constants := map[string]TypedValue{}
 	text, err := LoadText("data/common.const")
 	if err != nil {
 		t.Fatal(err)
 	}
 	lines, li := SplitAndTrim(text, "\n"), 0
 	is, _, _ := ReadIniSection(lines, &li)
-	for key, value := range is {
-		constants[key] = float32(Atof(value))
+	// As Char.load reads them: each constant's type comes from its text
+	if err := is.ReadAutoTypeMap(constants, "constant"); err != nil {
+		t.Fatal(err)
 	}
-	return func(def string) (*Char, map[int32]StateBytecode, error) {
-		root := &Char{id: 56, playerNo: 0, controller: -1, localcoord: 320, localscl: 1,
+	return func(def string) (*Char, map[int32]*StateBytecode, error) {
+		root := &Char{id: 56, playerNo: 0, controller: -1, localscl: 1,
 			life: 1000, lifeMax: 1000, powerMax: 3000, cpucmd: -1}
 		root.keyctrl = [4]bool{true, true, true, true}
 		root.cnsvar, root.cnsfvar = map[int32]int32{}, map[int32]float32{}
 		root.cnssysvar, root.cnssysfvar = map[int32]int32{}, map[int32]float32{}
-		root.mapArray = map[string]float32{}
+		root.mapArray = map[string]TypedValue{}
 		sys.chars = [len(sys.chars)][]*Char{{root}}
 		sys.cgi[0] = newCharGlobalInfo()
+		// A copy: compiling adds the character's own constants.
+		for k, v := range constants {
+			sys.cgi[0].constants[k] = v
+		}
 		sys.ignoreMostErrors = true
-		states, err := newCharCompiler().Compile(0, def, constants)
+		states, err := newCharCompiler().Compile(root, def, &sys.cgi[0])
 		if err == nil {
 			sys.cgi[0].states = states
 		}
@@ -962,7 +968,7 @@ func TestCBRRoutesOfRealCharacters(t *testing.T) {
 				want   cbrEntry
 			}{
 				{0, 1000, nil, cbrEntry{kind: cbr.EntryReachable, cmd: "QCF_x"}},
-				{0, 1000, func() { root.unsetSCF(SCF_ctrl) }, cbrEntry{kind: cbr.EntryCheat}},
+				{0, 1000, func() { root.setSCF(SCF_ctrl, false) }, cbrEntry{kind: cbr.EntryCheat}},
 				{200, 1000, func() { root.mctype, root.mctime = MC_Hit, 2 }, cbrEntry{kind: cbr.EntryReachable, cmd: "QCF_x"}},
 				{200, 1000, nil, cbrEntry{kind: cbr.EntryCheat}},
 				{0, 3000, func() { root.power = 500 }, cbrEntry{kind: cbr.EntryCheat}},
@@ -1211,11 +1217,11 @@ func TestCBRCheckChangesNothing(t *testing.T) {
 			play := func(watch bool) ([]string, map[cbr.EntryKind]int) {
 				w := cbrCompileWorld(t, tc.negOne, tc.st, tc.zss)
 				c := w.root
-				c.mapArray = map[string]float32{}
+				c.mapArray = map[string]TypedValue{}
 				// An opponent, so that the nearest-enemy lists the triggers
 				// build are there to compare.
 				c.teamside = 0
-				e := &Char{id: 60, playerNo: 1, teamside: 1, localcoord: 320, localscl: 1, life: 1000, facing: -1}
+				e := &Char{id: 60, playerNo: 1, teamside: 1, localscl: 1, life: 1000, facing: -1}
 				e.pos[0] = 50
 				sys.chars[1] = []*Char{e}
 				sys.charList.idMap[e.id] = e
@@ -1356,7 +1362,8 @@ func BenchmarkCBRStateChangeHook(b *testing.B) {
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
 				c.ss.sb, c.ss.no = w.states[0], 0
-				c.setSCF(SCF_ctrl)
+				c.ss.ps = make([]int32, len(c.ss.sb.ctrlsps))
+				c.setSCF(SCF_ctrl, true)
 				c.cnsvar[1] = 1
 				c.minus = -1
 				sb.run(c)
@@ -1487,7 +1494,7 @@ func TestCBRCheckRestoresEngineState(t *testing.T) {
 	w := cbrCompileWorld(t, "", cbrTestZSS, true)
 	c := w.root
 	c.teamside = 0
-	e := &Char{id: 60, playerNo: 1, teamside: 1, localcoord: 320, localscl: 1, life: 1000, facing: -1}
+	e := &Char{id: 60, playerNo: 1, teamside: 1, localscl: 1, life: 1000, facing: -1}
 	e.pos[0] = 50
 	sys.chars[1] = []*Char{e}
 	t.Cleanup(func() { sys.chars[1] = nil })
@@ -1667,20 +1674,20 @@ func TestCBRInputBufferRoutes(t *testing.T) {
 	}{
 		{"person's buffered special", 20, w.person, cbrEntry{kind: cbr.EntryInput}, 1500},
 		{"the CBR layer's buffered special, the AI level masked", 20,
-			func() { c.setASF(ASF_noailevel) }, cbrEntry{kind: cbr.EntryInput}, 1500},
+			func() { c.setASF(ASF_noailevel, true) }, cbrEntry{kind: cbr.EntryInput}, 1500},
 		{"the AI's own special into the same state", 21, nil, cbrEntry{kind: cbr.EntryUnknown}, 1500},
 		{"AI-only state", 22, nil, cbrEntry{kind: cbr.EntryCheat}, 1600},
 		{"AI jump with control", 23, nil, cbrEntry{kind: cbr.EntryReachable}, 40},
-		{"AI jump without control", 23, func() { c.unsetSCF(SCF_ctrl) }, cbrEntry{kind: cbr.EntryCheat}, 40},
-		{"AI jump with jumping turned off", 23, func() { c.setASF(ASF_nojump) }, cbrEntry{kind: cbr.EntryCheat}, 40},
+		{"AI jump without control", 23, func() { c.setSCF(SCF_ctrl, false) }, cbrEntry{kind: cbr.EntryCheat}, 40},
+		{"AI jump with jumping turned off", 23, func() { c.setASF(ASF_nojump, true) }, cbrEntry{kind: cbr.EntryCheat}, 40},
 		{"AI walk with control", 24, nil, cbrEntry{kind: cbr.EntryReachable}, 20},
 		{"AI into a person's special that reads an explod", 25, nil, cbrEntry{kind: cbr.EntryUnknown}, 1700},
 		{"the same without the power the person's needs", 26, nil, cbrEntry{kind: cbr.EntryCheat}, 1710},
 		{"the same with the power", 26, func() { c.power = 1000 }, cbrEntry{kind: cbr.EntryUnknown}, 1710},
 	} {
 		sys.aiLevel[0], c.controller, c.power = 8, -1, 0
-		c.unsetASF(ASF_noailevel)
-		c.unsetASF(ASF_nojump)
+		c.setASF(ASF_noailevel, false)
+		c.setASF(ASF_nojump, false)
 		got, state := w.decide(0, tc.v, tc.setup)
 		if got != tc.want || state != tc.target {
 			t.Errorf("%s: %v into %d, want %v into %d", tc.name, got, state, tc.want, tc.target)

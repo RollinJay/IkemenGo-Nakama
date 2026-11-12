@@ -576,7 +576,7 @@ func TestMatchStartStateRoundTrip(t *testing.T) {
 		guardPoints: 7, guardPointsMax: 1000, redLife: 700,
 		cnsvar: map[int32]int32{1: 5, 59: -2}, cnsfvar: map[int32]float32{3: float32(math.Pi)},
 		cnssysvar: map[int32]int32{0: 9}, cnssysfvar: map[int32]float32{1: -0.1},
-		mapArray: map[string]float32{"combo": 1.25}}
+		mapArray: map[string]TypedValue{"combo": TypedValueOf(BytecodeFloat(1.25)), "name": {Type: VT_String, Str: "goku"}}}
 	sys.chars[2] = []*Char{c}
 	states := captureMatchStartState()
 	if len(states) != 1 || states[0].Player != 3 {
@@ -601,7 +601,7 @@ func TestMatchStartStateRoundTrip(t *testing.T) {
 	decoded = append(decoded, ReplayPlayerState{Player: 3, Life: 1, Vars: huge}, ReplayPlayerState{Player: 9})
 	applyMatchStartState(decoded[:1])
 	if fresh.controller != ^2 || fresh.life != 640 || fresh.power != 2500 || fresh.redLife != 700 || fresh.cnsvar[59] != -2 ||
-		fresh.cnsfvar[3] != float32(math.Pi) || fresh.cnssysfvar[1] != -0.1 || fresh.mapArray["combo"] != 1.25 {
+		fresh.cnsfvar[3] != float32(math.Pi) || fresh.cnssysfvar[1] != -0.1 || fresh.mapArray["combo"] != TypedValueOf(BytecodeFloat(1.25)) || fresh.mapArray["name"] != (TypedValue{Type: VT_String, Str: "goku"}) {
 		t.Fatalf("restored %+v", fresh)
 	}
 	applyMatchStartState(decoded[1:])

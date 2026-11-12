@@ -76,6 +76,10 @@ FFMPEG_SRCDIR="$BUILDDIR/ffmpeg-src"
 LIBVPX_SRCDIR="$BUILDDIR/libvpx-src"
 SDL2_SRCDIR="$BUILDDIR/sdl2-src"
 
+# MSYS2 install prefix, set by the shell (e.g. /ucrt64)
+MSYS_PREFIX="${MINGW_PREFIX:-/ucrt64}"
+MSYS_ENV_STAMP="$BUILDDIR/.msys-env"
+
 # Screenpack assets
 SCREENPACK_REPO="${SCREENPACK_REPO:-https://github.com/ikemen-engine/Ikemen-GO-Screenpack.git}"
 SCREENPACK_REF="${SCREENPACK_REF:-master}"
@@ -89,6 +93,21 @@ ANDROID_APK_REPO="${ANDROID_APK_REPO:-$REPO_ROOT/third_party/ikemen-droid}"
 ANDROID_APK_REF="${ANDROID_APK_REF:-main}"
 ANDROID_APK_DIR="$REPO_ROOT/$BUILDDIR/android-apk/ikemen-droid"
 ANDROID_APK_OUT="${ANDROID_APK_OUT:-$REPO_ROOT/bin/ikemen-go.apk}"
+
+# iOS IPA packaging (ikemen-ios)
+BUILD_IOS_IPA="${BUILD_IOS_IPA:-1}"  # 1=yes, 0=no
+# IOS_WRAPPER_DIR: an existing ikemen-ios checkout, used in place (for opening it in Xcode).
+# If unset, IOS_APP_REPO@IOS_APP_REF is freshly cloned into build/ios-app/ikemen-ios.
+IOS_APP_REPO="${IOS_APP_REPO:-https://github.com/Jesuszilla/ikemen-ios.git}"
+IOS_APP_REF="${IOS_APP_REF:-main}"
+IOS_WRAPPER_DIR="${IOS_WRAPPER_DIR:-}"
+IOS_MIN_VERSION="${IOS_MIN_VERSION:-17.0}"
+IOS_IPA_OUT="${IOS_IPA_OUT:-$REPO_ROOT/bin/ikemen-go.ipa}"
+# CFBundleShortVersionString / CFBundleVersion of the app. Apple requires up to three
+# dot-separated integers, so vX.Y.Z tags map to X.Y.Z; other builds keep the wrapper's value.
+IOS_APP_VERSION="${IOS_APP_VERSION:-}"
+IOS_BUILD_NUMBER="${IOS_BUILD_NUMBER:-}"
+MOLTENVK_REV="${MOLTENVK_REV:-v1.4.2}"
 
 # FFmpeg config
 FFMPEG_REV="${FFMPEG_REV:-release/7.1}"
@@ -140,23 +159,23 @@ ensure_go_env() {
 	# Prefer MinGW bin early on PATH in MSYS shells
 	case "$OSTYPE" in
 		msys|cygwin)
-			if [[ ":${PATH}:" != *":/mingw64/bin:"* ]]; then
-				export PATH="/mingw64/bin:${PATH}"
+			if [[ ":${PATH}:" != *":${MSYS_PREFIX}/bin:"* ]]; then
+				export PATH="${MSYS_PREFIX}/bin:${PATH}"
 			fi
 			# Set a sensible default GOROOT for MSYS2 trimmed Go if not set
-			if [[ -z "${GOROOT:-}" ]] && [[ -d "/mingw64/lib/go" ]]; then
-				export GOROOT="/mingw64/lib/go"
+			if [[ -z "${GOROOT:-}" ]] && [[ -d "${MSYS_PREFIX}/lib/go" ]]; then
+				export GOROOT="${MSYS_PREFIX}/lib/go"
 			fi
 		;;
 	esac
 
 	# Verify we can run go and it knows its GOROOT
 	if ! command -v go >/dev/null 2>&1; then
-		echo "ERROR: 'go' not found on PATH. On MSYS2 install 'mingw-w64-x86_64-go' and use the MINGW64 shell." >&2
+		echo "ERROR: 'go' not found on PATH. On MSYS2 install 'mingw-w64-ucrt-x86_64-go' and use the UCRT64 shell." >&2
 		exit 1
 	fi
 	if ! go version >/dev/null 2>&1; then
-		echo "ERROR: 'go version' failed. On MSYS2 you may need:  export GOROOT=/mingw64/lib/go" >&2
+		echo "ERROR: 'go version' failed. On MSYS2 you may need:  export GOROOT=${MSYS_PREFIX}/lib/go" >&2
 		echo "Current GOROOT='${GOROOT:-<unset>}' PATH='${PATH}'" >&2
 		exit 1
 	fi
@@ -169,7 +188,10 @@ check_deps() {
 
 	case "$OSTYPE" in
 		msys|cygwin)
-			# MSYS2/MINGW64
+			# MSYS2/UCRT64
+			if [[ "${MSYSTEM:-}" == "MINGW64" ]]; then
+				echo "WARNING: MINGW64 is deprecated. Use the UCRT64 shell (see BUILDING.md)." >&2
+			fi
 			need git
 			need make
 			need pkg-config
@@ -186,14 +208,14 @@ check_deps() {
 			need dlltool
 			if ((${#missing[@]})); then
 				echo "Missing package: ${missing[@]}" >&2
-				echo "Install from the MINGW64 shell:" >&2
+				echo "Install from the MSYS2 UCRT64 shell:" >&2
 				echo "  pacman -Syu --noconfirm" >&2
 				echo "  pacman -S --noconfirm \\" >&2
-				echo "    git make diffutils mingw-w64-x86_64-pkg-config \\" >&2
-				echo "    mingw-w64-x86_64-go mingw-w64-x86_64-toolchain \\" >&2
-				echo "    mingw-w64-x86_64-nasm mingw-w64-x86_64-yasm \\" >&2
-				echo "    mingw-w64-ucrt-x86_64-tools mingw-w64-x86_64-libxmp \\" >&2
-				echo "    mingw-w64-x86_64-SDL2" >&2
+				echo "    git make diffutils mingw-w64-ucrt-x86_64-pkg-config \\" >&2
+				echo "    mingw-w64-ucrt-x86_64-go mingw-w64-ucrt-x86_64-toolchain \\" >&2
+				echo "    mingw-w64-ucrt-x86_64-nasm \\" >&2
+				echo "    mingw-w64-ucrt-x86_64-tools mingw-w64-ucrt-x86_64-libxmp \\" >&2
+				echo "    mingw-w64-ucrt-x86_64-SDL2" >&2
 				exit 1
 			fi
 		;;
@@ -287,7 +309,7 @@ require_sdl2() {
 	if ! $pc --exists sdl2 2>/dev/null; then
 	case "$OSTYPE" in
 		msys|cygwin)
-			echo "ERROR: SDL2 dev package not found. Install: pacman -S mingw-w64-x86_64-SDL2" >&2
+			echo "ERROR: SDL2 dev package not found. Install: pacman -S mingw-w64-ucrt-x86_64-SDL2" >&2
 			;;
 		darwin*)
 			echo "ERROR: SDL2 not found. Install with Homebrew: brew install sdl2" >&2
@@ -309,7 +331,7 @@ require_libxmp() {
 	if ! $pc --exists libxmp 2>/dev/null; then
 	case "$OSTYPE" in
 		msys|cygwin)
-			echo "ERROR: libxmp dev package not found. Install: pacman -S mingw-w64-x86_64-libxmp" >&2
+			echo "ERROR: libxmp dev package not found. Install: pacman -S mingw-w64-ucrt-x86_64-libxmp" >&2
 			;;
 		darwin*)
 			echo "ERROR: libxmp not found. Install with Homebrew: brew install libxmp" >&2
@@ -369,9 +391,6 @@ function main() {
 	# Enable CGO.
 	export CGO_ENABLED=1
 
-	# Enable arenas (required for rollback)
-	export GOEXPERIMENT=arenas
-
 	# Keep glibc symbol versions low on Linux so release binaries and the FFmpeg
 	# libs we ship run on distros older than the build host. See the header for why
 	# it only remaps __isoc23_* and not everything.
@@ -425,12 +444,6 @@ function main() {
 			varWin64
 			buildWin
 		;;
-		[wW][iI][nN]32)
-			: "${CC:=i686-w64-mingw32-gcc}"
-			: "${CXX:=i686-w64-mingw32-g++}"
-			varWin32
-			buildWin
-		;;
 		[mM][aA][cC][oO][sS][aA][rR][mM])
 			varMacOSARM
 			build
@@ -451,25 +464,19 @@ function main() {
 			varAndroid
 			build
 		;;
+		[iI][oO][sS])
+			variOS
+			build
+		;;
 		*)
 			echo "Unknown target: ${targetOS}"
-			echo "Valid targets: Win64 Win32 MacOS MacOSARM Linux LinuxARM"
+			echo "Valid targets: Win64 MacOS MacOSARM Linux LinuxARM Android iOS"
 			exit 1
 		;;
 	esac
 }
 
 # Export Variables
-function varWin32() {
-	export GOOS=windows
-	export GOARCH=386
-	if [[ "$(tolower "${currentOS}")" != "win32" ]]; then
-		export CC=i686-w64-mingw32-gcc
-		export CXX=i686-w64-mingw32-g++
-	fi
-	binName="Ikemen_GO_x86.exe"
-}
- 
 function varWin64() {
 	export GOOS=windows
 	export GOARCH=amd64
@@ -540,6 +547,47 @@ function varAndroid() {
 	export PKG_CONFIG_PATH=""
 	binName="libmain.so"
 }
+function variOS() {
+	if [[ "$OSTYPE" != darwin* ]]; then
+		echo "ERROR: the iOS target must be built on macOS with Xcode installed." >&2
+		exit 1
+	fi
+	local sdk="iphoneos"
+	local min_ios_version="$IOS_MIN_VERSION"
+
+	export GOOS=ios
+	export GOARCH=arm64
+	export CGO_ENABLED=1
+
+	export SDKROOT="$(xcrun --sdk "$sdk" --show-sdk-path)"
+	export CC="$(xcrun --sdk "$sdk" --find clang)"
+	export CXX="$(xcrun --sdk "$sdk" --find clang++)"
+	export AR="$(xcrun --sdk "$sdk" --find ar)"
+	export RANLIB="$(xcrun --sdk "$sdk" --find ranlib)"
+	export STRIP="$(xcrun --sdk "$sdk" --find strip)"
+
+	export IOS_DEPS_PATH="$REPO_ROOT/build/ios-deps"
+	mkdir -p "$IOS_DEPS_PATH/lib/pkgconfig" "$IOS_DEPS_PATH/include"
+
+	# No Vulkan/MoltenVK headers needed here: github.com/Eiton/vulkan bundles its own
+	# and resolves MoltenVK via dlsym. MoltenVK is only linked by the Xcode app.
+	export IOS_CFLAGS="-I$IOS_DEPS_PATH/include -target arm64-apple-ios${min_ios_version} -isysroot $SDKROOT"
+	export IOS_LDFLAGS="-target arm64-apple-ios${min_ios_version} -isysroot $SDKROOT"
+
+	# Apple targets
+	export CGO_CFLAGS="$IOS_CFLAGS"
+	export CGO_CXXFLAGS="$IOS_CFLAGS"
+	export CGO_LDFLAGS="$IOS_LDFLAGS"
+
+	# Ensure we don't pick up host libraries by clearing this
+	export PKG_CONFIG_PATH=""
+	export PKG_CONFIG_LIBDIR="$IOS_DEPS_PATH/lib/pkgconfig"
+	# Our .pc files already hold absolute paths; a sysroot prefix would break them
+	# (build_ffmpeg cleared it, but skips that when FFmpeg is cached).
+	export PKG_CONFIG_SYSROOT_DIR=""
+
+	binName="libikemen.a"
+}
 
 # --- FFmpeg detection / build ---
 function have_ffmpeg_pc() {
@@ -555,7 +603,7 @@ function have_libvpx_pc() {
 function ensure_pkg_config_path() {
 	if [[ -d "$FFMPEG_PREFIX/lib/pkgconfig" ]]; then
 		if [[ "${RUNNER_OS:-}" == "Windows" || "$OSTYPE" == msys || "$OSTYPE" == cygwin ]]; then
-			export PKG_CONFIG_PATH="$FFMPEG_PREFIX/lib/pkgconfig:/mingw64/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
+			export PKG_CONFIG_PATH="$FFMPEG_PREFIX/lib/pkgconfig:${MSYS_PREFIX}/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
 		else
 			export PKG_CONFIG_PATH="$FFMPEG_PREFIX/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
 		fi
@@ -566,6 +614,8 @@ function build_libvpx() {
 	local prefix="$LIBVPX_PREFIX"
 	if [[ "$GOOS" == "android" ]]; then
 		prefix="$ANDROID_DEPS_PATH"
+	elif [[ "$GOOS" == "ios" ]]; then
+		prefix="$IOS_DEPS_PATH"
 	fi
 
 	if [[ -f "$prefix/lib/pkgconfig/vpx.pc" ]]; then
@@ -586,12 +636,12 @@ function build_libvpx() {
 	local target
 	case "$GOOS/$arch" in
 		windows/amd64) target="x86_64-win64-gcc" ;;
-		windows/386) target="x86-win32-gcc" ;;
 		darwin/amd64) target="x86_64-darwin20-gcc" ;;
 		darwin/arm64) target="arm64-darwin20-gcc" ;;
 		linux/amd64) target="x86_64-linux-gcc" ;;
 		linux/arm64) target="arm64-linux-gcc" ;;
 		android/arm64) target="arm64-android-gcc" ;;
+		ios/arm64) target="arm64-darwin-gcc" ;;
 		*)
 			echo "ERROR: Unsupported libvpx target: $GOOS/$arch" >&2
 			return 1
@@ -619,6 +669,16 @@ function build_libvpx() {
 		CC="$CC" CXX="$CXX" \
 			AR="$TOOLCHAIN/bin/llvm-ar" LD="$CC" STRIP="$TOOLCHAIN/bin/llvm-strip" \
 			../configure "${configure_args[@]}"
+	elif [[ "$GOOS" == "ios" ]]; then
+		CFLAGS="${IOS_CFLAGS} ${CFLAGS:-}" \
+		CXXFLAGS="${IOS_CFLAGS} ${CXXFLAGS:-}" \
+		LDFLAGS="${IOS_LDFLAGS} ${LDFLAGS:-}" \
+		CC="$CC" \
+		CXX="$CXX" \
+		AR="$AR" \
+		RANLIB="$RANLIB" \
+		STRIP="$STRIP" \
+		../configure "${configure_args[@]}"
 	else
 		CC="${CC:-cc}" CXX="${CXX:-c++}" ../configure "${configure_args[@]}"
 	fi
@@ -644,6 +704,8 @@ function build_ffmpeg() {
 	local ffmpeg_pc="$FFMPEG_PREFIX/lib/pkgconfig/libavcodec.pc"
 	if [[ "$GOOS" == "android" ]]; then
 		ffmpeg_pc="$ANDROID_DEPS_PATH/lib/pkgconfig/libavcodec.pc"
+	elif [[ "$GOOS" == "ios" ]]; then
+		ffmpeg_pc="$IOS_DEPS_PATH/lib/pkgconfig/libavcodec.pc"
 	fi
 	if [[ -f "$ffmpeg_pc" && -f "$FFMPEG_SRCDIR/config_components.h" ]] &&
 		grep -q '^#define CONFIG_LIBVPX_VP8_DECODER 1' "$FFMPEG_SRCDIR/config_components.h" &&
@@ -693,6 +755,40 @@ function build_ffmpeg() {
 			"--enable-parser=vp8,vp9,opus,vorbis"
 			"--enable-jni" "--enable-mediacodec"
 			"--pkg-config=$(which pkg-config)"
+		)
+	elif [[ "$GOOS" == "ios" ]]; then
+		local prefix="$IOS_DEPS_PATH"
+		export PKG_CONFIG_SYSROOT_DIR=""
+		export PKG_CONFIG_PATH="$prefix/lib/pkgconfig:$PKG_CONFIG_PATH"
+
+    	local configure_args=(
+			"--prefix=$prefix"
+			"--enable-cross-compile"
+			"--target-os=darwin"
+			"--arch=arm64"
+			"--cc=$CC"
+			"--cxx=$CXX"
+			"--ar=$AR"
+			"--ranlib=$RANLIB"
+			"--strip=$STRIP"
+
+        	"--extra-cflags=$IOS_CFLAGS -I$prefix/include"
+			"--extra-ldflags=$IOS_LDFLAGS -L$prefix/lib"
+
+        	"--pkg-config=$(command -v pkg-config)"
+			"--pkg-config-flags=--static"
+
+        	"--enable-static" "--disable-shared"
+			"--disable-gpl" "--disable-nonfree"
+			"--disable-debug" "--disable-doc" "--disable-programs" "--disable-everything"
+			"--disable-autodetect"
+        	"--enable-avformat" "--enable-avcodec" "--enable-avutil" "--enable-swresample" "--enable-swscale"
+			"--enable-avfilter" "--enable-filter=buffer,buffersink,format,scale,pad,crop"
+			"--enable-libvpx"
+			"--enable-protocol=file"
+			"--enable-demuxer=matroska,webm"
+			"--enable-decoder=libvpx_vp8,libvpx_vp9,opus,vorbis"
+			"--enable-parser=vp8,vp9,opus,vorbis"
 		)
 	else
 		local configure_args=(
@@ -751,6 +847,8 @@ function build_ffmpeg() {
 	local pcdir="$FFMPEG_PREFIX/lib/pkgconfig"
 	if [[ "$GOOS" == "android" ]]; then
 		pcdir="$ANDROID_DEPS_PATH/lib/pkgconfig"
+	elif [[ "$GOOS" == "ios" ]]; then
+		pcdir="$IOS_DEPS_PATH/lib/pkgconfig"
 	fi
 	echo "==> FFmpeg pkg-config files installed to: $pcdir"
 	ls -l "$pcdir" || true
@@ -847,6 +945,60 @@ EOF
 	fi
 }
 
+function create_sdl2_pc() {
+    local pc_dir="$IOS_DEPS_PATH/lib/pkgconfig"
+    local sdl2_pc="$pc_dir/sdl2.pc"
+
+    local sdl2_framework="$IOS_WRAPPER_DIR/Frameworks/SDL2.xcframework/ios-arm64/SDL2.framework"
+    local sdl2_headers="$sdl2_framework/Headers"
+    local sdl2_include="$IOS_DEPS_PATH/include"
+
+    echo "==> Preparing SDL2 headers for iOS..."
+
+    if [[ ! -d "$sdl2_framework" ]]; then
+        echo "ERROR: SDL2 framework not found:"
+        echo "       $sdl2_framework"
+        return 1
+    fi
+
+    if [[ ! -f "$sdl2_headers/SDL.h" ]]; then
+        echo "ERROR: SDL2 headers not found:"
+        echo "       $sdl2_headers"
+        return 1
+    fi
+
+    # SDL headers use includes such as:
+    #   #include <SDL2/SDL_main.h>
+	
+    # Therefore the include root must contain:
+    #   $IOS_DEPS_PATH/include/SDL2/SDL_main.h
+    rm -rf "$sdl2_include/SDL2"
+    mkdir -p "$sdl2_include/SDL2"
+
+    cp -R "$sdl2_headers/." "$sdl2_include/SDL2/"
+
+    echo "==> Creating sdl2.pc for iOS..."
+
+    mkdir -p "$pc_dir"
+
+	if [[ ! -f "$sdl2_pc" ]]; then
+    	cat > "$sdl2_pc" <<EOF
+prefix=$sdl2_framework
+includedir=$sdl2_include
+frameworkdir=\${prefix}/..
+
+Name: SDL2
+Description: SDL2 for iOS
+Version: 2.0.0
+Libs: -F\${frameworkdir} -framework SDL2
+Cflags: -I\${includedir}
+EOF
+	fi
+
+    echo "==> SDL2 pkg-config file:"
+    cat "$sdl2_pc"
+}
+
 download_file() {
 	local url="$1" out="$2"
 	mkdir -p "$(dirname "$out")"
@@ -876,14 +1028,14 @@ ensure_screenpack() {
 	git config --system --add safe.directory "$SCREENPACK_DIR" >/dev/null 2>&1 || true
 }
 
-ensure_android_runtime_assets() {
-	[[ "$GOOS" != "android" ]] && return 0
+ensure_mobile_runtime_assets() {
+	[[ "$GOOS" != "android" && "$GOOS" != "ios" ]] && return 0
 
-	# The Android APK must ship with the same runtime assets as desktop releases.
+	# The APK/IPA must ship with the same runtime assets as desktop releases.
 	# If the engine repo doesn't contain them (CI), pull from the Elecbyte screenpack.
 	ensure_screenpack
 
-	# external/gamecontrollerdb.txt (referenced by Android manifest)
+	# external/gamecontrollerdb.txt (referenced by the wrapper manifests)
 	local db="$REPO_ROOT/external/gamecontrollerdb.txt"
 	if [[ ! -f "$db" ]]; then
 		echo "==> Downloading SDL GameController DB..."
@@ -892,7 +1044,7 @@ ensure_android_runtime_assets() {
 			"$db"
 	fi
 
-	# data/system.base.def (referenced by Android manifest)
+	# data/system.base.def (referenced by the wrapper manifests)
 	local sys="$REPO_ROOT/data/system.base.def"
 	if [[ ! -f "$sys" ]]; then
 		echo "==> Generating data/system.base.def from src/resources/defaultMotif.ini..."
@@ -1145,8 +1297,6 @@ function stage_android_apk_assets() {
 	{ cat "$manifest"; echo; android_apk_extra_assets; } | normalize_android_manifest > "$manifest.tmp"
 	mv "$manifest.tmp" "$manifest"
 
-	echo "==> Staging assets into: $assets_dir (from $manifest)"
-	local screenpack="$SCREENPACK_DIR"
 	# Remove everything except manifest.txt so the APK content matches your engine tree
 	find "$assets_dir" -mindepth 1 -maxdepth 1 ! -name "manifest.txt" -exec rm -rf {} + 2>/dev/null || true
 
@@ -1154,34 +1304,8 @@ function stage_android_apk_assets() {
 	# A line ending in "/" or naming a folder only makes the app create that folder
 	# on the device: files are extracted only when listed one by one. Entries that
 	# cannot be staged are left out of the rewritten manifest.
-	local p src dst kept="$manifest.tmp"
-	: > "$kept"
-	while IFS= read -r p; do
-		[[ -z "$p" ]] && continue
-		src="$REPO_ROOT/$p"
-		dst="$assets_dir/$p"
-
-		# If not present in the engine repo, fall back to the Elecbyte screenpack clone.
-		if [[ ! -e "$src" && -n "$screenpack" && -e "$screenpack/$p" ]]; then
-			src="$screenpack/$p"
-		fi
-
-		if [[ -d "$src" ]]; then
-			mkdir -p "$dst"
-			cp -a "$src/." "$dst/" 2>/dev/null || true
-		elif [[ -f "$src" ]]; then
-			mkdir -p "$(dirname "$dst")"
-			cp -a "$src" "$dst"
-		elif [[ "$p" != */ ]]; then
-			# If your tree doesn't include some optional paths from manifest, just warn.
-			echo "WARNING: Asset path missing in Ikemen-GO tree, dropped from manifest.txt: $p" >&2
-			continue
-		fi
-		# Folder lines ending in "/" are kept even when there is nothing to stage:
-		# they make the app create that folder on the device (for example sound/).
-		printf '%s\n' "$p" >> "$kept"
-	done < "$manifest"
-	mv "$kept" "$manifest"
+	stage_manifest_assets "$manifest" "$assets_dir" "$manifest.tmp"
+	mv "$manifest.tmp" "$manifest"
 	echo "==> manifest.txt lists $(wc -l < "$manifest" | tr -d ' ') entries"
 
 	# The engine's own files must all be staged; stop here, before the long Gradle
@@ -1205,6 +1329,54 @@ function stage_android_apk_assets() {
 		printf '%s\n' "$unlisted" | sed 's/^/  /' >&2
 		exit 1
 	fi
+}
+
+# Copy every path listed in a wrapper manifest (ikemen-droid / ikemen-ios) into dest_dir.
+# Paths are resolved against the engine repo first, then the Elecbyte screenpack clone.
+# With kept (ikemen-droid's manifest, one path per line), the paths staged and the
+# folder lines ending in "/" are written to kept, and missing paths are dropped from
+# it; without (ikemen-ios's manifest, whitespace-separated), missing paths only warn.
+function stage_manifest_assets() {
+	local manifest="$1" dest_dir="$2" kept="${3:-}"
+	local screenpack="$SCREENPACK_DIR"
+
+	echo "==> Staging assets into: $dest_dir (from $manifest)"
+	if [[ -n "$kept" ]]; then
+		: > "$kept"
+	fi
+
+	local p src dst
+	while IFS= read -r p; do
+		[[ -z "$p" ]] && continue
+		src="$REPO_ROOT/$p"
+		dst="$dest_dir/$p"
+
+		# If not present in the engine repo, fall back to the Elecbyte screenpack clone.
+		if [[ ! -e "$src" && -n "$screenpack" && -e "$screenpack/$p" ]]; then
+			src="$screenpack/$p"
+		fi
+
+		if [[ -d "$src" ]]; then
+			mkdir -p "$dst"
+			cp -a "$src/." "$dst/" 2>/dev/null || true
+		elif [[ -f "$src" ]]; then
+			mkdir -p "$(dirname "$dst")"
+			cp -a "$src" "$dst"
+		elif [[ "$p" == */ ]]; then
+			# Trailing slash = directory the engine expects to exist, even if empty.
+			mkdir -p "$dst"
+		elif [[ -n "$kept" ]]; then
+			# If your tree doesn't include some optional paths from manifest, just warn.
+			echo "WARNING: Asset path missing in Ikemen-GO tree, dropped from manifest.txt: $p" >&2
+			continue
+		else
+			echo "WARNING: Asset path missing in Ikemen-GO tree: $p" >&2
+		fi
+		if [[ -n "$kept" ]]; then
+			printf '%s\n' "$p" >> "$kept"
+		fi
+	done < <(if [[ -n "$kept" ]]; then cat "$manifest"; else tr -s '[:space:]' '\n' < "$manifest"; fi)
+	return 0
 }
 
 # Checks the built APK: every file the engine tree ships in data, font and
@@ -1278,7 +1450,7 @@ function build_android_apk() {
 
 	ensure_android_sdk_for_gradle
 	sync_android_apk_repo
-	ensure_android_runtime_assets
+	ensure_mobile_runtime_assets
 	stage_android_apk_libs
 	stage_android_apk_assets
 
@@ -1305,6 +1477,233 @@ function build_android_apk() {
 
 	echo "==> APK ready: $ANDROID_APK_OUT"
 	popd >/dev/null
+}
+
+function prepare_ios_deps() {
+	[[ "$GOOS" != "ios" ]] && return 0
+	build_libxmp_ios
+	build_ffmpeg
+
+    export CGO_CFLAGS="-I$IOS_DEPS_PATH/include ${CGO_CFLAGS:-}"
+    export CGO_LDFLAGS="
+        -L$IOS_DEPS_PATH/lib
+		-Wl,-force_load,$IOS_DEPS_PATH/lib/libvpx.a
+        -lxmp
+        -lavfilter
+        -lswscale
+        -lswresample
+        -lavformat
+        -lavcodec
+        -lavutil
+        -lvpx
+        -lm
+        -lz
+        -framework AudioToolbox
+        -framework AVFoundation
+        ${CGO_LDFLAGS:-}
+    "
+}
+
+function build_libxmp_ios() {
+    local src="$BUILDDIR/libxmp-src"
+    local build_dir="$src/build-ios"
+    local prefix="$IOS_DEPS_PATH"
+
+    if [[ -f "$prefix/lib/libxmp.a" ]]; then
+        echo "==> Found existing iOS libxmp in $prefix"
+        ensure_pkg_config_path
+        return 0
+    fi
+
+    if [[ ! -d "$src/.git" ]]; then
+        rm -rf "$src"
+        echo "==> Cloning LibXMP..."
+        git clone https://github.com/libxmp/libxmp.git "$src"
+    else
+        echo "==> LibXMP sources already exist in $src"
+    fi
+
+    echo "==> Building LibXMP for iOS..."
+
+    rm -rf "$build_dir"
+    mkdir -p "$build_dir"
+    pushd "$build_dir" >/dev/null
+
+    cmake .. \
+        -DCMAKE_SYSTEM_NAME=iOS \
+        -DCMAKE_OSX_SYSROOT=iphoneos \
+        -DCMAKE_OSX_ARCHITECTURES=arm64 \
+        -DCMAKE_OSX_DEPLOYMENT_TARGET="$IOS_MIN_VERSION" \
+        -DCMAKE_C_COMPILER="$CC" \
+        -DCMAKE_INSTALL_PREFIX="$prefix" \
+        -DBUILD_STATIC=ON \
+        -DBUILD_SHARED=OFF \
+        -DBUILD_TESTING=OFF \
+        -DENABLE_TESTS=OFF
+
+    echo "==> Configure complete. Starting make..."
+    cmake --build . --parallel "$(getconf _NPROCESSORS_ONLN || echo 2)"
+
+    echo "==> Build complete. Installing..."
+    cmake --install .
+
+    echo "==> LibXMP files installed to: $prefix"
+    ls -l "$prefix/lib/libxmp.a" || true
+
+    popd >/dev/null
+
+    ensure_pkg_config_path
+}
+
+# Run xcodebuild without the cross-compile environment exported by variOS, so
+# Xcode picks its own toolchain and SDK for the target it is building.
+function xcodebuild_clean() {
+	env -u CC -u CXX -u AR -u RANLIB -u STRIP -u SDKROOT \
+		-u CFLAGS -u CXXFLAGS -u LDFLAGS \
+		-u PKG_CONFIG_PATH -u PKG_CONFIG_LIBDIR -u PKG_CONFIG_SYSROOT_DIR \
+		xcodebuild "$@"
+}
+
+# Resolve the ikemen-ios Xcode wrapper. IOS_WRAPPER_DIR (if set) is used in place;
+# otherwise IOS_APP_REPO@IOS_APP_REF is cloned into build/ios-app/ikemen-ios.
+function sync_ios_app_repo() {
+	if [[ -n "$IOS_WRAPPER_DIR" ]]; then
+		if [[ ! -d "$IOS_WRAPPER_DIR/I.K.E.M.E.N-Go.xcodeproj" ]]; then
+			echo "ERROR: IOS_WRAPPER_DIR is not an ikemen-ios checkout: $IOS_WRAPPER_DIR" >&2
+			exit 1
+		fi
+		IOS_WRAPPER_DIR="$(cd "$IOS_WRAPPER_DIR" && pwd -P)"
+		echo "==> Using local ikemen-ios checkout in-place: $IOS_WRAPPER_DIR"
+		return 0
+	fi
+
+	IOS_WRAPPER_DIR="$REPO_ROOT/$BUILDDIR/ios-app/ikemen-ios"
+	mkdir -p "$(dirname "$IOS_WRAPPER_DIR")"
+	if [[ ! -d "$IOS_WRAPPER_DIR/.git" ]]; then
+		rm -rf "$IOS_WRAPPER_DIR"
+		echo "==> Cloning ikemen-ios: $IOS_APP_REPO ($IOS_APP_REF) -> $IOS_WRAPPER_DIR"
+		git clone --depth=1 -b "$IOS_APP_REF" "$IOS_APP_REPO" "$IOS_WRAPPER_DIR"
+	else
+		echo "==> Updating ikemen-ios in $IOS_WRAPPER_DIR ($IOS_APP_REF)"
+		( cd "$IOS_WRAPPER_DIR" \
+			&& git fetch --depth=1 origin "$IOS_APP_REF" \
+			&& git checkout -f FETCH_HEAD )
+	fi
+}
+
+# SDL2.xcframework for the wrapper. Built from source ($SDL2_REV) because SDL2
+# releases do not ship an iOS binary. Skipped when the wrapper already has one.
+function ensure_ios_sdl2_framework() {
+	local xcfw="$IOS_WRAPPER_DIR/Frameworks/SDL2.xcframework"
+	if [[ -f "$xcfw/ios-arm64/SDL2.framework/Headers/SDL.h" ]]; then
+		echo "==> Found SDL2.xcframework in $IOS_WRAPPER_DIR/Frameworks"
+		return 0
+	fi
+
+	echo "==> Building SDL2 $SDL2_REV xcframework for iOS"
+	if [[ ! -d "$SDL2_SRCDIR/.git" ]]; then
+		rm -rf "$SDL2_SRCDIR"
+		git clone --depth=1 -b "$SDL2_REV" https://github.com/libsdl-org/SDL.git "$SDL2_SRCDIR"
+	fi
+
+	local archive="$REPO_ROOT/$BUILDDIR/ios-app/SDL2-iphoneos.xcarchive"
+	rm -rf "$archive"
+	xcodebuild_clean archive \
+		-project "$SDL2_SRCDIR/Xcode/SDL/SDL.xcodeproj" \
+		-scheme Framework-iOS \
+		-destination 'generic/platform=iOS' \
+		-archivePath "$archive" \
+		BUILD_LIBRARY_FOR_DISTRIBUTION=YES SKIP_INSTALL=NO \
+		IPHONEOS_DEPLOYMENT_TARGET="$IOS_MIN_VERSION" \
+		CODE_SIGNING_ALLOWED=NO
+
+	mkdir -p "$(dirname "$xcfw")"
+	rm -rf "$xcfw"
+	xcodebuild_clean -create-xcframework \
+		-framework "$archive/Products/Library/Frameworks/SDL2.framework" \
+		-output "$xcfw"
+	if [[ ! -f "$xcfw/ios-arm64/SDL2.framework/Headers/SDL.h" ]]; then
+		echo "ERROR: SDL2.xcframework has no ios-arm64 slice: $xcfw" >&2
+		exit 1
+	fi
+}
+
+# MoltenVK.xcframework (dynamic) for the wrapper, from the pinned Khronos release.
+function ensure_ios_moltenvk_framework() {
+	local xcfw="$IOS_WRAPPER_DIR/Frameworks/MoltenVK.xcframework"
+	if [[ -d "$xcfw/ios-arm64/MoltenVK.framework" ]]; then
+		echo "==> Found MoltenVK.xcframework in $IOS_WRAPPER_DIR/Frameworks"
+		return 0
+	fi
+
+	echo "==> Downloading MoltenVK $MOLTENVK_REV for iOS"
+	local work="$REPO_ROOT/$BUILDDIR/ios-app/moltenvk"
+	rm -rf "$work"
+	mkdir -p "$work"
+	download_file \
+		"https://github.com/KhronosGroup/MoltenVK/releases/download/$MOLTENVK_REV/MoltenVK-ios.tar" \
+		"$work/MoltenVK-ios.tar"
+	tar -xf "$work/MoltenVK-ios.tar" -C "$work"
+
+	mkdir -p "$(dirname "$xcfw")"
+	rm -rf "$xcfw"
+	cp -R "$work/MoltenVK/MoltenVK/dynamic/MoltenVK.xcframework" "$xcfw"
+	rm -rf "$work"
+}
+
+# Package the wrapper into an unsigned IPA. Users sign it themselves when
+# sideloading (Apple requires a per-user signature outside the App Store).
+function build_ios_ipa() {
+	[[ "$GOOS" != "ios" ]] && return 0
+	[[ "$BUILD_IOS_IPA" == "0" ]] && { echo "==> BUILD_IOS_IPA=0: skipping IPA build"; return 0; }
+
+	ensure_mobile_runtime_assets
+
+	# DefaultAssets.zip: manifest.txt plus every path it lists, all at the zip root.
+	local assets_dir="$IOS_WRAPPER_DIR/DefaultAssets"
+	local manifest="$assets_dir/manifest.txt"
+	if [[ ! -f "$manifest" ]]; then
+		echo "ERROR: ikemen-ios manifest not found at: $manifest" >&2
+		exit 1
+	fi
+	find "$assets_dir" -mindepth 1 -maxdepth 1 ! -name "manifest.txt" -exec rm -rf {} + 2>/dev/null || true
+	stage_manifest_assets "$manifest" "$assets_dir"
+	rm -f "$IOS_WRAPPER_DIR/DefaultAssets.zip"
+	( cd "$assets_dir" && zip -qr -X "$IOS_WRAPPER_DIR/DefaultAssets.zip" . )
+
+	local out="$REPO_ROOT/$BUILDDIR/ios-app/out"
+	rm -rf "$out"
+
+	local version_args=()
+	local app_version="$IOS_APP_VERSION"
+	if [[ -z "$app_version" && "$APP_VERSION" =~ ^v([0-9]+\.[0-9]+\.[0-9]+) ]]; then
+		app_version="${BASH_REMATCH[1]}"
+	fi
+	[[ -n "$app_version" ]] && version_args+=("MARKETING_VERSION=$app_version")
+	[[ -n "$IOS_BUILD_NUMBER" ]] && version_args+=("CURRENT_PROJECT_VERSION=$IOS_BUILD_NUMBER")
+
+	echo "==> Building IPA with xcodebuild (unsigned)..."
+	xcodebuild_clean archive \
+		-project "$IOS_WRAPPER_DIR/I.K.E.M.E.N-Go.xcodeproj" \
+		-scheme I.K.E.M.E.N-Go \
+		-configuration Release \
+		-destination 'generic/platform=iOS' \
+		-derivedDataPath "$out/DerivedData" \
+		-archivePath "$out/ikemen.xcarchive" \
+		IPHONEOS_DEPLOYMENT_TARGET="$IOS_MIN_VERSION" \
+		${version_args[@]+"${version_args[@]}"} \
+		CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" DEVELOPMENT_TEAM=""
+
+	local app="$out/ikemen.xcarchive/Products/Applications/I.K.E.M.E.N-Go.app"
+	if [[ ! -d "$app" ]]; then
+		echo "ERROR: xcodebuild finished but app not found at: $app" >&2
+		exit 1
+	fi
+	mkdir -p "$out/ipa/Payload" "$(dirname "$IOS_IPA_OUT")"
+	cp -R "$app" "$out/ipa/Payload/"
+	rm -f "$IOS_IPA_OUT"
+	( cd "$out/ipa" && zip -qry "$IOS_IPA_OUT" Payload )
+	echo "==> IPA ready: $IOS_IPA_OUT"
 }
 
 function maybe_build_ffmpeg() {
@@ -1341,6 +1740,29 @@ function maybe_build_ffmpeg() {
 	esac
 }
 
+# Rebuild cached Windows libs if the MSYS2 shell changed
+function invalidate_msys_env_cache() {
+	local current="${MSYSTEM:-UCRT64}" previous=""
+	if [[ -f "$MSYS_ENV_STAMP" ]]; then
+		previous="$(<"$MSYS_ENV_STAMP")"
+	elif [[ -d "$FFMPEG_PREFIX/bin" || -d "$DELAYLIB_DIR" ]]; then
+		# Old caches without a stamp came from MINGW64
+		previous="MINGW64"
+	fi
+	if [[ -n "$previous" && "$previous" != "$current" ]]; then
+		echo "==> MSYS2 shell changed ($previous -> $current), rebuilding cached libs"
+		if [[ "$FFMPEG_PREFIX" == "$REPO_ROOT/$BUILDDIR/ffmpeg" ]]; then
+			rm -rf "$FFMPEG_PREFIX" "$FFMPEG_SRCDIR" "$LIBVPX_SRCDIR"
+		else
+			echo "WARNING: rebuild FFMPEG_PREFIX=$FFMPEG_PREFIX for $current." >&2
+		fi
+		rm -rf "$DELAYLIB_DIR"
+		rm -f "$LIBDIR"/*.dll
+	fi
+	mkdir -p "$BUILDDIR"
+	echo "$current" > "$MSYS_ENV_STAMP"
+}
+
 # Generate delay-load import libraries for MinGW (Windows)
 function create_delay_import_libs_windows() {
 	[[ "$GOOS" != "windows" ]] && return 0
@@ -1352,7 +1774,7 @@ function create_delay_import_libs_windows() {
 	mkdir -p "$DELAYLIB_DIR"
 	shopt -s nullglob
 	local d base name libname
-	for d in "$FFMPEG_PREFIX"/bin/*.dll /mingw64/bin/libxmp*.dll /mingw64/bin/libwinpthread-1.dll /mingw64/bin/SDL2*.dll; do
+	for d in "$FFMPEG_PREFIX"/bin/*.dll "$MSYS_PREFIX"/bin/libxmp*.dll "$MSYS_PREFIX"/bin/libwinpthread-1.dll "$MSYS_PREFIX"/bin/SDL2*.dll; do
 		[[ -f "$d" ]] || continue
 		base="$(basename "$d")"          # e.g. libxmp-4.dll
 		name="${base%.dll}"              # libxmp-4
@@ -1376,6 +1798,15 @@ function build() {
 		local deps_libs="-L$ANDROID_DEPS_PATH/lib -lSDL2 -lxmp -lavformat -lavcodec -lavutil -lswscale -lswresample -lavfilter"
 		# Link against Android system libraries (GLES, OpenSLES, log)
 		export CGO_LDFLAGS="${deps_libs} ${CGO_LDFLAGS:-} -lGLESv2 -lOpenSLES -llog -Wl,-z,max-page-size=16384"
+	elif [[ "$GOOS" == "ios" ]]; then
+		# MANUALLY define flags for iOS to avoid pkg-config errors
+		# The wrapper supplies SDL2 (headers for cgo) and SDLWindowFix.h, so it must exist first.
+		sync_ios_app_repo
+		ensure_ios_sdl2_framework
+		ensure_ios_moltenvk_framework
+		prepare_ios_deps
+		create_sdl2_pc
+		export CGO_CFLAGS="-DSDL_MAIN_HANDLED -I${IOS_WRAPPER_DIR}/Frameworks/SDL2.xcframework/ios-arm64/SDL2.framework/Headers -I${IOS_WRAPPER_DIR}/I.K.E.M.E.N-Go ${CGO_CFLAGS:-}"
 	else
 		maybe_build_ffmpeg
 		export PKG_CONFIG="${PKG_CONFIG:-pkg-config}"
@@ -1409,6 +1840,10 @@ function build() {
 		go build -buildmode=c-shared -trimpath -v -tags=android,gles2 \
 		-ldflags="-s -w -X 'main.Version=${APP_VERSION}' -X 'main.BuildTime=${APP_BUILDTIME}' -X 'runtime.godebugDefault=asyncpreemptoff=1,sigaltstack=0'" \
 		-o "$OUTDIR/$binName" ./src
+	elif [[ "$GOOS" == "ios" ]]; then
+		go build -buildmode=c-archive -trimpath -v -tags=ios \
+		-ldflags="-s -w -X 'main.Version=${APP_VERSION}' -X 'main.BuildTime=${APP_BUILDTIME}'" \
+		-o "$OUTDIR/$binName" ./src
 	else
 		go build -trimpath -v \
 		-ldflags "-s -w -X 'main.Version=${APP_VERSION}' -X 'main.BuildTime=${APP_BUILDTIME}'" \
@@ -1416,8 +1851,21 @@ function build() {
 	fi
 
 	# bundle libs
-	bundle_shared_libs
-	fix_macos_dylib_paths
+	if [[ "$GOOS" != "ios" ]]; then
+		bundle_shared_libs
+		fix_macos_dylib_paths
+	else
+		# Fix iOS header
+		headerName="${binName%.a}.h"
+		sed_inplace 's/#include "SDL.h"/#include <SDL2\/SDL.h>/g' "$OUTDIR/$headerName"
+
+		# Copy the headers and libs to the wrapper dir
+		cp "$IOS_DEPS_PATH/lib"/*.a "$IOS_WRAPPER_DIR/"
+		cp "$OUTDIR/$headerName" "$IOS_WRAPPER_DIR/"
+		cp "$OUTDIR/$binName" "$IOS_WRAPPER_DIR/"
+		echo "==> Copied libs to wrapper dir: $IOS_WRAPPER_DIR/"
+		build_ios_ipa
+	fi
 
 	# For Android, optionally build the APK via ikemen-droid
 	build_android_apk
@@ -1428,6 +1876,7 @@ function build() {
 }
 
 function buildWin() {
+	invalidate_msys_env_cache
 	stage_windows_resources
 	maybe_build_ffmpeg
 	export PKG_CONFIG="${PKG_CONFIG:-pkg-config}"
@@ -1564,14 +2013,8 @@ EOF
 
 	# Compile RC -> COFF object that Go will auto-link (.syso in package dir)
 
-	local wr targetflag
-	if [[ "$GOARCH" == "amd64" ]]; then
-		wr="${WINDRES:-x86_64-w64-mingw32-windres}"
-		targetflag="--target=pe-x86-64"
-	else
-		wr="${WINDRES:-i686-w64-mingw32-windres}"
-		targetflag="--target=pe-i386"
-	fi
+	local wr="${WINDRES:-x86_64-w64-mingw32-windres}"
+	local targetflag="--target=pe-x86-64"
 	command -v "$wr" >/dev/null 2>&1 || wr="windres"
 	echo "==> Embedding Windows resources (icon + manifest) with $wr..."
 	"$wr" $targetflag \
@@ -1592,13 +2035,12 @@ function bundle_shared_libs() {
 		# Windows
 		cp -afv "$FFMPEG_PREFIX"/bin/*.dll "$dest_lib/" 2>/dev/null || true
 		# MSYS2 runtime dep
-		#cp -av /mingw64/bin/libwinpthread-1.dll "$dest_lib/" 2>/dev/null || true
 		for d in \
-			/mingw64/bin/libwinpthread-1.dll \
-			/mingw64/bin/libgcc_s_seh-1.dll \
-			/mingw64/bin/libstdc++-6.dll \
-			/mingw64/bin/libxmp*.dll \
-			/mingw64/bin/SDL2*.dll ; do
+			"$MSYS_PREFIX"/bin/libwinpthread-1.dll \
+			"$MSYS_PREFIX"/bin/libgcc_s_seh-1.dll \
+			"$MSYS_PREFIX"/bin/libstdc++-6.dll \
+			"$MSYS_PREFIX"/bin/libxmp*.dll \
+			"$MSYS_PREFIX"/bin/SDL2*.dll ; do
 			cp -av "$d" "$dest_lib/" 2>/dev/null || true
 		done
 	elif [[ -d "$FFMPEG_PREFIX/lib" && "$GOOS" != "android" ]]; then
@@ -1670,7 +2112,6 @@ function fix_macos_dylib_paths() {
 
 # Determine the target OS.
 function checkOS() {
-	osArch=`uname -m`
 	case "$OSTYPE" in
 		darwin*)
 			currentOS="MacOS"
@@ -1679,11 +2120,8 @@ function checkOS() {
 			currentOS="Linux"
 		;;
 		msys|cygwin)
-			if [[ "$osArch" == "x86_64" ]]; then
-				currentOS="Win64"
-			else
-				currentOS="Win32"
-			fi
+			# 32-bit Windows is not supported
+			currentOS="Win64"
 		;;
 		*)
 			if [[ -z "${1:-}" ]]; then

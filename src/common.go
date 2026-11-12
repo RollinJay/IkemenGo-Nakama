@@ -126,6 +126,23 @@ func Abs[T int | int32 | int64 | float32 | float64](val T) (res T) {
 }
 
 func Pow(x, y float32) float32 {
+	// Fast path for the hottest cases
+	switch y {
+	case 0:
+		return 1
+	case 1:
+		return x
+	case 2:
+		return x * x
+	case 3:
+		p := float64(x)
+		return float32(p * p * p)
+	case 4:
+		p := float64(x)
+		p *= p
+		return float32(p * p)
+	}
+	// General-purpose fallback
 	return float32(math.Pow(float64(x), float64(y)))
 }
 
@@ -181,12 +198,17 @@ func Atoi(str string) int32 {
 		} else {
 			a = str
 		}
+		// Negative side allows one more (-2147483648 is a valid int32)
+		limit := int64(math.MaxInt32)
+		if str[0] == '-' {
+			limit++
+		}
 		for i := range a {
 			if a[i] < '0' || '9' < a[i] {
 				break
 			}
 			n = n*10 + int64(a[i]-'0')
-			if n > 2147483647 {
+			if n > limit {
 				sys.appendToConsole(fmt.Sprintf("WARNING: Atoi conversion outside int32 range: %v", a[:i+1]))
 				LogMessage("Atoi conversion outside int32 range: %v", a[:i+1])
 				if str[0] == '-' {
@@ -1214,6 +1236,72 @@ func (is IniSection) readF32CsvForStage(name string) (ary []float32) {
 	return
 }
 
+// ReadAutoType reads a scalar INI value as a string, int32, or float32.
+// The bool reports whether the key exists; unquoted non-numeric values are invalid.
+func (is IniSection) ReadAutoType(name string) (any, bool, error) {
+	raw, ok := is[name]
+	if !ok {
+		return nil, false, nil
+	}
+
+	// Helper to print shared error
+	invalidValue := func() error {
+		return Error(fmt.Sprintf("%q value must be a quoted string or number", name))
+	}
+
+	// Get raw value
+	s := strings.TrimSpace(raw)
+
+	// Try string
+	if strings.ContainsRune(s, '"') {
+		if len(s) < 2 || s[0] != '"' || s[len(s)-1] != '"' {
+			return nil, true, invalidValue()
+		}
+		unquoted, err := strconv.Unquote(s)
+		if err != nil {
+			return nil, true, invalidValue()
+		}
+		return unquoted, true, nil
+	}
+
+	// Try int
+	if IsInt(s) {
+		return Atoi(s), true, nil
+	}
+
+	// Try float
+	// Parse like the compiler so a value compares equal to the same CNS literal.
+	if f, err := strconv.ParseFloat(s, 32); err == nil {
+		return float32(f), true, nil
+	}
+
+	// Invalid value
+	return nil, true, invalidValue()
+}
+
+func (is IniSection) ReadAutoTypeMap(dst map[string]TypedValue, kind string) error {
+	for key := range is {
+		value, ok, err := is.ReadAutoType(key)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			continue
+		}
+		switch value := value.(type) {
+		case string:
+			dst[key] = TypedValue{Type: VT_String, Str: value}
+		case int32:
+			dst[key] = TypedValue{Type: VT_Int, Num: float64(value)}
+		case float32:
+			dst[key] = TypedValue{Type: VT_Float, Num: float64(value)}
+		default:
+			return Error(fmt.Sprintf("unsupported auto-typed value for %s key %q", kind, key))
+		}
+	}
+	return nil
+}
+
 func (is IniSection) getText(name string) (str string, ok bool, err error) {
 	str, ok = is[name]
 	if !ok {
@@ -1385,7 +1473,7 @@ func (l *Layout) DrawAnim(r *[4]int32, x, y, scl, xscl, yscl float32, ln int16, 
 			scl, scl, (l.scale[0]*xscl)*float32(l.facing), (l.scale[0]*xscl)*float32(l.facing),
 			(l.scale[1]*yscl)*float32(l.vfacing), xshear, l.rot,
 			float32(sys.gameWidth-320)/2, [2]float32{0, 0},
-			palfx, 1, [2]float32{1, 1}, int32(l.projection), l.fLength, 0, false, CustomShaderRenderData{})
+			palfx, 1, [2]float32{1, 1}, int32(l.projection), l.fLength, false, CustomShaderRenderData{})
 	}
 }
 
@@ -1839,6 +1927,14 @@ func SliceDelete[T any](slice []T, i int) []T {
 	return slice[:len(slice)-1]
 }
 
+// Backport of slices.Grow for Go 1.20
+func SliceGrow[T any](slice []T, n int) []T {
+	if n -= cap(slice) - len(slice); n > 0 {
+		slice = append(slice[:cap(slice)], make([]T, n)...)[:len(slice)]
+	}
+	return slice
+}
+
 // Nils out all elements and returns a zero-length slice while preserving the underlying capacity
 // This is better than plain [:0] because we ensure data from previous characters is GC'd
 func PointerSliceReset[T any](slice []*T) []*T {
@@ -1908,4 +2004,18 @@ func NormalizeRect[T int | int32 | int64 | float32 | float64](rect [4]T) [4]T {
 		rect[1], rect[3] = rect[3], rect[1]
 	}
 	return rect
+}
+
+// Left edge of a localcoord in game units. Kept fractional, like gameWidth (#1615, #3799).
+func localcoordOffsetX(lx, v float64) float32 {
+	return float32(-(lx*320/v - 320) / 2)
+}
+
+// Window in game units to pixels. Edges are rounded separately to match sprite edges.
+func screenRect(x, y, w, h float32) [4]int32 {
+	x1 := int32(math.Round(float64(x * sys.widthScale)))
+	y1 := int32(math.Round(float64(y * sys.heightScale)))
+	x2 := int32(math.Round(float64((x + w) * sys.widthScale)))
+	y2 := int32(math.Round(float64((y + h) * sys.heightScale)))
+	return [4]int32{x1, y1, x2 - x1, y2 - y1}
 }

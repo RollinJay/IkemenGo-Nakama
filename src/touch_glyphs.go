@@ -147,7 +147,7 @@ func readSffV2(filename string) (*sffV2, error) {
 	if err != nil {
 		return nil, err
 	}
-	r := &sffV2{data: bytes.NewReader(raw), sff: newSff()}
+	r := &sffV2{data: bytes.NewReader(raw), sff: newSff(SffTypeOther)}
 	r.sff.filename = filename
 	var lofs, tofs uint32
 	if err := r.sff.header.Read(r.data, &lofs, &tofs); err != nil {
@@ -156,7 +156,7 @@ func readSffV2(filename string) (*sffV2, error) {
 	if r.sff.header.Version[0] != 2 {
 		return nil, fmt.Errorf("%s is SFF v%d, not v2", filename, r.sff.header.Version[0])
 	}
-	if err := r.sff.loadPalettes(r.data, lofs); err != nil {
+	if _, err := r.sff.loadPalettes(r.data, lofs); err != nil {
 		return nil, err
 	}
 	r.entries = make([]sffV2Entry, r.sff.header.NumberOfSprites)

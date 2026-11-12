@@ -58,7 +58,7 @@ import (
 
 const (
 	matchReplayFormat      = "ikemen-match-replay"
-	matchReplayVersion     = 1
+	matchReplayVersion     = 2 // 2: map values hold a number or a string
 	matchReplayChunkFrames = 600
 	// The longest line read back: a frames record of 600 frames is about
 	// 52 KB, a match record a few KB.
@@ -487,22 +487,32 @@ const matchReplayMaxVars = 4096
 // character's control does not follow). Float values are kept as their
 // bits, exactly.
 type ReplayPlayerState struct {
-	Player         int               `json:"player"`
-	CPU            bool              `json:"cpu"`
-	Life           int32             `json:"life"`
-	LifeMax        int32             `json:"life_max"`
-	Power          int32             `json:"power"`
-	PowerMax       int32             `json:"power_max"`
-	DizzyPoints    int32             `json:"dizzy_points"`
-	DizzyPointsMax int32             `json:"dizzy_points_max"`
-	GuardPoints    int32             `json:"guard_points"`
-	GuardPointsMax int32             `json:"guard_points_max"`
-	RedLife        int32             `json:"red_life"`
-	Vars           map[int32]int32   `json:"vars,omitempty"`
-	FVars          map[int32]uint32  `json:"fvars,omitempty"`
-	SysVars        map[int32]int32   `json:"sysvars,omitempty"`
-	SysFVars       map[int32]uint32  `json:"sysfvars,omitempty"`
-	Maps           map[string]uint32 `json:"maps,omitempty"`
+	Player         int              `json:"player"`
+	CPU            bool             `json:"cpu"`
+	Life           int32            `json:"life"`
+	LifeMax        int32            `json:"life_max"`
+	Power          int32            `json:"power"`
+	PowerMax       int32            `json:"power_max"`
+	DizzyPoints    int32            `json:"dizzy_points"`
+	DizzyPointsMax int32            `json:"dizzy_points_max"`
+	GuardPoints    int32            `json:"guard_points"`
+	GuardPointsMax int32            `json:"guard_points_max"`
+	RedLife        int32            `json:"red_life"`
+	Vars           map[int32]int32  `json:"vars,omitempty"`
+	FVars          map[int32]uint32 `json:"fvars,omitempty"`
+	SysVars        map[int32]int32  `json:"sysvars,omitempty"`
+	SysFVars       map[int32]uint32 `json:"sysfvars,omitempty"`
+	// Map values, which hold a number or a string; the version 1 format kept
+	// float numbers only, under "maps".
+	Maps map[string]matchReplayMapValue `json:"map_values,omitempty"`
+}
+
+// matchReplayMapValue is a character map value, its number kept as raw bits
+// so that it comes back exactly (JSON has no NaN or infinity).
+type matchReplayMapValue struct {
+	Type ValueType `json:"t"`
+	Num  uint64    `json:"n,omitempty"`
+	Str  string    `json:"s,omitempty"`
 }
 
 // matchStartState is the players' state at the start of the session being
@@ -535,9 +545,9 @@ func captureMatchStartState() []ReplayPlayerState {
 			SysFVars:       floatVarBits(c.cnssysfvar),
 		}
 		if len(c.mapArray) > 0 {
-			st.Maps = make(map[string]uint32, len(c.mapArray))
+			st.Maps = make(map[string]matchReplayMapValue, len(c.mapArray))
 			for k, v := range c.mapArray {
-				st.Maps[k] = math.Float32bits(v)
+				st.Maps[k] = matchReplayMapValue{Type: v.Type, Num: math.Float64bits(v.Num), Str: v.Str}
 			}
 		}
 		out = append(out, st)
@@ -613,9 +623,9 @@ func applyMatchStartState(states []ReplayPlayerState) {
 			}
 		}
 		if len(st.Maps) <= matchReplayMaxVars {
-			c.mapArray = make(map[string]float32, len(st.Maps))
+			c.mapArray = make(map[string]TypedValue, len(st.Maps))
 			for k, v := range st.Maps {
-				c.mapArray[k] = math.Float32frombits(v)
+				c.mapArray[k] = TypedValue{Type: v.Type, Num: math.Float64frombits(v.Num), Str: v.Str}
 			}
 		}
 	}
