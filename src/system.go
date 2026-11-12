@@ -1,12 +1,13 @@
 package main
 
 import (
-	"arena"
 	"bufio"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"image"
 	"io"
+	"unsafe"
 
 	//"log"
 	"math"
@@ -14,6 +15,7 @@ import (
 	"path"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -160,9 +162,11 @@ type SystemStateVars struct {
 // The only instance of a System struct.
 // Do not create more than 1.
 var sys = System{
-	soundMixer: &beep.Mixer{},
-	videoMixer: &beep.Mixer{},
-	bgm:        *newBgm(),
+	soundMixer:       &beep.Mixer{},
+	videoMixer:       &beep.Mixer{},
+	bgm:              *newBgm(),
+	pauseSoundVolume: 100,
+	focusSoundVolume: 100,
 	//soundChannels: newSoundChannels(16), // Lazy allocation in Request()
 	allPalFX: newPalFX(),
 	bgPalFX:  newPalFX(),
@@ -182,8 +186,6 @@ var sys = System{
 	savePool:         NewGameStatePool(),
 	loadPool:         NewGameStatePool(),
 	commandLists:     make([]*CommandList, 0),
-	arenaSaveMap:     make(map[int]*arena.Arena),
-	arenaLoadMap:     make(map[int]*arena.Arena),
 	debugAccel:       1, // TODO: We probably shouldn't rely on this being initialized to 1
 	charVarsBackup:   make(map[int]CharVarBackup),
 	SystemStateVars: SystemStateVars{
@@ -216,34 +218,117 @@ const (
 	TM_LAST = TM_Tag
 )
 
+func (tm TeamMode) TriggerValue() string {
+	switch tm {
+	case TM_Single:
+		return "single"
+	case TM_Simul:
+		return "simul"
+	case TM_Turns:
+		return "turns"
+	case TM_Tag:
+		return "tag"
+	}
+	return ""
+}
+
 // System struct, holds most of the data that is accessed globally through the program.
 type System struct {
 	SystemStateVars
 
-	window                         *Window
-	redrawWait                     struct{ nextTime, lastDraw time.Time }
-	debugFont                      *TextSprite
-	debugDisplay                   bool
-	debugRef                       [2]int // player number, helper index
-	debugLastID                    int32
-	soundMixer                     *beep.Mixer
-	videoMixer                     *beep.Mixer
-	bgm                            Bgm
-	matchMusicSel                  []*bgMusic
-	pauseVolumeApplied             bool
-	soundChannels                  SoundChannels // System sounds. Lifebars etc
-	charSoundChannels              [MaxPlayerNo]SoundChannels
-	allPalFX                       *PalFX
-	bgPalFX                        *PalFX
-	fightScreen                    FightScreen
-	motif                          Motif
-	storyboard                     Storyboard
-	cfg                            Config
-	ffx                            map[string]*FightFx
-	sel                            Select
-	keyState                       map[Key]bool
-	netConnection                  *NetConnection
-	replayFile                     *ReplayFile
+	window              *Window
+	redrawWait          struct{ nextTime, lastDraw time.Time }
+	debugFont           *TextSprite
+	debugDisplay        bool
+	debugRef            [2]int // player number, helper index
+	debugLastID         int32
+	soundMixer          *beep.Mixer
+	videoMixer          *beep.Mixer
+	bgm                 Bgm
+	matchMusicSel       []*bgMusic
+	pauseSoundVolume    int
+	focusSoundVolume    int
+	focusMuted          bool
+	duckingFlag         bool          // Whether charSoundChannels currently carry a non-1 duckMul
+	motifDuckingFlag    bool          // Whether soundChannels currently carry a non-1 duckMul
+	soundChannels       SoundChannels // System sounds. Lifebars etc
+	charSoundChannels   [MaxPlayerNo]SoundChannels
+	allPalFX            *PalFX
+	bgPalFX             *PalFX
+	fightScreen         FightScreen
+	motif               Motif
+	storyboard          Storyboard
+	matchStoryboards    StoryboardManager
+	cfg                 Config
+	ffx                 map[string]*FightFx
+	sel                 Select
+	keyState            map[Key]bool
+	netConnection       *NetConnection
+	replayFile          *ReplayFile
+	keyConfig           []KeyConfig
+	joystickConfig      []KeyConfig
+	loader              Loader
+	chars               [MaxPlayerNo][]*Char
+	charList            CharList
+	cgi                 [MaxPlayerNo]CharGlobalInfo
+	selMutex            sync.RWMutex
+	loadMutex           sync.Mutex
+	turnsPreloadMember  [2]int // -1 = none; otherwise selected Turns member index to load into side+2
+	preloadedChars      [2]*Char
+	preloadedCgi        [2]CharGlobalInfo
+	preloadedCharsMutex sync.Mutex
+	ignoreMostErrors    bool
+	stringPool          [MaxPlayerNo]StringPool
+	bcStack, bcVarStack BytecodeStack
+	bcVar               []BytecodeValue
+	workingChar         *Char          // Char currently running its states
+	workingState        *StateBytecode // State currently running
+	stage               *Stage
+	stageList           map[int32]*Stage
+	stageLocalcoords    map[string][2]int32
+	wireframeDisplay    bool
+	shortcutScripts     map[ShortcutKey]*ShortcutScript
+	commandLine         chan string
+	debugWC             *Char
+	projs               [MaxPlayerNo][]*Projectile
+	explods             [MaxPlayerNo][]*Explod
+	explodDrawOrder     []*Explod
+	chartexts           [MaxPlayerNo][]*TextSprite // From Text sctrl
+	spriteList          DrawList
+	shadowList          ShadowList
+	reflectionList      ReflectionList
+	afterImageCount     [MaxPlayerNo]int32
+	debugc1hit          DebugClsn
+	debugc1rev          DebugClsn
+	debugc1not          DebugClsn
+	debugc1stb          DebugClsn
+	debugc2             DebugClsn
+	debugc2hb           DebugClsn
+	debugc2mtk          DebugClsn
+	debugc2grd          DebugClsn
+	debugc2stb          DebugClsn
+	debugcsize          DebugClsn
+	debugcdummy         DebugClsn
+	debugcross          DebugClsn
+	debugAccel          float32
+	clsnSpr             Sprite
+	clsnDisplay         bool
+	lifebarHide         bool
+	mainThreadTask      chan func()
+	workpal             []uint32
+	workBe              []BytecodeExp
+	timerCount          []int32
+	cmdFlags            map[string]string
+	whitePalTex         Texture
+	usePalette          bool
+	gameRunning         bool
+	escPending          bool
+	hitDetectionSort    []*Char
+	hitTradeWinners     [][2]int32 // Winner/opponent ID pairs of hit trades decided this frame
+	projectileTradeSort []*Projectile
+	palTexture          PalTexture
+	SpriteTextureAtlas
+	// The fork: online play (Nakama), border/presentation mode, ranked sets.
 	nakama                         *NakamaClient
 	nakamaSpectatorLoading         bool
 	nakamaSpectatorLoadingText     *TextSprite
@@ -252,85 +337,27 @@ type System struct {
 	nakamaSpectatorLoadingDetail   *TextSprite
 	presentation                   presentationGeometry
 	rankedSet                      RankedSet
-	keyConfig                      []KeyConfig
-	joystickConfig                 []KeyConfig
-	loader                         Loader
-	chars                          [MaxPlayerNo][]*Char
-	charList                       CharList
-	cgi                            [MaxPlayerNo]CharGlobalInfo
-	turnsPreloadMember             [2]int // -1 = none; otherwise selected Turns member index to load into side+2
-	selMutex                       sync.RWMutex
-	loadMutex                      sync.Mutex
-	ignoreMostErrors               bool
-	stringPool                     [MaxPlayerNo]StringPool
-	bcStack, bcVarStack            BytecodeStack
-	bcVar                          []BytecodeValue
-	workingChar                    *Char          // Char currently running its states
-	workingState                   *StateBytecode // State currently running
-	stage                          *Stage
-	stageList                      map[int32]*Stage
-	stageLocalcoords               map[string][2]int32
-	wireframeDisplay               bool
-	shortcutScripts                map[ShortcutKey]*ShortcutScript
-	commandLine                    chan string
-	debugWC                        *Char
-	projs                          [MaxPlayerNo][]*Projectile
-	explods                        [MaxPlayerNo][]*Explod
-	explodDrawOrder                []*Explod
-	chartexts                      [MaxPlayerNo][]*TextSprite // From Text sctrl
-	spriteList                     DrawList
-	shadowList                     ShadowList
-	reflectionList                 ReflectionList
-	afterImageCount                [MaxPlayerNo]int32
-	debugc1hit                     DebugClsn
-	debugc1rev                     DebugClsn
-	debugc1not                     DebugClsn
-	debugc2                        DebugClsn
-	debugc2hb                      DebugClsn
-	debugc2mtk                     DebugClsn
-	debugc2grd                     DebugClsn
-	debugc2stb                     DebugClsn
-	debugcsize                     DebugClsn
-	debugcdummy                    DebugClsn
-	debugcross                     DebugClsn
-	debugAccel                     float32
-	clsnSpr                        Sprite
-	clsnDisplay                    bool
-	lifebarHide                    bool
-	mainThreadTask                 chan func()
-	workpal                        []uint32
-	workBe                         []BytecodeExp
-	timerCount                     []int32
-	cmdFlags                       map[string]string
-	whitePalTex                    Texture
-	usePalette                     bool
-	gameRunning                    bool
-	escPending                     bool
-	hitDetectionSort               []*Char
-	projectileTradeSort            []*Projectile
 
-	msaa               int32
-	externalShaders    [][][]byte
-	windowMainIcon     []image.Image
-	frameCounter       int32
-	captureNum         int
-	timerRounds        []int32
-	scoreRounds        [][2]float32
-	statsLog           StatsLog
-	maxPowerMode       bool
-	debugClsnText      []DebugClsnText
-	consoleText        []string
-	luaLState          *lua.LState
-	statusLFunc        *lua.LFunction
-	listLFunc          []*lua.LFunction
-	reloadPreserveVars [MaxPlayerNo]bool
-	charVarsBackup     map[int]CharVarBackup
-	shaderRefCount     map[string]int
+	msaa                int32
+	externalShaders     [][][]byte
+	windowMainIcon      []image.Image
+	frameCounter        int32
+	captureNum          int
+	timerRounds         []int32
+	scoreRounds         [][2]float32
+	statsLog            StatsLog
+	maxPowerMode        bool
+	debugClsnText       []DebugClsnText
+	consoleText         []string
+	luaLState           *lua.LState
+	statusLFunc         *lua.LFunction
+	listLFunc           []*lua.LFunction
+	reloadPreserveVars  [MaxPlayerNo]bool
+	charVarsBackup      map[int]CharVarBackup
+	loadedCustomShaders map[string]bool
 
 	statePool       GameStatePool
 	commandLists    []*CommandList
-	arenaSaveMap    map[int]*arena.Arena
-	arenaLoadMap    map[int]*arena.Arena
 	rollbackStateID int
 	savePool        GameStatePool
 	loadPool        GameStatePool
@@ -350,6 +377,9 @@ type System struct {
 
 	// screenshot deferral
 	isTakingScreenshot bool
+	screenshotInFlight bool
+	screenshotSize     [2]int
+	screenshotFile     string
 
 	// keepAlive profiling (debug only)
 	keepAliveProfile bool
@@ -424,7 +454,7 @@ func (s *System) init(w, h int32) *lua.LState {
 		}
 	}
 
-	if runtime.GOOS != "android" {
+	if runtime.GOOS != "android" && runtime.GOOS != "ios" {
 		exePath, err := os.Executable()
 		if err != nil {
 			fmt.Println("Error getting executable path:", err)
@@ -510,12 +540,14 @@ func (s *System) init(w, h int32) *lua.LState {
 	for i := 1; i < 256; i++ {
 		whitepal[i] = 0xffffffff // White (and full alpha)
 	}
-	s.whitePalTex = gfx.newPaletteTexture()
-	s.whitePalTex.SetData(Pal32ToBytes(whitepal))
+	CreatePalTexture(2048)
+	s.whitePalTex = NewPaletteTexture()
+	s.whitePalTex.SetSubData(pal32ToBytes(whitepal))
+	s.SpriteTextureAtlas.textureSize = 2048
 
 	systemScriptInit(l)
 	s.shortcutScripts = make(map[ShortcutKey]*ShortcutScript)
-	s.shaderRefCount = make(map[string]int)
+	s.loadedCustomShaders = make(map[string]bool)
 	if runtime.GOOS != "android" {
 		// So now that we have a window we add an icon.
 		if len(s.cfg.Config.WindowIcon) > 0 {
@@ -815,8 +847,10 @@ func (s *System) setGameAspect() {
 	sys.stage.updateLocalScale(sys.gameWidth)
 	for _, p := range sys.chars {
 		if len(p) > 0 {
-			p[0].localcoord = float32(p[0].gi().localcoord[0]) / (float32(sys.gameWidth) / 320)
-			p[0].localscl = 320 / p[0].localcoord
+			// Raw scale adjusted to the new game width
+			p[0].baselocalscl = p[0].gi().rawlocalscl * (sys.gameWidth / 320)
+			// The scale that will vary in custom states
+			p[0].localscl = p[0].baselocalscl
 		}
 	}
 	sys.fightScreen.setScale()
@@ -875,7 +909,7 @@ func (s *System) keepAlive() {
 }
 
 func (s *System) await(fps int) bool {
-	if !s.frameSkip {
+	if !s.frameSkip && !s.window.renderingPaused {
 		// Render the finished frame
 		gfx.EndFrame()
 		if gfx.GetName()[:6] == "OpenGL" {
@@ -884,10 +918,25 @@ func (s *System) await(fps int) bool {
 			gfx.Await()
 		}
 		s.window.UpdateDebugFPS()
-		if s.isTakingScreenshot {
-			defer captureScreen()
-			s.isTakingScreenshot = false
+
+		if s.screenshotInFlight || s.isTakingScreenshot {
+			defer func() {
+				if s.screenshotInFlight {
+					size, file := s.screenshotSize, s.screenshotFile
+					data := make([]uint8, 4*size[0]*size[1])
+					if gfx.FinishScreenshot(data, size[0], size[1]) {
+						s.screenshotInFlight = false
+						SafeGo(func() { saveScreenshot(data, size[0], size[1], file) })
+					}
+				}
+				if s.isTakingScreenshot && !s.screenshotInFlight {
+					s.isTakingScreenshot = false
+					requestScreenshot()
+					s.screenshotInFlight = true
+				}
+			}()
 		}
+
 		// Begin the next frame after events have been processed. Do not clear
 		// the screen if network input is present.
 		defer gfx.BeginFrame(sys.netConnection == nil)
@@ -939,6 +988,18 @@ func (s *System) await(fps int) bool {
 	return !s.gameEnd
 }
 
+func (s *System) soundPanView() (view soundPanView) {
+	view.width = s.gameWidth
+	if s.cam.Scale <= 0 {
+		return
+	}
+
+	screenWidth := s.gameWidth / s.cam.Scale
+	view.x = s.cam.ScreenPos[0] + s.cam.Offset[0] + screenWidth/2
+	view.scale = s.cam.Scale
+	return
+}
+
 func (s *System) renderFrame() {
 	// Full-resolution scaling is render-only; gameplay remains in fight space.
 	logicState := s.captureAspectState()
@@ -962,7 +1023,7 @@ func (s *System) renderFrame() {
 			return
 		}
 		x, y, scl := s.cam.Pos[0], s.cam.Pos[1], s.cam.Scale/s.cam.BaseScale()
-		dx, dy, dscl := s.zoom.apply(x, y, scl)
+		dx, dy, dscl := s.zoom.computeCamera(x, y, scl)
 		s.draw(dx, dy, dscl)
 		s.luaFlushDrawQueue()
 		s.fightScreen.drawFade()
@@ -1001,7 +1062,7 @@ func (s *System) renderFrame() {
 		s.drawNakamaSpectatorLoading()
 	} else {
 		x, y, scl := s.cam.Pos[0], s.cam.Pos[1], s.cam.Scale/s.cam.BaseScale()
-		dx, dy, dscl := s.zoom.apply(x, y, scl)
+		dx, dy, dscl := s.zoom.computeCamera(x, y, scl)
 		s.draw(dx, dy, dscl)
 		s.luaFlushDrawQueue()
 		s.fightScreen.drawFade()
@@ -1287,12 +1348,15 @@ func (s *System) update() bool {
 }
 
 func (s *System) tickSound() {
-	s.soundChannels.Tick()
+	view := s.soundPanView()
+	s.soundChannels.Tick(view)
 	if !s.noCharSoundFlg {
 		for i := range sys.charSoundChannels {
-			sys.charSoundChannels[i].Tick()
+			sys.charSoundChannels[i].Tick(view)
 		}
 	}
+
+	s.applyPauseFocusVolume()
 
 	// Stage video audio follows character muting, including post-match sounds.enabled.
 	if s.stage != nil {
@@ -1303,39 +1367,48 @@ func (s *System) tickSound() {
 			}
 		}
 	}
-
-	// Always pause if noMusic flag set, pause master volume is 0, or freqmul is 0.
-	bgmPause := s.nomusic || (s.paused && s.cfg.Sound.PauseMasterVolume == 0) || s.bgm.freqmul == 0 || s.motifPauseMusic()
-	s.bgm.SetPaused(bgmPause)
-
-	if s.paused {
-		// Apply BGM pause volume once per pause, even when the original BGM volume is 0.
-		// volRestore cannot be used as the latch because 0 is a valid volume.
-		if !s.bgm.pauseVolumeApplied {
-			s.bgm.volRestore = s.bgm.bgmVolume
-			s.bgm.bgmVolume = int(s.cfg.Sound.PauseMasterVolume * s.bgm.bgmVolume / 100.0)
-			s.bgm.UpdateVolume()
-			s.bgm.pauseVolumeApplied = true
-		}
-
-		// Run every paused tick so sounds started while paused are also softened.
-		s.pauseVolumeApplied = true
-		s.softenAllSound()
-	} else if s.pauseVolumeApplied || s.bgm.pauseVolumeApplied {
-		s.restorePauseVolume()
-	}
 }
 
-func (s *System) restorePauseVolume() {
-	if s.bgm.pauseVolumeApplied {
-		s.bgm.bgmVolume = s.bgm.volRestore
-		s.bgm.volRestore = 0
-		s.bgm.pauseVolumeApplied = false
-		s.bgm.UpdateVolume()
+func (s *System) applyPauseFocusVolume() {
+	// The window losing focus applies its own volume percentage, independent of the pause menu
+	s.focusMuted = s.cfg.Sound.FocusLossVolume < 100 && s.window != nil && !s.window.Focused()
+
+	// Check pause and focus loss volume levels
+	// If both are active at once, the quieter one wins
+	s.pauseSoundVolume = 100
+	if s.matchPaused() {
+		s.pauseSoundVolume = Min(s.pauseSoundVolume, s.cfg.Sound.PauseMasterVolume)
 	}
-	if s.pauseVolumeApplied {
-		s.restoreAllVolume()
-		s.pauseVolumeApplied = false
+	if s.focusMuted {
+		s.pauseSoundVolume = Min(s.pauseSoundVolume, s.cfg.Sound.FocusLossVolume)
+	}
+
+	pauseSilence := s.matchPaused() && s.cfg.Sound.PauseMasterVolume == 0
+
+	bgmPause := s.nomusic || pauseSilence || s.bgm.freqmul == 0 || s.motifPauseMusic()
+	s.bgm.SetPaused(bgmPause)
+	s.bgm.UpdateVolume()
+
+	// Update char sounds
+	ducking := s.pauseSoundVolume < 100
+	if ducking || s.duckingFlag {
+		duckMul := float32(s.pauseSoundVolume) / 100
+		for i := range s.charSoundChannels {
+			s.charSoundChannels[i].Duck(duckMul, pauseSilence)
+		}
+		s.duckingFlag = ducking
+	}
+
+	// Update system sounds
+	// TODO: FightScreen sounds should probably respect pauses unlike motif sounds
+	s.focusSoundVolume = 100
+	if s.focusMuted {
+		s.focusSoundVolume = s.cfg.Sound.FocusLossVolume
+	}
+	motifDucking := s.focusSoundVolume < 100
+	if motifDucking || s.motifDuckingFlag {
+		s.soundChannels.Duck(float32(s.focusSoundVolume)/100, false)
+		s.motifDuckingFlag = motifDucking
 	}
 }
 
@@ -2224,12 +2297,12 @@ func (s *System) gsf(gsf GlobalSpecialFlag) bool {
 	return s.specialFlag&gsf != 0
 }
 
-func (s *System) setGSF(gsf GlobalSpecialFlag) {
-	s.specialFlag |= gsf
-}
-
-func (s *System) unsetGSF(gsf GlobalSpecialFlag) {
-	s.specialFlag &^= gsf
+func (s *System) setGSF(gsf GlobalSpecialFlag, on bool) {
+	if on {
+		s.specialFlag |= gsf
+	} else {
+		s.specialFlag &^= gsf
+	}
 }
 
 func (s *System) appendToConsole(str string) {
@@ -2543,48 +2616,8 @@ func (s *System) stopAllCharSounds() {
 	}
 }
 
-func (s *System) softenAllSound() {
-	for i := range s.charSoundChannels {
-		for j := range s.charSoundChannels[i] {
-			ch := &s.charSoundChannels[i][j]
-
-			// Temporarily store the volume so it can be recalled later.
-			if ch.IsPlaying() && ch.sfx != nil && ch.ctrl != nil && !ch.pauseVolumeApplied {
-				ch.volResume = ch.sfx.volume
-				softVolume := ch.sfx.volume * (float32(s.cfg.Sound.PauseMasterVolume) / 100.0)
-				ch.SetVolume(softVolume)
-				ch.pauseVolumeApplied = true
-
-				// Pause if pause master volume is 0
-				if s.cfg.Sound.PauseMasterVolume == 0 {
-					ch.SetPaused(true)
-				}
-			}
-		}
-	}
-	// Don't pause motif sounds
-}
-
-func (s *System) restoreAllVolume() {
-	for i := range s.charSoundChannels {
-		for j := range s.charSoundChannels[i] {
-			ch := &s.charSoundChannels[i][j]
-
-			// Restore the volume we had.
-			if ch.sfx != nil && ch.ctrl != nil && ch.pauseVolumeApplied {
-				ch.SetVolume(ch.volResume)
-				ch.pauseVolumeApplied = false
-
-				// Unpause only those whose freqmul > 0
-				if ch.ctrl.Paused && ch.sfx.freqmul > 0 {
-					ch.SetPaused(false)
-				}
-			}
-		}
-	}
-}
-
 func (s *System) clearMatchSound() {
+	s.matchStoryboards.clearSound()
 	// Only explicitly marked sounds may outlive the match.
 	for i := range s.soundChannels {
 		ch := &s.soundChannels[i]
@@ -2598,7 +2631,7 @@ func (s *System) clearMatchSound() {
 	// and mark them as detached so SetPlaying(true) can re-attach next frame.
 	if s.stage != nil {
 		for _, b := range s.stage.bg {
-			if b != nil && b._type == BG_Video {
+			if b != nil && b._type == BG_Video && b.video != nil {
 				b.video.SetPlaying(false)
 				b.video.SetVisible(false)
 				b.video.MixerCleared()
@@ -2618,6 +2651,7 @@ func (s *System) clearAllSound() {
 
 // Remove the player's explods, projectiles and (optionally) helpers as well as stopping their sounds
 func (s *System) clearPlayerAssets(pn int, forceDestroy bool) {
+	s.matchStoryboards.clear(pn)
 	if len(s.chars[pn]) > 0 {
 		// These aren't "assets" but we'll do it here
 		for _, c := range s.chars[pn] {
@@ -2729,8 +2763,8 @@ func (s *System) resetRound() {
 
 	s.resetFrameTime()
 
-	s.restorePauseVolume()
 	s.paused = false
+	s.applyPauseFocusVolume()
 	s.introSkipCall = false
 	s.roundResetFlg = false
 	s.reloadFlg, s.reloadStageFlg, s.reloadFightScreenFlg = false, false, false
@@ -2784,7 +2818,7 @@ func (s *System) resetRound() {
 		}
 		s.clearPlayerAssets(i, false)
 		p[0].posReset()
-		p[0].setCtrl(false)
+		p[0].setSCF(SCF_ctrl, false)
 		p[0].clearState()
 		p[0].prepareNextRound()
 		p[0].varRangeSet(0, s.cgi[i].data.intpersistindex-1, 0)
@@ -2869,21 +2903,28 @@ func (s *System) motifPauseMusic() bool {
 }
 
 // "Tick frames" are the frames where most of the game logic happens
+// Under normal game speed (60 logical frames rendered at 60fps) tickFrame() and tickNextFrame() happen simultaneously
 func (s *System) tickFrame() bool {
 	return (!s.paused || s.frameStepFlag) && s.oldTickCount < s.tickCount
 }
 
-// "Tick next frame" is right after the "tick frame"
+// "Tick next frame" is right before the "tick frame" that starts the next logical frame
+// So the name essentially means "tick happens in next frame"
+// It's the end of the current logical frame. Like a boundary between 2 interpolated frames
+// It is the final rendered frame where a char's state time is still the old value
 // Where for instance the collision detections happen
+// Maybe tickFinalFrame() would be a better name
 func (s *System) tickNextFrame() bool {
 	// A match run by replay timing can pause between ticks: it stays paused.
 	return int(s.tickCountF+s.nextAddTime) > s.tickCount &&
 		(!s.paused || s.frameStepFlag || (s.oldTickCount >= s.tickCount && !s.replayTiming()))
 }
 
-// This divides a frame into fractions for the purpose of drawing position interpolation
+// Returns interpolation progress between two tickFrame()'s
+// It divides the logical frame into fractions for the purpose of drawing position interpolation
 func (s *System) tickInterpolation() float32 {
 	// Always synchronize here
+	// Because the final rendered frame for this logical frame should be 100% progress
 	if s.tickNextFrame() {
 		return 1
 	}
@@ -2896,7 +2937,7 @@ func (s *System) tickInterpolation() float32 {
 }
 
 func (s *System) uiTick() bool {
-	return s.tickFrame() || s.debugPaused() || s.motif.me.active || s.motif.ch.active
+	return s.tickFrame() || s.debugPaused() || s.motif.me.active
 }
 
 func (s *System) addFrameTime(t float32) bool {
@@ -3044,6 +3085,7 @@ func (s *System) advanceFrameTime(t float32) bool {
 }
 
 func (s *System) resetFrameTime() {
+	// oldTickCount is set to -1 so that tickFrame() returns true on the very first frame
 	s.tickCount, s.oldTickCount, s.tickCountF, s.lastTick = 0, -1, 0, 0
 	s.nextAddTime, s.oldNextAddTime = 1, 1
 
@@ -3150,6 +3192,7 @@ func (s *System) clearSpriteData() {
 	s.debugc1hit.rects = s.debugc1hit.rects[:0]
 	s.debugc1rev.rects = s.debugc1rev.rects[:0]
 	s.debugc1not.rects = s.debugc1not.rects[:0]
+	s.debugc1stb.rects = s.debugc1stb.rects[:0]
 	s.debugc2.rects = s.debugc2.rects[:0]
 	s.debugc2hb.rects = s.debugc2hb.rects[:0]
 	s.debugc2mtk.rects = s.debugc2mtk.rects[:0]
@@ -3326,6 +3369,7 @@ func (s *System) action() {
 	// Note: Explod update must happen after hit detection. Because hit sparks are also explods
 	s.explodUpdate()
 	s.charTextsUpdate()
+	s.matchStoryboards.update()
 
 	// Adjust game speed
 	if s.tickNextFrame() && !s.motif.me.active {
@@ -3402,6 +3446,8 @@ func (s *System) uiAction() {
 
 	// Run motif
 	s.motif.act()
+
+	s.matchStoryboards.step()
 
 	// Common Lua calls
 	// Needs to happen after motif update or motif inputs will lag 1 frame
@@ -3709,11 +3755,11 @@ func (s *System) stepRoundState() {
 			for _, p := range s.chars {
 				if len(p) > 0 {
 					if p[0].alive() {
-						p[0].unsetSCF(SCF_over_alive)
+						p[0].setSCF(SCF_over_alive, false)
 						//if !p[0].scf(SCF_standby) || p[0].teamside == -1 {
 						if p[0].activelyFighting() {
 							// In Mugen this ctrlSet happens in beginning of frame. More evidence all this code should run before character states
-							p[0].setCtrl(true)
+							p[0].setSCF(SCF_ctrl, true)
 							if p[0].ss.no != 0 && !p[0].asf(ASF_nointroreset) {
 								p[0].selfState(0, -1, -1, 1, "") // Nor this one
 							}
@@ -3823,7 +3869,7 @@ func (s *System) stepRoundState() {
 			if s.intro == rs4t-1 {
 				for _, p := range s.chars {
 					if len(p) > 0 {
-						p[0].setCtrl(false)
+						p[0].setSCF(SCF_ctrl, false)
 					}
 				}
 			}
@@ -3878,7 +3924,7 @@ func (s *System) stepRoundState() {
 				// HitPause is checked here but not in the other loop. Perhaps because changing states during hitpause in Mugen isn't quite safe
 				// These selfStates should happen in beginning of frame. Previously, Ikemen had them at end of frame
 				if !p[0].scf(SCF_over_alive) && p[0].alive() && p[0].activelyFighting() && !p[0].hitPause() {
-					p[0].setSCF(SCF_over_alive)
+					p[0].setSCF(SCF_over_alive, true)
 					if p[0].win() {
 						p[0].selfState(180, -1, -1, -1, "")
 					} else if p[0].lose() {
@@ -4229,6 +4275,8 @@ func (s *System) drawTop() {
 		s.debugc1rev.draw(0xff0040c0, alpha)
 		// Clsn1 Inactive
 		s.debugc1not.draw(0xff000080, alpha)
+		// Clsn1 Standby
+		s.debugc1stb.draw(0xff404040, alpha)
 		// Clsn2
 		s.debugc2.draw(0xffff0000, alpha)
 		// Clsn2 HitBy
@@ -4246,6 +4294,11 @@ func (s *System) drawTop() {
 		// Crosshair
 		s.debugcross.draw(0xffffffff, alpha)
 	}
+}
+
+// Line height of the debug font, from its Size and Spacing like other text.
+func (s *System) debugLineHeight() float32 {
+	return float32(s.debugFont.fnt.Size[1]) + float32(s.debugFont.fnt.Spacing[1])
 }
 
 func (s *System) debugTextScale(st drawAspectState) (sx, sy float32) {
@@ -4289,7 +4342,7 @@ func (s *System) drawDebugText(logicState drawAspectState) {
 			if drawTxt == "" {
 				drawTxt, txt = txt, ""
 			}
-			*y += float32(s.debugFont.fnt.Size[1]) * s.debugFont.yscl / debugScaleY
+			*y += s.debugLineHeight() * s.debugFont.yscl / debugScaleY
 			s.withAspectState(panelState, func() {
 				s.debugFont.fnt.Print(drawTxt, *x, *y, s.debugFont.xscl/debugScaleX,
 					s.debugFont.yscl/debugScaleY, 0, Rotation{0, 0, 0}, 0, 0, 0, 1, &s.scrrect,
@@ -4324,7 +4377,7 @@ func (s *System) drawDebugText(logicState drawAspectState) {
 			put(&x, &y, s)
 		}
 		// Data
-		y = panelState.gameHeight - float32(s.debugFont.fnt.Size[1])*sys.debugFont.yscl/debugScaleY*
+		y = panelState.gameHeight - s.debugLineHeight()*sys.debugFont.yscl/debugScaleY*
 			(float32(len(s.listLFunc))+float32(s.cfg.Debug.ClipboardRows)) - 1*panelState.heightScale
 		// Get debug char reference. Default to player 1 if out of bounds
 		pn := s.debugRef[0]
@@ -4422,7 +4475,7 @@ func (s *System) runMatch() (reload bool) {
 		for i, p := range s.chars {
 			if len(p) > 0 {
 				forceDestroy := s.matchOver() ||
-					(s.tmode[i&1] == TM_Turns && p[0].teamside != -1 && p[0].life <= 0)
+					(s.tmode[i&1] == TM_Turns && p[0].teamside != -1 && s.effectiveLoss[i&1])
 				s.clearPlayerAssets(i, forceDestroy)
 			}
 		}
@@ -4508,7 +4561,6 @@ func (s *System) runMatch() (reload bool) {
 
 	// Loop until end of match
 	for s.keepMatchRunning() {
-		s.frameStepFlag = false
 
 		// Hotkeys change the match from outside it: a recorded local match
 		// stops being recorded when one does (replay_local.go).
@@ -4589,8 +4641,39 @@ func (s *System) runMatch() (reload bool) {
 		// Step sounds after both the core game and motif have updated
 		s.tickSound()
 
+		s.frameStepFlag = false
 		debugInput()
 		localReplay.check(outside)
+
+		// Output debug data provided by an external Lua script.
+		if _, enabled := s.cmdFlags["-debugdump"]; enabled {
+			if fn, ok := s.luaLState.GetGlobal("__ikemen_debug_dump").(*lua.LFunction); ok {
+				if err := s.luaLState.CallByParam(lua.P{
+					Fn:      fn,
+					NRet:    1,
+					Protect: true,
+				}); err != nil {
+					fmt.Fprintln(os.Stderr, "Debug dump Lua error:", err)
+				} else {
+					ret := s.luaLState.Get(-1)
+					s.luaLState.Pop(1)
+
+					if ret != lua.LNil {
+						value, err := luaToJsonValue(ret, nil)
+						if err == nil {
+							var data []byte
+							data, err = json.Marshal(value)
+							if err == nil {
+								fmt.Printf("IKEMEN_DUMP:%s\n", data)
+							}
+						}
+						if err != nil {
+							fmt.Fprintln(os.Stderr, "Debug dump JSON error:", err)
+						}
+					}
+				}
+			}
+		}
 
 		if !s.nextFrameTime(!paused) {
 			if !s.eventUpdate() {
@@ -4641,11 +4724,6 @@ func (s *System) runMatch() (reload bool) {
 
 		// F4 pressed to reset round
 		if s.roundResetFlg && !s.postMatchFlg {
-			restartTurnsPreload := s.turnsPreloadActive()
-			if restartTurnsPreload {
-				// Restore and the background loader both write the standby character slots
-				s.loader.reset()
-			}
 			for i := 0; i < MaxPlayerNo; i++ {
 				if s.reloadPreserveVars[i] {
 					s.saveCharVars(i)
@@ -4653,9 +4731,6 @@ func (s *System) runMatch() (reload bool) {
 			}
 			s.roundBackup.Restore()
 			s.resetRound()
-			if restartTurnsPreload {
-				s.startNextTurnsPreload()
-			}
 		}
 
 		// Shift+F4 pressed to restart match
@@ -4981,7 +5056,7 @@ func (bk *RoundStartBackup) Save() {
 			for k, v := range c.cnsfvar {
 				bkup.cnsfvar[k] = v
 			}
-			bkup.mapArray = make(map[string]float32, len(c.mapArray))
+			bkup.mapArray = make(map[string]TypedValue, len(c.mapArray))
 			for k, v := range c.mapArray {
 				bkup.mapArray[k] = v
 			}
@@ -5008,7 +5083,7 @@ func (bk *RoundStartBackup) Save() {
 	bk.stageBackup = *sys.stage
 
 	// Deep copy stage maps/slices
-	bk.stageBackup.constants = make(map[string]float32, len(sys.stage.constants))
+	bk.stageBackup.constants = make(map[string]TypedValue, len(sys.stage.constants))
 	for k, v := range sys.stage.constants {
 		bk.stageBackup.constants[k] = v
 	}
@@ -5029,7 +5104,7 @@ func (bk *RoundStartBackup) Restore() {
 			continue
 		}
 
-		// Staged Turns preload can create standby P3/P4 after roundBackup.Save()
+		// Wipe empty slots just in case
 		if len(bk.charBackup[i]) == 0 {
 			sys.clearPlayerAssets(i, true)
 			sys.removePlayerFromCharList(i)
@@ -5076,7 +5151,7 @@ func (bk *RoundStartBackup) Restore() {
 			}
 
 			// Restore maps
-			c.mapArray = make(map[string]float32, len(bkup.mapArray))
+			c.mapArray = make(map[string]TypedValue, len(bkup.mapArray))
 			for k, v := range bkup.mapArray {
 				c.mapArray[k] = v
 			}
@@ -5104,7 +5179,7 @@ func (bk *RoundStartBackup) Restore() {
 	sys.stage.stageTime = stageTime
 
 	// Restore stage maps/slices
-	sys.stage.constants = make(map[string]float32, len(bk.stageBackup.constants))
+	sys.stage.constants = make(map[string]TypedValue, len(bk.stageBackup.constants))
 	for k, v := range bk.stageBackup.constants {
 		sys.stage.constants[k] = v
 	}
@@ -5464,11 +5539,14 @@ func (s *Select) preloadWorkerLoop() {
 					err = s.preloadStageAssets(ref)
 				}
 
-				s.preloadMu.Lock()
-
+				// Panic before relocking, otherwise the main thread deadlocks on preloadMu and never shows the error
 				if err != nil {
 					panic(fmt.Sprintf("Preloading error: %s", err))
-				} else if kind == "char" {
+				}
+
+				s.preloadMu.Lock()
+
+				if kind == "char" {
 					s.charPreload[ref].State = PS_Ready
 				} else {
 					s.stagePreload[ref-1].State = PS_Ready
@@ -5492,7 +5570,7 @@ func (s *Select) preloadCharAssets(ref int) error {
 	for k := range s.charSpritePreload {
 		listSpr[k] = true
 	}
-	tempSff := newSff()
+	tempSff := newSff(SffTypeOther)
 
 	if sc.preloadAnim != "" {
 		animPath := sc.preloadAnim
@@ -5501,8 +5579,7 @@ func (s *Select) preloadCharAssets(ref int) error {
 			if err != nil {
 				return err
 			}
-			lines, lnidx := SplitAndTrim(str, "\n"), 0
-			at := ReadAnimationTable(sc.def, tempSff, &tempSff.palList, lines, &lnidx, false)
+			at := ReadAnimationTable(sc.def, tempSff, &tempSff.palList, str, false)
 			for vAnim := range s.charAnimPreload {
 				if animation := at.get(vAnim); animation != nil {
 					localAnims.addAnim(animation, vAnim)
@@ -5526,7 +5603,7 @@ func (s *Select) preloadCharAssets(ref int) error {
 		var selPal []int32
 		if err := LoadFile(&spritePath, []string{sc.def, "", "data/"}, "", func(file string) error {
 			var err error
-			localSff, selPal, err = preloadSff(file, true, listSpr)
+			localSff, selPal, err = preloadSff(file, SffTypeChar, listSpr)
 			if err != nil {
 				return err
 			}
@@ -5555,13 +5632,7 @@ func (s *Select) preloadCharAssets(ref int) error {
 			newPal := make([]int32, 0, maxPalSlots)
 			newPalFilesOut := make([]string, 0, maxPalSlots)
 			for i := 1; i <= maxPalSlots; i++ {
-				existsInSff := false
-				for _, sIdx := range selPal {
-					if sIdx == int32(i) {
-						existsInSff = true
-						break
-					}
-				}
+				existsInSff := slices.Contains(selPal, int32(i))
 				if defPals[int32(i)] || existsInSff {
 					newPal = append(newPal, int32(i))
 					newPalFilesOut = append(newPalFilesOut, newPalFiles[i-1])
@@ -5575,7 +5646,7 @@ func (s *Select) preloadCharAssets(ref int) error {
 		}
 	} else {
 		// Make a dummy SFF
-		localSff = newSff()
+		localSff = newSff(SffTypeOther)
 		localAnims.updateSff(localSff)
 		for k := range s.charSpritePreload {
 			localAnims.addSprite(localSff, k[0], k[1])
@@ -5597,14 +5668,14 @@ func (s *Select) preloadStageAssets(ref int) error {
 		return nil
 	}
 	ss := s.stagelist[ref-1]
-	lines := []string{}
+	defText := ""
 	defPath := ss.def
 	if err := LoadFile(&defPath, nil, "", func(file string) error {
 		str, err := LoadText(file)
 		if err != nil {
 			return err
 		}
-		lines = SplitAndTrim(str, "\n")
+		defText = str
 		return nil
 	}); err != nil {
 		return err
@@ -5616,9 +5687,8 @@ func (s *Select) preloadStageAssets(ref int) error {
 		listSpr[k] = true
 	}
 
-	tempSff := newSff()
-	atidx := 0
-	at := ReadAnimationTable(ss.def, tempSff, &tempSff.palList, lines, &atidx, false)
+	tempSff := newSff(SffTypeOther)
+	at := ReadAnimationTable(ss.def, tempSff, &tempSff.palList, defText, false)
 	for v := range s.stageAnimPreload {
 		if anim := at.get(v); anim != nil {
 			localAnims.addAnim(anim, v)
@@ -5635,7 +5705,7 @@ func (s *Select) preloadStageAssets(ref int) error {
 		spritePath := ss.preloadSprite
 		if err := LoadFile(&spritePath, []string{ss.def, "", "data/"}, "", func(file string) error {
 			var err error
-			localSff, _, err = preloadSff(file, false, listSpr)
+			localSff, _, err = preloadSff(file, SffTypeStage, listSpr)
 			if err != nil {
 				return err
 			}
@@ -5648,7 +5718,7 @@ func (s *Select) preloadStageAssets(ref int) error {
 			localAnims.addSprite(localSff, k[0], k[1])
 		}
 	} else {
-		localSff = newSff()
+		localSff = newSff(SffTypeStage)
 		localAnims.updateSff(localSff)
 	}
 
@@ -5689,10 +5759,8 @@ func (s *Select) ValidatePalette(charRef, requested int) int {
 		return 1
 	}
 	// If the requested index exists, return it
-	for _, real := range sc.pal {
-		if int(real) == requested {
-			return requested
-		}
+	if slices.ContainsFunc(sc.pal, func(real int32) bool { return int(real) == requested }) {
+		return requested
 	}
 	// Otherwise, return the next valid one (circular)
 	for _, real := range sc.pal {
@@ -5963,19 +6031,12 @@ func (s *Select) AddChar(def string) *SelectChar {
 		sc.preloadAnim = anim_orig
 	}
 
-	// Try to use the "_preload.sff" file if available
-	fp := fmt.Sprintf("%v_preload.sff", strings.TrimSuffix(sc.def, filepath.Ext(sc.def)))
-	if fp = FileExist(fp); len(fp) == 0 {
-		// Fall back to normal SFF
-		fp = sprite_orig
-	}
-
 	// preload portion of sff file
-	if len(fp) > 0 {
-		sc.preloadSprite = fp
+	if len(sprite_orig) > 0 {
+		sc.preloadSprite = sprite_orig
 	}
 	if sys.cfg.Config.BootLoadingMode > 0 {
-		sc.sff = newSff()
+		sc.sff = newSff(SffTypeChar)
 		sc.anims.updateSff(sc.sff)
 		for k := range s.charSpritePreload {
 			sc.anims.addSprite(sc.sff, k[0], k[1])
@@ -6156,7 +6217,7 @@ func (s *Select) AddStage(def string) (*SelectStage, error) {
 		ss.preloadSprite = spr
 	}
 	if sys.cfg.Config.BootLoadingMode > 0 {
-		ss.sff = newSff()
+		ss.sff = newSff(SffTypeStage)
 		ss.anims.updateSff(ss.sff)
 		for k := range s.stageSpritePreload {
 			ss.anims.addSprite(ss.sff, k[0], k[1])
@@ -6276,10 +6337,10 @@ func (s *System) startNextTurnsPreload() {
 		if member <= 0 || member >= int(s.numTurns[team]) || member >= len(s.sel.selected[team]) {
 			continue
 		}
-		pn := team + 2 // one hidden standby slot per Turns side
-		if len(s.chars[pn]) > 0 && s.chars[pn][0] != nil &&
-			s.chars[pn][0].memberNo == member &&
-			s.chars[pn][0].selectNo == s.sel.selected[team][member][0] {
+		// Desired member is already fully preloaded and waiting to be promoted
+		if sb, _ := s.getPreloadedCharAndCgi(team); sb != nil &&
+			sb.memberNo == member &&
+			sb.selectNo == s.sel.selected[team][member][0] {
 			continue
 		}
 		next[team] = member
@@ -6305,8 +6366,7 @@ func (s *System) startNextTurnsPreload() {
 	}
 }
 
-// Rollback snapshots must not race the asynchronous Turns loader. The loader mutates
-// character slots and compilation globals that are not safe to update between save/load.
+// Blocks until this peer's loader settles, so all rollback peers promote on the same frame
 func (s *System) finishTurnsPreloadForRollback() bool {
 	if !s.turnsPreloadActive() {
 		return true
@@ -6341,7 +6401,12 @@ func (s *System) remapCharSlotRefs(chars []*Char, oldSlot, newSlot int) {
 			continue
 		}
 		ch.playerNo = newSlot
-		ch.ss.sb.playerNo = newSlot
+		if ch.ss.sb.playerNo != newSlot {
+			// May be shared, so never write through it. Swap in a copy
+			fixed := *ch.ss.sb
+			fixed.playerNo = newSlot
+			ch.ss.sb = &fixed
+		}
 		if ch.controller == oldSlot {
 			ch.controller = newSlot
 		} else if ch.controller == oldCPU {
@@ -6371,8 +6436,10 @@ func (s *System) rebindCgiStateOwners(pn int) {
 	for _, k := range keys {
 		sb := s.cgi[pn].states[k]
 		if sb.playerNo != pn {
-			sb.playerNo = pn
-			s.cgi[pn].states[k] = sb
+			// May be shared with a live "c.ss.sb". Swap in a copy, don't mutate
+			fixed := *sb
+			fixed.playerNo = pn
+			s.cgi[pn].states[k] = &fixed
 		}
 	}
 }
@@ -6393,35 +6460,46 @@ func (s *System) removePlayerFromCharList(pn int) {
 	}
 }
 
-func (s *System) setBGTurnsSlotState(chars []*Char, slot int, active bool) {
+// These are the safe ways to access preloading chars, since a separate goroutine compiles them
+func (s *System) getPreloadedCharAndCgi(team int) (*Char, CharGlobalInfo) {
+	s.preloadedCharsMutex.Lock()
+	defer s.preloadedCharsMutex.Unlock()
+	return s.preloadedChars[team], s.preloadedCgi[team]
+}
+
+func (s *System) setPreloadedChar(team int, c *Char, gi CharGlobalInfo) {
+	s.preloadedCharsMutex.Lock()
+	defer s.preloadedCharsMutex.Unlock()
+	s.preloadedChars[team] = c
+	s.preloadedCgi[team] = gi
+}
+
+func (s *System) clearPreloadedChars() {
+	s.preloadedCharsMutex.Lock()
+	defer s.preloadedCharsMutex.Unlock()
+	s.preloadedChars = [2]*Char{}
+	s.preloadedCgi = [2]CharGlobalInfo{}
+}
+
+func (s *System) activateTurnsSlot(chars []*Char, slot int) {
 	team := slot & 1
 	for _, ch := range chars {
 		if ch == nil {
 			continue
 		}
-		if active {
-			ch.teamside = team
-			ch.unsetSCF(SCF_disabled)
-			ch.unsetSCF(SCF_standby)
-			if ch.helperIndex == 0 {
-				ch.controller = slot
-				if s.aiLevel[slot] != 0 {
-					ch.controller ^= -1
-				}
-				// Defensive: the real round initialization will run next, but
-				// never let a promoted preloaded fighter enter as already dead.
-				if ch.life <= 0 {
-					ch.life = Max(1, ch.lifeMax)
-					ch.redLife = ch.life
-				}
+		ch.teamside = team
+		ch.setSCF(SCF_disabled, false)
+		ch.setSCF(SCF_standby, false)
+		if ch.helperIndex == 0 {
+			ch.controller = slot
+			if s.aiLevel[slot] != 0 {
+				ch.controller ^= -1
 			}
-		} else {
-			ch.teamside = -1
-			ch.setSCF(SCF_disabled)
-			ch.setSCF(SCF_standby)
-			ch.setCtrl(false)
-			if ch.helperIndex == 0 {
-				ch.controller = slot
+			// Defensive: the real round initialization will run next, but
+			// never let a promoted preloaded fighter enter as already dead.
+			if ch.life <= 0 {
+				ch.life = Max(1, ch.lifeMax)
+				ch.redLife = ch.life
 			}
 		}
 	}
@@ -6433,35 +6511,37 @@ func (s *System) activateNextTurnsFighters() {
 		if s.tmode[team] != TM_Turns || !s.effectiveLoss[team] {
 			continue
 		}
+
 		nextMember := int(s.wins[team^1])
 		if nextMember < 0 || nextMember >= int(s.numTurns[team]) {
 			continue
 		}
+
+		// Incoming fighter comes from the standby holder, never from sys.chars
+		incoming, incomingCgi := s.getPreloadedCharAndCgi(team)
+		if incoming == nil || incoming.memberNo != nextMember {
+			continue
+		}
+
 		dst := team
-		src := team + 2
+		src := team + 2 // slot incoming was compiled under while on standby
 		if src < 0 || src >= MaxSimul*2 {
 			continue
 		}
-		if len(s.chars[src]) == 0 || s.chars[src][0] == nil ||
-			s.chars[src][0].memberNo != nextMember {
-			continue
-		}
+
 		outgoingPower := s.chars[dst][0].power
 		s.removePlayerFromCharList(dst)
-		s.removePlayerFromCharList(src)
-		oldDst, oldSrc := dst, src
-		s.chars[dst], s.chars[src] = s.chars[src], s.chars[dst]
-		s.cgi[dst], s.cgi[src] = s.cgi[src], s.cgi[dst]
-		s.stringPool[dst], s.stringPool[src] = s.stringPool[src], s.stringPool[dst]
-		s.remapCharSlotRefs(s.chars[dst], oldSrc, dst)
-		s.remapCharSlotRefs(s.chars[src], oldDst, src)
+		s.removePlayerFromCharList(src) // defensive: src should already be empty going into this
+		s.chars[dst] = []*Char{incoming}
+		s.setPreloadedChar(team, nil, CharGlobalInfo{})
+		s.cgi[dst] = incomingCgi
+		s.stringPool[dst] = s.stringPool[src]
+		s.remapCharSlotRefs(s.chars[dst], src, dst)
 		s.rebindCgiStateOwners(dst)
-		s.rebindCgiStateOwners(src)
 		s.workingChar = nil
 		s.workingState = nil
-		s.setBGTurnsSlotState(s.chars[dst], dst, true)
+		s.activateTurnsSlot(s.chars[dst], dst)
 		s.chars[dst][0].power = outgoingPower
-		s.setBGTurnsSlotState(s.chars[src], src, false)
 		if s.chars[dst][0].id < 0 {
 			s.chars[dst][0].id = s.newCharId()
 		}
@@ -6470,7 +6550,11 @@ func (s *System) activateNextTurnsFighters() {
 				s.charList.add(ch)
 			}
 		}
-		s.charList.enemyNearChanged = true
+
+		// Outgoing player is discarded, matching regular Turns behavior
+		s.chars[src] = nil
+		s.cgi[src] = CharGlobalInfo{}
+		s.stringPool[src] = *NewStringPool()
 	}
 }
 
@@ -6488,9 +6572,24 @@ func (l *Loader) loadCharacter(pn int, attached bool) int {
 	teamSel := make([][2]int, len(sys.sel.selected[team]))
 	copy(teamSel, sys.sel.selected[team])
 	sys.selMutex.RUnlock()
+
+	// True only for a background Turns preload, never for the active slot itself. Stable for the
+	// whole call: nothing else can touch turnsPreloadMember while this loader goroutine is running
+	// (see startNextTurnsPreload's own state==LS_Loading guard).
+	turnsLoading := !attached && tm == TM_Turns && sys.cfg.Config.TurnsLoading
+	preloading := turnsLoading && sys.turnsPreloadActive()
+
+	// Don't write directly to sys.cgi during a background Turns preload
+	loadingGi := newCharGlobalInfo()
+	gi := &sys.cgi[pn]
+	if preloading {
+		gi = &loadingGi
+	}
+
 	if l.cancelRequested() || l.state == LS_Cancel || sys.gameEnd {
 		return 0
 	}
+
 	if attached && sys.roundNo != 1 {
 		return 1
 	}
@@ -6516,18 +6615,18 @@ func (l *Loader) loadCharacter(pn int, attached bool) int {
 			sys.chars[pn] = nil
 			sys.cgi[pn].states = nil
 			sys.cgi[pn].palettedata = nil
-			sys.cgi[pn].hitPauseToggleFlagCount = 0
+			//sys.cgi[pn].hitPauseToggleFlagCount = 0
 			return 1
 		}
 		if memberNo >= nsel {
 			return 0
 		}
-		if sys.turnsPreloadActive() &&
-			len(sys.chars[pn]) > 0 &&
-			sys.chars[pn][0] != nil &&
-			sys.chars[pn][0].memberNo == memberNo &&
-			sys.chars[pn][0].selectNo == teamSel[memberNo][0] {
-			return 1
+		if sys.turnsPreloadActive() {
+			if sb, _ := sys.getPreloadedCharAndCgi(team); sb != nil &&
+				sb.memberNo == memberNo &&
+				sb.selectNo == teamSel[memberNo][0] {
+				return 1
+			}
 		}
 	} else if !attached && sys.roundsExisted[team] > 0 {
 		return 1
@@ -6594,12 +6693,12 @@ func (l *Loader) loadCharacter(pn int, attached bool) int {
 	defer func() {
 		sys.loadTime(tnow, tstr, false, true)
 		// Mugen compatibility mode indicator
-		if sys.cgi[pn].ikemenver[0] == 0 && sys.cgi[pn].ikemenver[1] == 0 {
-			if sys.cgi[pn].mugenver[0] == 1 && sys.cgi[pn].mugenver[1] == 1 {
+		if gi.ikemenver[0] == 0 && gi.ikemenver[1] == 0 {
+			if gi.mugenver[0] == 1 && gi.mugenver[1] == 1 {
 				sys.appendToConsole("Using Mugen 1.1 compatibility mode.")
-			} else if sys.cgi[pn].mugenver[0] == 1 && sys.cgi[pn].mugenver[1] == 0 {
+			} else if gi.mugenver[0] == 1 && gi.mugenver[1] == 0 {
 				sys.appendToConsole("Using Mugen 1.0 compatibility mode.")
-			} else if sys.cgi[pn].mugenver[0] != 1 {
+			} else if gi.mugenver[0] != 1 {
 				sys.appendToConsole("Using WinMugen compatibility mode.")
 			} else {
 				sys.appendToConsole("Character with unknown engine version.")
@@ -6673,11 +6772,10 @@ func (l *Loader) loadCharacter(pn int, attached bool) int {
 		//sys.cgi[pn].sff = nil
 		//sys.cgi[pn].palettedata = nil
 
-		// TODO: Why do we do this here?
+		// Without TurnsLoading, the next Turns member replaces the old char here, so this is the last chance to inherit its power
+		// TurnsLoading does the same in activateNextTurnsFighters()
 		if len(sys.chars[pn]) > 0 {
 			p.power = sys.chars[pn][0].power
-			p.guardPoints = sys.chars[pn][0].guardPoints // And why do these two persist?
-			p.dizzyPoints = sys.chars[pn][0].dizzyPoints
 		}
 
 		// Prepare success message
@@ -6702,25 +6800,22 @@ func (l *Loader) loadCharacter(pn int, attached bool) int {
 		p.teamside = p.playerNo & 1
 	}
 
-	// Commit character to system
-	sys.chars[pn] = make([]*Char, 1)
-	sys.chars[pn][0] = p
-	if !attached && tm == TM_Turns && sys.cfg.Config.TurnsLoading {
-		sys.setBGTurnsSlotState(sys.chars[pn], pn, pn < 2 && !sys.turnsPreloadActive())
-	}
-
 	// Load character
+	// Kept off sys.chars until fully loaded and compiled
 	if !sameChar {
+		p.stillLoading = true
+		defer func() {
+			p.stillLoading = false
+		}()
+
 		if l.cancelRequested() || l.state == LS_Cancel || sys.gameEnd {
 			return 0
 		}
-		if l.err = p.load(cdef); l.err != nil {
+		if l.err = p.load(cdef, gi); l.err != nil {
 			if errors.Is(l.err, ErrLoadingCanceled) {
-				sys.chars[pn] = nil
 				l.state = LS_Cancel
 				return 0
 			}
-			sys.chars[pn] = nil
 			if attached {
 				tstr = fmt.Sprintf("WARNING: Failed to load new attached char: %v", cdef)
 			} else {
@@ -6729,14 +6824,12 @@ func (l *Loader) loadCharacter(pn int, attached bool) int {
 			return -1
 		}
 		if l.cancelRequested() || l.state == LS_Cancel || sys.gameEnd {
-			sys.chars[pn] = nil
 			l.state = LS_Cancel
 			return 0
 		}
 
 		// Compile character states
-		if sys.cgi[pn].states, l.err = newCharCompiler().Compile(p.playerNo, cdef, p.gi().constants); l.err != nil {
-			sys.chars[pn] = nil
+		if gi.states, l.err = newCharCompiler().Compile(p, cdef, gi); l.err != nil {
 			if attached {
 				tstr = fmt.Sprintf("WARNING: Failed to compile new attached char states: %v", cdef)
 			} else {
@@ -6747,6 +6840,7 @@ func (l *Loader) loadCharacter(pn int, attached bool) int {
 	}
 
 	// Setup selected palette
+	// Must happen before the commit below
 	selectPalno := 1
 	if pal, ok := sys.sel.palOverwrite[pn]; ok && pal > 0 {
 		selectPalno = pal
@@ -6754,7 +6848,21 @@ func (l *Loader) loadCharacter(pn int, attached bool) int {
 		// Get palette number from select screen choice
 		selectPalno = teamSel[memberNo][1]
 	}
-	sys.cgi[pn].palno = int32(selectPalno)
+	gi.palno = int32(selectPalno)
+
+	// Commit character now that loading and compiling both succeeded
+	if turnsLoading {
+		if preloading {
+			// Not live yet, so it goes into the standby holder instead of sys.chars
+			sys.setPreloadedChar(team, p, loadingGi)
+		} else {
+			// This is the active slot (0 or 1), not a background preload
+			sys.chars[pn] = []*Char{p}
+			sys.activateTurnsSlot(sys.chars[pn], pn)
+		}
+	} else {
+		sys.chars[pn] = []*Char{p}
+	}
 
 	// Apply per-launch map overrides prepared from Lua/loadStart.
 	if !attached {
@@ -6866,11 +6974,8 @@ func (l *Loader) prepareTurnsFaces(pn int, fa *FightScreenFace, nm *FightScreenN
 
 			if len(srcPal) > 0 {
 				// Decouple clone from global SFF palettes
-				spr.Pal = make([]uint32, len(srcPal))
-				copy(spr.Pal, srcPal)
-
-				spr.paltemp = make([]uint32, len(srcPal))
-				copy(spr.paltemp, srcPal)
+				spr.Pal = slices.Clone(srcPal)
+				spr.paltemp = slices.Clone(srcPal)
 
 				// Force lazy loading for a unique recolored texture
 				spr.PalTex = nil
@@ -7049,7 +7154,7 @@ func (l *Loader) load() {
 					if atcpn < 0 || atcpn >= len(sys.stageList[0].attachedchardef) || sys.stageList[0].attachedchardef[atcpn] == "" {
 						sys.chars[i] = nil
 						sys.cgi[i].states = nil
-						sys.cgi[i].hitPauseToggleFlagCount = 0
+						//sys.cgi[i].hitPauseToggleFlagCount = 0
 						charDone[i] = true
 						continue
 					}
@@ -7078,7 +7183,8 @@ func (l *Loader) load() {
 					if !charDone[j] {
 						sys.chars[j] = nil
 						sys.cgi[j].states = nil
-						sys.cgi[j].hitPauseToggleFlagCount = 0
+						sys.cgi[j].customShaders = nil
+						//sys.cgi[j].hitPauseToggleFlagCount = 0
 						charDone[j] = true
 					}
 				}
@@ -7103,17 +7209,16 @@ func (l *Loader) load() {
 }
 
 func (l *Loader) reset() {
-	// Already idle
-	if l.state == LS_NotYet {
+	switch l.state {
+	case LS_NotYet:
+		// Already idle
 		return
-	}
-
-	if l.state == LS_Loading {
-		// Ensure the loader goroutine gets a cooperative cancel signal.
+	case LS_Loading:
+		// Ensure the loader goroutine gets a cooperative cancel signal
 		l.requestCancel()
 		l.state = LS_Cancel
 		<-l.loadExit
-	} else {
+	default:
 		// Loader already stopped
 		// Don't wait on loadExit because that can hang if nothing is left to receive
 		select {
@@ -7121,10 +7226,14 @@ func (l *Loader) reset() {
 		default:
 		}
 	}
+
 	l.state = LS_NotYet
 	l.err = nil
 	l.cancelCh = nil
 	l.cancelOnce = sync.Once{}
+
+	// The loader goroutine is guaranteed stopped by this point, so it's safe to clear whatever it produced
+	sys.clearPreloadedChars()
 
 	// Drop palette selections from a cancelled load
 	for i := range sys.cgi {
@@ -7133,6 +7242,13 @@ func (l *Loader) reset() {
 			sys.cgi[i].palno = -1
 		}
 	}
+}
+
+// Waits for a failed load to exit, then resets the loader so it can run again
+// Files are read from disk again, so fixes made in the meantime are picked up
+func (l *Loader) retryAfterError() {
+	<-l.loadExit
+	l.reset()
 }
 
 func (l *Loader) runTread() bool {
@@ -7248,6 +7364,8 @@ type ZoomEffect struct {
 	curPos      [2]float32 // Current values with lag
 	cameraBound bool
 	stageBound  bool
+	resultPos   [2]float32 // Results from the last camera computation, so screenPos doesn't need to redo it
+	resultScale float32
 }
 
 func (z *ZoomEffect) reset() {
@@ -7261,6 +7379,8 @@ func (z *ZoomEffect) reset() {
 	z.endLag = 0
 	z.cameraBound = true
 	z.stageBound = true
+	z.resultPos = [2]float32{0, 0}
+	z.resultScale = 1
 }
 
 // Step the zoom variables
@@ -7323,45 +7443,76 @@ func (z *ZoomEffect) update() {
 	}
 }
 
-// Apply current zoom to sys.draw() parameters
-func (z *ZoomEffect) apply(x, y, scl float32) (dx, dy, dscl float32) {
+// Compute the camera position and scale used for sys.draw()
+func (z *ZoomEffect) computeCamera(x, y, scl float32) (dx, dy, dscl float32) {
 	dx, dy, dscl = x, y, scl
 
 	if !z.active {
+		z.resultPos, z.resultScale = [2]float32{dx, dy}, dscl
 		return
 	}
 
 	finalScale := z.curScale * scl
 
-	// Apply position limits
+	// Scale limits
+	dscl = finalScale / sys.cam.BaseScale()
+	if z.cameraBound {
+		// The zoomed view has to fit inside the unzoomed one, so it can never be wider
+		dscl = Max(dscl, scl)
+	}
 	if z.stageBound {
-		dscl = Max(sys.cam.MinScale, finalScale/sys.cam.BaseScale())
-
-		if z.cameraBound {
-			zoomedViewWidth := float32(sys.gameWidth) / finalScale
-			minCamX := x - (sys.cam.halfWidth/scl - zoomedViewWidth/2)
-			maxCamX := x + (sys.cam.halfWidth/scl - zoomedViewWidth/2)
-			intermediateTargetX := x + z.curPos[0]/scl
-			dx = Clamp(intermediateTargetX, minCamX, maxCamX)
-		} else {
-			dx = x + z.curPos[0]/scl
-		}
-
-		dx = sys.cam.XBound(dscl, dx)
-	} else {
-		dscl = finalScale / sys.cam.BaseScale()
-		dx = x + z.curPos[0]/scl
+		dscl = Max(dscl, sys.cam.MinZoomScale())
 	}
 
-	dy = y + z.curPos[1]/scl
+	// Position limits
+	// Pos is in screen units relative to the camera center, like screen space in explods
+	dx = x + z.curPos[0]/sys.cam.Scale
 
+	if z.cameraBound {
+		windowHalfWidth := Max(0, sys.cam.halfWidth/scl-sys.cam.halfWidth/dscl)
+		dx = Clamp(dx, x-windowHalfWidth, x+windowHalfWidth)
+	}
+
+	if z.stageBound {
+		dx = sys.cam.XBound(dscl, dx)
+	}
+
+	// Keep smoothing continuous with what was actually visible, not the unclamped target
+	z.curPos[0] = (dx - x) * sys.cam.Scale
+
+	// cam.Pos[1] is stored pre-multiplied by scale (see camera.go's boundY), unlike Pos[0].
+	// Work in world units, then re-apply the zoom's scale.
+	baseY := y / scl
+	camWorldY := baseY + z.curPos[1]/sys.cam.Scale
+
+	// The camera's Y sits on the ground line, not the screen centre, so the
+	// room above and below it isn't the same
+	above := sys.cam.GroundLevel()
+	below := float32(sys.gameHeight) - above
+
+	if z.cameraBound {
+		// Keep the zoomed view inside what the unzoomed camera showed
+		slack := Max(0, 1/scl-1/dscl)
+		camWorldY = Clamp(camWorldY, baseY-above*slack, baseY+below*slack)
+	}
+
+	if z.stageBound {
+		camWorldY = sys.cam.YBound(dscl, camWorldY)
+	}
+
+	// Same as X: smooth from what was actually visible
+	z.curPos[1] = (camWorldY - baseY) * sys.cam.Scale
+
+	dy = camWorldY * dscl
+
+	z.resultPos, z.resultScale = [2]float32{dx, dy}, dscl
 	return
 }
 
 type CharVarBackup struct {
 	cnsvar   map[int32]int32
 	cnsfvar  map[int32]float32
-	mapArray map[string]float32
+	mapArray map[string]TypedValue
 }
 
 func (s *System) saveCharVars(pn int) {
@@ -7373,7 +7524,7 @@ func (s *System) saveCharVars(pn int) {
 	bk := CharVarBackup{
 		cnsvar:   make(map[int32]int32),
 		cnsfvar:  make(map[int32]float32),
-		mapArray: make(map[string]float32),
+		mapArray: make(map[string]TypedValue),
 	}
 
 	for k, v := range c.cnsvar {
@@ -7401,7 +7552,7 @@ func (s *System) restoreCharVars(c *Char) {
 	for k, v := range bk.cnsfvar {
 		c.cnsfvar[k] = v
 	}
-	c.mapArray = make(map[string]float32, len(bk.mapArray))
+	c.mapArray = make(map[string]TypedValue, len(bk.mapArray))
 	for k, v := range bk.mapArray {
 		c.mapArray[k] = v
 	}
@@ -7409,41 +7560,139 @@ func (s *System) restoreCharVars(c *Char) {
 	delete(s.charVarsBackup, c.playerNo)
 }
 
-func (s *System) isValidCustomShader(name string) bool {
-	if _, ok := sys.shaderRefCount[name]; ok {
-		return true
+// Loads a shader and maps its name in the asset's shader map (char, stage etc) to an engine-wide key
+// Keys come from the file path, so different assets can reuse names without overriding each other
+func (s *System) loadCustomShader(shaders map[string]string, name, filename string, data []byte) {
+	key := filepath.ToSlash(filepath.Clean(filename))
+	// Like SND, reuse the shader if something else is using it. Otherwise recompile so file edits are picked up
+	reuse := s.isCustomShaderActive(key)
+	shaders[name] = key
+	s.loadedCustomShaders[key] = true
+	if reuse {
+		return
+	}
+	s.mainThreadTask <- func() {
+		gfx.UnloadCustomSpriteShader(key)
+		gfx.LoadCustomSpriteShader(key, data)
+	}
+}
+
+// Loads a shader file listed in a [Shaders] section (char, common etc)
+func (s *System) loadCustomShaderFile(shaders map[string]string, name, path string, dirs []string) {
+	if strings.HasPrefix(gfx.GetName(), "Vulkan") && !strings.HasSuffix(strings.ToLower(path), ".spv") {
+		path += ".spv"
+	}
+	LoadFile(&path, dirs, "", func(filename string) error {
+		f, err := OpenFile(filename)
+		if err != nil {
+			LogMessage("Failed to open shader file '%s': %v", filename, err)
+			return err
+		}
+		defer f.Close()
+		data, err := io.ReadAll(f)
+		if err != nil {
+			LogMessage("Failed to read shader file '%s': %v", filename, err)
+			return err
+		}
+		s.loadCustomShader(shaders, name, filename, data)
+		return nil
+	})
+}
+
+// Merges the common [Shaders] into an asset's shader map. The asset's own shaders take priority
+func (s *System) loadCommonShaders(shaders map[string]string, dirs []string) error {
+	for _, key := range SortedKeys(s.cfg.Common.Shaders) {
+		for _, v := range s.cfg.Common.Shaders[key] {
+			if err := LoadFile(&v, dirs, "", func(filename string) error {
+				str, err := LoadText(filename)
+				if err != nil {
+					return err
+				}
+				lines, i := SplitAndTrim(str, "\n"), 0
+				for i < len(lines) {
+					is, name, _ := ReadIniSection(lines, &i)
+					if name != "shaders" {
+						continue
+					}
+					for sName, path := range is {
+						if _, ok := shaders[sName]; !ok {
+							s.loadCustomShaderFile(shaders, sName, path, []string{filename, "", "data/"})
+						}
+					}
+				}
+				return nil
+			}); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// Checks if any char is using a shader, including Turns preloads that aren't in sys.cgi yet
+func (s *System) isCustomShaderActive(key string) bool {
+	for i := range s.cgi {
+		for _, k := range s.cgi[i].customShaders {
+			if k == key {
+				return true
+			}
+		}
+	}
+	s.preloadedCharsMutex.Lock()
+	defer s.preloadedCharsMutex.Unlock()
+
+	for _, st := range s.stageList {
+		if st == nil {
+			continue
+		}
+		for _, k := range st.customShaders {
+			if k == key {
+				return true
+			}
+		}
+	}
+
+	for i := range s.preloadedCgi {
+		for _, k := range s.preloadedCgi[i].customShaders {
+			if k == key {
+				return true
+			}
+		}
 	}
 	return false
 }
 
-func (s *System) cleanCustomShaders() {
-	activeShaders := make(map[string]bool)
-	for i := 0; i < len(s.cgi); i++ {
-		for _, sName := range s.cgi[i].customShaders {
-			activeShaders[sName] = true
-		}
+// Resolves a shader name from player pn's shaders into an engine key
+// An empty name is valid and means no shader. A player that doesn't exist has no shaders
+func (s *System) resolveCharShader(pn int, name string) (string, bool) {
+	if name == "" {
+		return "", true
 	}
+	if pn < 0 || pn >= len(s.chars) || len(s.chars[pn]) == 0 {
+		return "", false
+	}
+	key, ok := s.cgi[pn].customShaders[name]
+	return key, ok
+}
 
-	for sName, count := range s.shaderRefCount {
-		if activeShaders[sName] {
-			s.shaderRefCount[sName] = 3
-		} else {
-			count--
-			if count <= 0 {
-				s.mainThreadTask <- func(name string) func() {
-					return func() {
-						gfx.UnloadCustomSpriteShader(name)
-					}
-				}(sName)
+func (s *System) cleanCustomShaders() {
+	for sName := range s.loadedCustomShaders {
+		if !s.isCustomShaderActive(sName) {
+			s.mainThreadTask <- func(name string) func() {
+				return func() {
+					gfx.UnloadCustomSpriteShader(name)
+				}
+			}(sName)
 
-				delete(s.shaderRefCount, sName)
-			} else {
-				s.shaderRefCount[sName] = count
-			}
+			delete(s.loadedCustomShaders, sName)
 		}
 	}
 }
 
 func (s *System) shouldHideWithBars() bool {
 	return !s.fightScreen.visible() || s.gsf(GSF_nobardisplay) || !s.fightScreen.bars
+}
+
+func pal32ToBytes(pal []uint32) []byte {
+	return unsafe.Slice((*byte)(unsafe.Pointer(&pal[0])), len(pal)*4)
 }

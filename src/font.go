@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/binary"
+	"io"
 	"math"
 	"os"
 	"regexp"
@@ -20,16 +21,19 @@ type FontRenderer interface {
 
 type Font interface {
 	SetColor(red float32, green float32, blue float32, alpha float32)
+	SetBlending(eq BlendEquation, src, dst BlendFunc)
 	SetPalFX(spfx ShaderPalFX)
 	UpdateResolution(windowWidth int, windowHeight int)
 	Printf(x, y float32, xscl, yscl float32, spacingXAdd float32, align int32, blend bool, window [4]int32,
 		rxadd float32, rot Rotation, projectionMode int32, fLength float32, rcx, rcy float32,
 		fs string, argv ...interface{}) error
 	Width(scale float32, spacingXAdd float32, fs string, argv ...interface{}) float32
+	SetCustomShader(shader CustomShaderRenderData)
 }
 
 type character struct {
 	textureID uint32 // ID handle of the glyph texture
+	texture   Texture
 	uv        [4]float32
 	width     int //glyph width
 	height    int //glyph height
@@ -64,12 +68,14 @@ type FntCharImage struct {
 // TtfFont implements TTF font rendering on supported platforms
 type TtfFont interface {
 	SetColor(red float32, green float32, blue float32, alpha float32)
+	SetBlending(eq BlendEquation, src, dst BlendFunc)
 	SetPalFX(spfx ShaderPalFX)
 	Width(scale float32, spacingXAdd float32, fs string, argv ...interface{}) float32
 	Printf(x, y float32, xscl, yscl float32, spacingXAdd float32, align int32, blend bool, window [4]int32,
 		rxadd float32, rot Rotation, projectionMode int32, fLength float32, rcx, rcy float32,
 		fs string, argv ...interface{}) error
 	UpdateResolution(windowWidth int, windowHeight int)
+	SetCustomShader(shader CustomShaderRenderData)
 }
 
 // Fnt is a interface for basic font information
@@ -227,8 +233,14 @@ func loadFntV1(filename string) (*Fnt, error) {
 	px = spr.RlePcxDecode(px)
 	fp.Seek(int64(txtDataOffset), 0)
 	buf = make([]byte, txtDataLength)
-	if err := read(buf); err != nil {
+	n, err = io.ReadFull(fp, buf)
+	if err != nil && err != io.ErrUnexpectedEOF {
 		return nil, err
+	}
+	// Like MUGEN, read what's there when the header claims more text than the file has.
+	if n < len(buf) {
+		LogMessage("WARNING: %v: text data is %v bytes, header says %v", filename, n, txtDataLength)
+		buf = buf[:n]
 	}
 	lines := SplitAndTrim(string(buf), "\n")
 	i := 0
@@ -411,7 +423,7 @@ func loadDefInfo(f *Fnt, filename string, is IniSection, height int32) {
 
 func LoadFntSff(f *Fnt, fontfile string, filename string) {
 	fileDir := SearchFile(filename, []string{fontfile, sys.motif.Def, "", "data/"}, "font/")
-	sff, err := loadSff(fileDir, false, false, false)
+	sff, err := loadSff(fileDir, SffTypeFont, false, false)
 
 	if err != nil {
 		panic(err)
@@ -601,9 +613,9 @@ func (f *Fnt) Print(txt string, x, y, xscl, yscl, rxadd float32, rot Rotation, p
 	window *[4]int32, palfx *PalFX, frgba [4]float32) {
 	if !sys.frameSkip {
 		if f.Type == "truetype" {
-			f.DrawTtf(txt, x, y, xscl, yscl, rxadd, rot, projectionMode, fLength, align, true, window, frgba, palfx, 0)
+			f.DrawTtf(txt, x, y, xscl, yscl, rxadd, rot, projectionMode, fLength, align, true, window, frgba, TT_default, [2]int32{255, 0}, palfx, 0, CustomShaderRenderData{})
 		} else {
-			f.DrawText(txt, x, y, xscl, yscl, rxadd, rot, projectionMode, fLength, bank, align, window, frgba, palfx, 0)
+			f.DrawText(txt, x, y, xscl, yscl, rxadd, rot, projectionMode, fLength, bank, align, window, frgba, TT_default, [2]int32{255, 0}, palfx, 0, CustomShaderRenderData{})
 		}
 	}
 }
@@ -611,7 +623,7 @@ func (f *Fnt) Print(txt string, x, y, xscl, yscl, rxadd float32, rot Rotation, p
 // DrawText prints on screen a specified text with the current font sprites
 func (f *Fnt) DrawText(txt string, x, y, xscl, yscl, rxadd float32,
 	rot Rotation, projectionMode int32, fLength float32, bank, align int32, window *[4]int32,
-	frgba [4]float32, palfx *PalFX, spacingXAdd int32) {
+	frgba [4]float32, trans TransType, alpha [2]int32, palfx *PalFX, spacingXAdd int32, shader CustomShaderRenderData) {
 
 	if len(txt) == 0 || xscl == 0 || yscl == 0 {
 		return
@@ -669,13 +681,18 @@ func (f *Fnt) DrawText(txt string, x, y, xscl, yscl, rxadd float32,
 		f.lastPalBase = nil
 	}
 
-	alpha := frgba[3]
-	alphaVal := int32(255 * sys.brightness * alpha)
+	alphaVal := int32(255 * sys.brightness * frgba[3])
 
 	// Set the trans type
 	tt := TT_none
-	if alpha < 1.0 {
+	if frgba[3] < 1.0 {
 		tt = TT_add
+	}
+	blendAlpha := [2]int32{alphaVal, 255 - alphaVal}
+	// A set trans replaces the alpha of the font color.
+	if trans != TT_default {
+		tt = trans
+		blendAlpha = [2]int32{int32(float32(alpha[0]) * sys.brightness), alpha[1]}
 	}
 
 	// Sprite fonts can't use frgba like TTF can, so we will leverage PalFX.mul to apply color
@@ -699,7 +716,7 @@ func (f *Fnt) DrawText(txt string, x, y, xscl, yscl, rxadd float32,
 		rot:            rot,
 		tint:           0,
 		blendMode:      tt,
-		blendAlpha:     [2]int32{alphaVal, 255 - alphaVal},
+		blendAlpha:     blendAlpha,
 		mask:           0,
 		pfx:            pfxCopy,
 		window:         window,
@@ -709,6 +726,7 @@ func (f *Fnt) DrawText(txt string, x, y, xscl, yscl, rxadd float32,
 		fLength:        fLength * sys.heightScale,
 		xOffset:        0,
 		yOffset:        0,
+		customShader:   shader,
 	}
 
 	for _, c := range txt {
@@ -718,7 +736,7 @@ func (f *Fnt) DrawText(txt string, x, y, xscl, yscl, rxadd float32,
 
 func (f *Fnt) DrawTtf(txt string, x, y, xscl, yscl, rxadd float32, rot Rotation,
 	projectionMode int32, fLength float32, align int32,
-	blend bool, window *[4]int32, frgba [4]float32, palfx *PalFX, spacingXAdd float32) {
+	blend bool, window *[4]int32, frgba [4]float32, trans TransType, alpha [2]int32, palfx *PalFX, spacingXAdd float32, shader CustomShaderRenderData) {
 
 	if len(txt) == 0 {
 		return
@@ -740,16 +758,32 @@ func (f *Fnt) DrawTtf(txt string, x, y, xscl, yscl, rxadd float32, rot Rotation,
 		blendMode = TT_add
 	}
 	alphaVal := int32(255 * Clamp(frgba[3], float32(0), float32(1)))
+	blendAlpha := [2]int32{alphaVal, 255 - alphaVal}
+	if trans != TT_default {
+		blendMode, blendAlpha = trans, alpha
+	}
 
 	var spfx ShaderPalFX
 
 	if palfx != nil {
-		spfx = palfx.getFinalPalFx(blendMode, [2]int32{alphaVal, 255 - alphaVal})
+		spfx = palfx.getFinalPalFx(blendMode, blendAlpha)
 	} else {
 		spfx = NewShaderPalFX()
 	}
+	f.ttf.SetCustomShader(shader)
+	// A set trans replaces the alpha of the font color and blends the text like a sprite.
+	if trans != TT_default {
+		renderWithBlending(func(eq BlendEquation, src, dst BlendFunc, a float32) {
+			f.ttf.SetPalFX(spfx)
+			f.ttf.SetBlending(eq, src, dst)
+			f.ttf.SetColor(frgba[0], frgba[1], frgba[2], a)
+			f.ttf.Printf(x, y, xscl, yscl, spacingXAdd, align, true, *window,
+				rxadd, rot, projectionMode, fLength, x, y, "%s", txt)
+		}, blendMode, blendAlpha, false, &spfx, true)
+		return
+	}
 	f.ttf.SetPalFX(spfx)
-
+	f.ttf.SetBlending(BlendAdd, BlendSrcAlpha, BlendOneMinusSrcAlpha)
 	f.ttf.SetColor(frgba[0], frgba[1], frgba[2], frgba[3])
 	f.ttf.Printf(x, y, xscl, yscl, spacingXAdd, align, blend, *window,
 		rxadd, rot, projectionMode, fLength, x, y,
@@ -774,9 +808,11 @@ type TextSprite struct {
 	xvel, yvel     float32
 	localScale     float32
 	scaleRatio     float32 // Scale correction when different localcoords interact
-	offsetX        int32
+	offsetX        float32
 	layerno        int16
 	palfx          *PalFX
+	trans          TransType
+	alpha          [2]int32
 	frgba          [4]float32 // ttf fonts
 	removetime     int32      // text sctrl
 	elapsedTicks   float32
@@ -784,6 +820,7 @@ type TextSprite struct {
 	textDelay      float32
 	textWrap       bool
 	literal        bool // text is drawn as given: "\n" is not decoded (text typed by players)
+	wrapChars      bool // textwrap = c: lines break at any character instead of between words
 	vel            [2]float32
 	accel          [2]float32
 	friction       [2]float32
@@ -791,9 +828,12 @@ type TextSprite struct {
 	hidewithbars   bool
 	// initial, unscaled values
 	offsetInit   [2]float32
+	transInit    TransType
+	alphaInit    [2]int32
 	scaleInit    [2]float32
 	windowInit   [4]float32
 	velocityInit [2]float32
+	customShader CustomShader
 }
 
 func NewTextSprite() *TextSprite {
@@ -818,6 +858,10 @@ func (ts *TextSprite) loadDefaults() {
 		yscl:       1,
 		window:     sys.scrrect,
 		frgba:      [...]float32{1.0, 1.0, 1.0, 1.0},
+		trans:      TT_default,
+		alpha:      [2]int32{255, 0},
+		transInit:  TT_default,
+		alphaInit:  [2]int32{255, 0},
 		removetime: 1,
 		localScale: 1,
 		scaleRatio: 1,
@@ -833,6 +877,7 @@ func (ts *TextSprite) loadDefaults() {
 		ts.palfx = pfx
 	}
 	ts.palfx.clear()
+	ts.customShader.clear()
 }
 
 // Creates a shallow copy with independent palette mapping
@@ -862,7 +907,7 @@ func (ts *TextSprite) SetLocalcoord(lx, ly int32) {
 		v = float64(ly) * 4 / 3
 	}
 	ts.localScale = float32(320 / v)
-	ts.offsetX = -int32(math.Floor(float64(lx)/(v/320)-320) / 2)
+	ts.offsetX = localcoordOffsetX(float64(lx), v)
 }
 
 // Like SetLocalcoord but for char texts, so scaling works more like characters
@@ -886,13 +931,13 @@ func (ts *TextSprite) SetLocalcoordChar(lc [2]int32) {
 	// Shift coordinate origin to where the screen edge is, regardless of aspect ratio
 	// Note: offsetX is not in local scale
 	extraW := gameW - v
-	ts.offsetX = -int32(math.Floor((extraW) / 2))
+	ts.offsetX = float32(-extraW / 2)
 }
 
 func (ts *TextSprite) SetPos(x, y float32) {
 	ts.offsetInit[0] = x
 	ts.offsetInit[1] = y
-	ts.x = x*ts.localScale + float32(ts.offsetX)
+	ts.x = x*ts.localScale + ts.offsetX
 	ts.y = y * ts.localScale
 }
 
@@ -932,29 +977,29 @@ func (ts *TextSprite) drawWindow() [4]int32 {
 	}
 	// Pixel bounds depend on the aspect state selected for this draw pass.
 	window := ts.windowInit
-	x := window[0]*ts.localScale + float32(ts.offsetX)
+	x := window[0]*ts.localScale + ts.offsetX
 	y := window[1] * ts.localScale
 	w := (window[2] - window[0]) * ts.localScale
 	h := (window[3] - window[1]) * ts.localScale
-	drawWindow := [4]int32{}
-	drawWindow[0] = int32((x + float32(sys.gameWidth-320)/2) * sys.widthScale)
-	// TODO: test if this truetype adjustment is needed
-	//drawWindow[1] = int32((y + float32(sys.gameHeight-240)) * sys.heightScale)
 	// Keep scissor Y consistent with the respective draw paths:
 	//  - Sprite fonts (DrawText) add +(sys.gameHeight-240) to Y
 	//  - TTF fonts (DrawTtf) do NOT add that offset
-	if ts.fnt != nil && ts.fnt.Type == "truetype" {
-		drawWindow[1] = int32(y * sys.heightScale)
-	} else {
-		drawWindow[1] = int32((y + float32(sys.gameHeight-240)) * sys.heightScale)
+	if ts.fnt == nil || ts.fnt.Type != "truetype" {
+		y += sys.gameHeight - 240
 	}
-	drawWindow[2] = int32(w*sys.widthScale + 0.5)
-	drawWindow[3] = int32(h*sys.heightScale + 0.5)
-	return drawWindow
+	return screenRect(x+(sys.gameWidth-320)/2, y, w, h)
 }
 
 func (ts *TextSprite) SetColor(r, g, b, a int32) {
 	ts.frgba = [4]float32{float32(r) / 255, float32(g) / 255, float32(b) / 255, float32(a) / 255}
+}
+
+// SetTextWrap: empty, n or 0 disable wrapping, c wraps at any character,
+// any other value wraps between words.
+func (ts *TextSprite) SetTextWrap(mode string) {
+	mode = strings.ToLower(strings.TrimSpace(mode))
+	ts.textWrap = mode != "" && mode != "0" && mode[0] != 'n'
+	ts.wrapChars = ts.textWrap && mode[0] == 'c'
 }
 
 func (ts *TextSprite) SetTextSpacing(xs, ys float32) {
@@ -1012,11 +1057,11 @@ func (ts *TextSprite) getLineLength(windowWrap bool) int32 {
 	var left, right float32
 	if windowWrap && ts.windowInit != [4]float32{0, 0, 0, 0} && ts.localScale > 0 {
 		// windowInit is in motif localcoords; convert to text space.
-		left = ts.windowInit[0]*ts.localScale + float32(ts.offsetX)
-		right = ts.windowInit[2]*ts.localScale + float32(ts.offsetX)
+		left = ts.windowInit[0]*ts.localScale + ts.offsetX
+		right = ts.windowInit[2]*ts.localScale + ts.offsetX
 	} else {
 		// No explicit window: use the whole localcoord width.
-		left = float32(ts.offsetX)
+		left = ts.offsetX
 		right = left + lcWidth
 	}
 
@@ -1138,7 +1183,7 @@ func (ts *TextSprite) wrapText(fullLine string, typedLen int) {
 						break
 					}
 					rr, ss := utf8.DecodeRuneInString(s[i:])
-					if rr == '\n' || rr == ' ' || rr == '\t' {
+					if rr == '\n' || rr == ' ' || rr == '\t' || ts.wrapChars && rawRunes > 0 {
 						break
 					}
 					i += ss
@@ -1382,6 +1427,19 @@ func (ts *TextSprite) Update() {
 	if ts.palfx != nil {
 		ts.palfx.step()
 	}
+
+	// Shader time and animation
+	if ts.customShader.time > 0 {
+		ts.customShader.time--
+		if ts.customShader.time == 0 {
+			ts.customShader.clear()
+		}
+	}
+	if ts.customShader.name != "" {
+		ts.customShader.sTime++
+		ts.customShader.tex1.step()
+		ts.customShader.tex2.step()
+	}
 }
 
 func (ts *TextSprite) Draw(ln int16) {
@@ -1445,10 +1503,10 @@ func (ts *TextSprite) draw(ln int16, clip *[4]int32) {
 		// Draw the visible line
 		if ts.fnt.Type == "truetype" {
 			ts.fnt.DrawTtf(line[:charsToShow], ts.x+ts.vel[0]-xsoffset+phantomX, newY+ts.vel[1], ts.xscl, ts.yscl,
-				xshear, ts.rot, ts.projection, ts.fLength, ts.align, true, &window, ts.frgba, ts.palfx, float32(spacingXAdd))
+				xshear, ts.rot, ts.projection, ts.fLength, ts.align, true, &window, ts.frgba, ts.trans, ts.alpha, ts.palfx, float32(spacingXAdd), ts.customShader.renderData(true))
 		} else {
 			ts.fnt.DrawText(line[:charsToShow], ts.x+ts.vel[0]-xsoffset+phantomX, newY+ts.vel[1], ts.xscl, ts.yscl,
-				xshear, ts.rot, ts.projection, ts.fLength, ts.bank, ts.align, &window, ts.frgba, ts.palfx, spacingXAdd)
+				xshear, ts.rot, ts.projection, ts.fLength, ts.bank, ts.align, &window, ts.frgba, ts.trans, ts.alpha, ts.palfx, spacingXAdd, ts.customShader.renderData(true))
 		}
 
 		totalCharsShown += charsToShow
@@ -1459,6 +1517,7 @@ func (ts *TextSprite) draw(ln int16, clip *[4]int32) {
 }
 
 func (ts *TextSprite) Reset() {
+	ts.trans, ts.alpha = ts.transInit, ts.alphaInit
 	ts.SetPos(ts.offsetInit[0], ts.offsetInit[1])
 	ts.SetScale(ts.scaleInit[0], ts.scaleInit[1])
 	ts.SetWindow(ts.windowInit)

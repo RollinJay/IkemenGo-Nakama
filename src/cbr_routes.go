@@ -381,21 +381,26 @@ func (c *CharCompiler) cbrNoteParams(sctrl StateController, s cbrExprScan) {
 	if c.cbr.safe == nil {
 		c.cbr.safe = map[*byte]bool{}
 	}
-	c.cbr.safe[unsafe.SliceData([]byte(x))] = true
+	c.cbr.safe[cbrSlicePtr(x)] = true
 }
 
 // cbrCtrlKey identifies a ChangeState or SelfState controller by its
 // compiled code, which every copy of the controller shares; nil for any
 // other controller.
+// cbrSlicePtr is a state controller's identity: the address of its parameters.
+func cbrSlicePtr[S ~[]scParam](x S) *byte {
+	return (*byte)(unsafe.Pointer(unsafe.SliceData(x)))
+}
+
 func cbrCtrlKey(sc StateController) *byte {
 	switch x := sc.(type) {
 	case changeState:
 		if len(x) > 0 {
-			return unsafe.SliceData([]byte(x))
+			return cbrSlicePtr(x)
 		}
 	case selfState:
 		if len(x) > 0 {
-			return unsafe.SliceData([]byte(x))
+			return cbrSlicePtr(x)
 		}
 	}
 	return nil
@@ -494,7 +499,7 @@ type cbrLocalStep struct {
 // cbrRouteSet is one character's route table.
 type cbrRouteSet struct {
 	pn     int
-	states map[int32]StateBytecode // the compiled states it lists
+	states map[int32]*StateBytecode // the compiled states it lists
 	routes []cbrRoute
 	byCtrl map[*byte]int32
 	// into lists, by fixed target, the routes into it that need a command,
@@ -536,7 +541,7 @@ func cbrRoutesFor(pn int) *cbrRouteSet {
 
 // cbrBuildRoutes builds player pn's route table from its compiled states
 // and functions, with what the compiler noted in scan.
-func cbrBuildRoutes(pn int, states map[int32]StateBytecode,
+func cbrBuildRoutes(pn int, states map[int32]*StateBytecode,
 	funcs map[string]BytecodeFunction, cmdl *CommandList, scan *cbrRouteScan) {
 	if pn < 0 || pn >= len(cbrRouteSets) {
 		return
@@ -570,7 +575,7 @@ func cbrBuildRoutes(pn int, states map[int32]StateBytecode,
 		// A function's calls already checked hitpause.
 		w.owner, w.numVars, w.locals, w.localsOK = cbrInFunction, funcs[name].numVars, nil, false
 		fn := StateBlock{ctrls: funcs[name].ctrls, ctrlsIgnorehitpause: true,
-			ignorehitpause: -1, persistentIndex: -1}
+			ignorehitpause: true, persistentIndex: -1}
 		w.block(&fn, cbrPath{hp: true, loop: true})
 	}
 	for i := range set.routes {
@@ -659,8 +664,8 @@ func (w *cbrWalker) pureCtrls(ctrls []StateController, depth int) bool {
 			if !w.safeExpr(BytecodeExp(x)) {
 				return false
 			}
-		case StateBlock:
-			if !w.pureBlock(&x, depth) {
+		case *StateBlock:
+			if !w.pureBlock(x, depth) {
 				return false
 			}
 		case CallFunction:
@@ -721,7 +726,7 @@ func (w *cbrWalker) local(sc StateController, p cbrPath) {
 		kind, ok := cbrParamExp(scb, varSet_sctrltype)
 		set, fixed := cbrConstInt(kind)
 		if safeConds && ok && fixed && (set == 0 || set == 1) &&
-			!scb.hasParam(varSet_redirectid) && len(x) > 0 && w.scan.safe[unsafe.SliceData([]byte(x))] {
+			!scb.hasParam(varSet_redirectid) && len(x) > 0 && w.scan.safe[cbrSlicePtr(x)] {
 			w.locals = append(w.locals, cbrLocalStep{conds: p.conds, ctrl: sc, vars: true})
 		}
 		return
@@ -736,7 +741,7 @@ func (w *cbrWalker) local(sc StateController, p cbrPath) {
 // block lists the routes in b, and in its else branch, as StateBlock.Run
 // runs them.
 func (w *cbrWalker) block(b *StateBlock, p cbrPath) {
-	p.hp = p.hp && b.ignorehitpause >= -1
+	p.hp = p.hp && b.ignorehitpause
 	if b.persistentIndex >= 0 {
 		p.persist = append(append([]int32(nil), p.persist...), b.persistentIndex)
 	}
@@ -747,8 +752,8 @@ func (w *cbrWalker) block(b *StateBlock, p cbrPath) {
 		in.conds = append(append([]cbrCond(nil), p.conds...), cbrCond{exp: b.trigger, want: true})
 	}
 	for _, sc := range b.ctrls {
-		if sb, ok := sc.(StateBlock); ok {
-			w.block(&sb, in)
+		if sb, ok := sc.(*StateBlock); ok {
+			w.block(sb, in)
 		} else if key := cbrCtrlKey(sc); key != nil {
 			w.route(sc, key, in, b.ctrlsIgnorehitpause)
 		} else {
@@ -917,25 +922,12 @@ func cbrHas(list []string, s string) bool {
 	return false
 }
 
-// cbrParamExp returns a controller parameter's first expression.
+// cbrParamExp returns a controller parameter's first expression, as
+// StateControllerBase.run reads it.
 func cbrParamExp(scb StateControllerBase, id byte) (BytecodeExp, bool) {
-	for i := 0; i+1 < len(scb); {
-		pid, n := scb[i], int(scb[i+1])
-		i += 2
-		for m := 0; m < n; m++ {
-			if i+4 > len(scb) {
-				return nil, false
-			}
-			l := int(*(*int32)(unsafe.Pointer(&scb[i])))
-			i += 4
-			if i+l > len(scb) {
-				return nil, false
-			}
-			if pid == id && m == 0 {
-				// As StateControllerBase.run reads it
-				return (*(*BytecodeExp)(unsafe.Pointer(&scb)))[i : i+l], true
-			}
-			i += l
+	for _, p := range scb {
+		if p.id == id && len(p.exp) > 0 {
+			return p.exp[0], true
 		}
 	}
 	return nil, false
@@ -1221,9 +1213,10 @@ func (set *cbrRouteSet) runsNow(c *Char, r *cbrRoute) (runs, sure, afterHitpause
 		return false, true, false
 	}
 	// Negative states' controllers always run once per frame; a positive
-	// state's counters are those of its current run.
+	// state's counters are those of its current run, which the character
+	// keeps (c.ss.ps, as StateBytecode.run picks them).
 	if r.owner >= 0 {
-		ps := c.ss.sb.ctrlsps
+		ps := c.ss.ps
 		for _, idx := range r.persist {
 			if idx >= 0 && int(idx) < len(ps) {
 				v := ps[idx]

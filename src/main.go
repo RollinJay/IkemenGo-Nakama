@@ -120,13 +120,38 @@ func realMain() {
 			return
 		}
 		Logcat("LOG: SDL Init SUCCESS")
+	} else if runtime.GOOS == "ios" {
+		Logcat("Inside realMain...")
+		runtime.LockOSThread()
+		if sys.baseDir == "" {
+			panic("FATAL: iOS baseDir not set")
+		}
+		Logcat("sys.baseDir is: " + sys.baseDir)
+
+		if err := os.Chdir(sys.baseDir); err != nil {
+			Logcat(fmt.Sprintf("LOG: CHDIR FAILED: %v\n", err))
+			// Don't panic yet, let's see if we can continue
+		} else {
+			Logcat("LOG: CHDIR SUCCESSFUL")
+		}
+
+		// Set the orientation hints (all must be supported)
+		setOrientationHints()
+
+		// Init SDL NOW
+		if err := sdl.Init(sdl.INIT_AUDIO | sdl.INIT_VIDEO | sdl.INIT_EVENTS | sdl.INIT_TIMER | sdl.INIT_JOYSTICK | sdl.INIT_GAMECONTROLLER); err != nil {
+			Logcat("LOG: SDL Init Failed: " + err.Error())
+			return
+		}
+		Logcat("LOG: SDL Init SUCCESS")
+
 	} else {
 		sys.baseDir = "./"
 	}
 
 	// Handle Permissions and Directory Creation
 	permission := os.FileMode(0755)
-	if runtime.GOOS != "android" {
+	if runtime.GOOS != "android" && runtime.GOOS != "ios" {
 		permission |= os.ModeSticky
 	}
 
@@ -202,10 +227,6 @@ func realMain() {
 		// For Android, let's see exactly what failed
 		panic(err)
 	}
-	// Force to OpenGL ES 3.2 for Android
-	if runtime.GOOS == "android" {
-		cfg.Video.RenderMode = "OpenGL ES 3.2"
-	}
 	sys.cfg = *cfg
 	// Logcat("LOG: Config Loaded. System Script: " + sys.cfg.Config.System)
 
@@ -265,6 +286,7 @@ func processCommandLine() {
 			"-togglelifebars": true,
 			"-maxpowermode":   true,
 			"-debug":          true,
+			"-debugdump":      true,
 			"-nojoy":          true,
 			"-nomusic":        true,
 			"-nosound":        true,
@@ -334,6 +356,7 @@ Quick VS Options:
 -nakama-stun <list>     Comma-separated STUN servers for the Nakama P2P handshake
 	
 Debug Options:
+-debugdump              Enables external Lua debug data output
 -nojoy                  Disables joysticks
 -nomusic                Disables music
 -nosound                Disables all sound effects and music
@@ -341,6 +364,7 @@ Debug Options:
 -maxpowermode           Enables auto-refill of Power bars
 -ailevel <level>        Changes game difficulty setting to <level> (1-8)
 -speed <speed>          Changes game speed setting to <speed> (-9 to 9)
+-framerate              Changes game framerate setting to <framerate>
 -stresstest <frameskip> Stability test (AI matches at speed increased by <frameskip>)
 -speedtest              Speed test (match speed x100)`
 					//ShowInfoDialog(text, "I.K.E.M.E.N Command line options")

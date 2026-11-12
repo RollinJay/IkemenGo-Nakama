@@ -79,7 +79,7 @@ func (rs *RollbackSystem) hijackRunMatch() bool {
 		// GGPO's disconnect timeout only runs after initial synchronization.
 		if rs.netConnection != nil && !rs.session.synchronized && time.Now().After(syncDeadline) {
 			rs.netConnection.fail(fmt.Errorf("Timed out establishing rollback connection to %s (local UDP port %d).\nCheck UDP forwarding and firewall settings on both peers.",
-				net.JoinHostPort(rs.session.remoteIp, fmt.Sprint(rs.session.remotePort)), rs.session.config.Port))
+				net.JoinHostPort(rs.session.remoteIp, fmt.Sprint(rs.session.remotePort)), rs.netConnection.rollbackLocalPort))
 			break
 		}
 
@@ -144,7 +144,7 @@ func (rs *RollbackSystem) preMatchSetup() error {
 			return Error("Rollback currently requires an IPv4 peer address")
 		}
 
-		localPort := rs.session.config.Port
+		localPort := sys.netConnection.rollbackLocalPort
 		remotePort := sys.netConnection.rollbackRemotePort
 
 		// A ready Nakama P2P socket is the preferred gameplay transport: GGPO
@@ -184,7 +184,7 @@ func (rs *RollbackSystem) preMatchSetup() error {
 			}
 			// A local/proxy peer needs different UDP ports or packets loop back into our own rollback socket.
 			if (remoteIP.IsLoopback() || remoteIP.Equal(localIP)) && localPort == remotePort {
-				return fmt.Errorf("Cannot use UDP port %d for both rollback players on the same machine.\nConfigure a different Rollback.Port for each instance.", localPort)
+				return fmt.Errorf("Cannot use UDP port %d for both rollback players on the same machine.\nUse 127.0.0.1 for automatic guest port selection, or configure different Rollback.Port values.", localPort)
 			}
 		}
 
@@ -875,17 +875,10 @@ func (r *RollbackSession) SaveGameState(stateIdx int) int {
 	sys.savePool.curStateID = stateIdx
 	sys.rollbackStateID = stateIdx
 	oldest := (stateIdx + 1) % (MaxSaveStates + 2)
-	if _, ok := sys.arenaSaveMap[oldest]; ok {
-		sys.arenaSaveMap[oldest].Free()
-		sys.arenaSaveMap[oldest] = nil
-		delete(sys.arenaSaveMap, oldest)
-	}
+	// These slots are no longer restorable; drop their snapshots before freeing pooled data.
+	delete(r.saveStates, oldest)
+	delete(r.saveStates, stateIdx)
 	sys.savePool.Free(oldest)
-	if _, ok := sys.arenaSaveMap[stateIdx]; ok {
-		sys.arenaSaveMap[stateIdx].Free()
-		sys.arenaSaveMap[stateIdx] = nil
-		delete(sys.arenaSaveMap, stateIdx)
-	}
 	sys.savePool.Free(stateIdx)
 
 	r.saveStates[stateIdx] = sys.statePool.gameStatePool.Get().(*GameState)
@@ -906,22 +899,8 @@ func (r *RollbackSession) SaveGameState(stateIdx int) int {
 	}
 }
 
-var lastLoadedFrame int = -1
-
 func (r *RollbackSession) LoadGameState(stateIdx int) {
 	sys.loadPool.curStateID = stateIdx
-	if _, ok := sys.arenaLoadMap[stateIdx]; ok {
-		sys.arenaLoadMap[stateIdx].Free()
-		sys.arenaLoadMap[stateIdx] = nil
-		delete(sys.arenaLoadMap, stateIdx)
-	}
-	for sid := range sys.arenaLoadMap {
-		if sid != lastLoadedFrame {
-			sys.arenaLoadMap[sid].Free()
-			sys.arenaLoadMap[sid] = nil
-			delete(sys.arenaLoadMap, sid)
-		}
-	}
 	sys.loadPool.Free(stateIdx)
 
 	r.saveStates[stateIdx].LoadState(stateIdx)
@@ -930,12 +909,9 @@ func (r *RollbackSession) LoadGameState(stateIdx int) {
 		r.log.logState("Loading", stateIdx, r.saveStates[stateIdx])
 	}
 
+	// Drop the entry alongside the Put, or a later Get can hand out a GameState this map still points at
 	sys.statePool.gameStatePool.Put(r.saveStates[stateIdx])
-
-	// Drop the entry alongside the Put, or a later Get can hand out a stale state
 	delete(r.saveStates, stateIdx)
-
-	lastLoadedFrame = stateIdx
 }
 
 // Called when the GGPO backend needs the game to simulate a single frame

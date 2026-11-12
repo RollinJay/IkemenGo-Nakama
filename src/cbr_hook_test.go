@@ -243,13 +243,13 @@ func TestCBRMaskEndsWithTheDrivenFrame(t *testing.T) {
 		// The character's own NoAILevel, asserted before hitpause, is left as
 		// the engine leaves it: kept through hitpause only where flags are.
 		c := newHelper()
-		c.setASF(ASF_noailevel)
+		c.setASF(ASF_noailevel, true)
 		frame(c, true, 5)
 		cbrUnmaskAll()
 		if got := c.asf(ASF_noailevel); got != v.keepsFlag {
 			t.Fatalf("%s: the character's own NoAILevel after a driven frame in hitpause: %v, want %v", v.name, got, v.keepsFlag)
 		}
-		c.setASF(ASF_noailevel)
+		c.setASF(ASF_noailevel, true)
 		if got := frame(c, false, 5); got != v.keepsFlag {
 			t.Fatalf("%s: the character's own NoAILevel on a base frame in hitpause: %v, want %v", v.name, got, v.keepsFlag)
 		}
@@ -293,9 +293,9 @@ func TestCBRButtonJamStaysOffAfterDrivenFrames(t *testing.T) {
 	cl := NewCommandList(NewInputBuffer())
 	jammed := func(jamOff bool) bool {
 		sys.aiInput[0] = AiInput{dir: 0, dirt: 30}
-		root.unsetASF(ASF_noaibuttonjam)
+		root.setASF(ASF_noaibuttonjam, false)
 		if jamOff {
-			root.setASF(ASF_noaibuttonjam)
+			root.setASF(ASF_noaibuttonjam, true)
 		}
 		cl.Buffer.Reset()
 		cl.InputUpdate(root, -1)
@@ -307,14 +307,14 @@ func TestCBRButtonJamStaysOffAfterDrivenFrames(t *testing.T) {
 
 	// The AI's frame with NoAIButtonJam, then a frame the CBR layer gives
 	// the input (the paused AI asserts nothing), then the AI's again.
-	root.setASF(ASF_noaibuttonjam)
+	root.setASF(ASF_noaibuttonjam, true)
 	cbrEndFrame()
 	noJam := func() bool { return s.aiFlags&ASF_noaibuttonjam != 0 }
 	if !noJam() || s.wasDriven {
 		t.Fatalf("after the AI's frame: noJam %v wasDriven %v", noJam(), s.wasDriven)
 	}
 	s.driven = true
-	root.unsetASF(ASF_noaibuttonjam)
+	root.setASF(ASF_noaibuttonjam, false)
 	cbrEndFrame()
 	if !noJam() || !s.wasDriven {
 		t.Fatalf("after the CBR layer's frame: noJam %v wasDriven %v", noJam(), s.wasDriven)
@@ -337,7 +337,7 @@ func TestCBRButtonJamStaysOffAfterDrivenFrames(t *testing.T) {
 		t.Fatal("an AI that lets the jam play gets it")
 	}
 	// An AI that leaves the jam on gets it after the CBR layer's frames too.
-	root.unsetASF(ASF_noaibuttonjam)
+	root.setASF(ASF_noaibuttonjam, false)
 	cbrEndFrame()
 	s.driven = true
 	cbrEndFrame()
@@ -364,7 +364,8 @@ func TestCBRBuiltInMovesKeepTheAIsFlags(t *testing.T) {
 		sys.cgi[0], sys.ignoreMostErrors, sys.fightScreen.round = savedCgi, savedIgnore, savedRound
 	})
 	sys.fightScreen.round = &FightScreenRound{} // the round is in progress
-	root := &Char{controller: -1, minus: 3, localcoord: 320, localscl: 1, life: 1000}
+	root := &Char{controller: -1, minus: 3, localscl: 1, life: 1000}
+	root.ss.sb = newStateBytecode(0) // as a loaded character has
 	root.cmd = []CommandList{*NewCommandList(NewInputBuffer())}
 	root.keyctrl[0] = true
 	sys.chars = [len(sys.chars)][]*Char{{root}}
@@ -382,7 +383,7 @@ func TestCBRBuiltInMovesKeepTheAIsFlags(t *testing.T) {
 	// in, and which flags the character had when they did.
 	start := func(dir int32) (state int32, flags AssertSpecialFlag) {
 		root.ss.no, root.ss.prevno, root.ss.time, root.ss.stateType = 0, 0, 10, ST_S
-		root.setSCF(SCF_ctrl)
+		root.setSCF(SCF_ctrl, true)
 		sys.aiInput[0] = AiInput{dir: dir, dirt: 30}
 		root.cmd[0].Buffer.Reset()
 		root.cmd[0].InputUpdate(root, -1)
@@ -457,7 +458,7 @@ func TestCBRBuiltInMovesKeepTheAIsFlags(t *testing.T) {
 	// is off); one that switched only crouching guard off guards.
 	root.inguarddist = true
 	guard := func() int32 {
-		root.setSCF(SCF_guard) // as the frame before left it
+		root.setSCF(SCF_guard, true) // as the frame before left it
 		got, _ := start(6)
 		return got
 	}
@@ -510,7 +511,8 @@ func TestCBRBackWalkAfterDrivenFrames(t *testing.T) {
 		sys.cgi[0], sys.ignoreMostErrors, sys.fightScreen.round = savedCgi, savedIgnore, savedRound
 	})
 	sys.fightScreen.round = &FightScreenRound{}
-	root := &Char{controller: -1, minus: 3, localcoord: 320, localscl: 1, life: 1000}
+	root := &Char{controller: -1, minus: 3, localscl: 1, life: 1000}
+	root.ss.sb = newStateBytecode(0) // as a loaded character has
 	root.cmd = []CommandList{*NewCommandList(NewInputBuffer())}
 	root.keyctrl[0] = true
 	sys.chars = [len(sys.chars)][]*Char{{root}}
@@ -526,7 +528,7 @@ func TestCBRBackWalkAfterDrivenFrames(t *testing.T) {
 	// and the engine works out guarding from the flags.
 	frame := func(driven bool) int32 {
 		root.ss.no, root.ss.prevno, root.ss.time, root.ss.stateType = 0, 0, 10, ST_S
-		root.setSCF(SCF_ctrl)
+		root.setSCF(SCF_ctrl, true)
 		sys.aiInput[0] = AiInput{dir: 6, dirt: 30}
 		root.cmd[0].Buffer.Reset()
 		root.cmd[0].InputUpdate(root, -1)
@@ -536,9 +538,9 @@ func TestCBRBackWalkAfterDrivenFrames(t *testing.T) {
 			root.assertFlag |= ASF_nostandguard
 		}
 		if root.asf(ASF_nostandguard) {
-			root.unsetSCF(SCF_guard)
+			root.setSCF(SCF_guard, false)
 		} else {
-			root.setSCF(SCF_guard)
+			root.setSCF(SCF_guard, true)
 		}
 		s.driven = driven
 		cbrEndFrame()

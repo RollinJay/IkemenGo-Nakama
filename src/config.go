@@ -49,6 +49,7 @@ type Config struct {
 		Const   map[string][]string `ini:"map:^(?i)Const[0-9]*$" lua:"Const" sync:"host"`
 		States  map[string][]string `ini:"map:^(?i)States[0-9]*$" lua:"States" sync:"host"`
 		Fx      map[string][]string `ini:"map:^(?i)Fx[0-9]*$" lua:"Fx" sync:"host"`
+		Shaders map[string][]string `ini:"map:^(?i)Shaders[0-9]*$" lua:"Shaders" sync:"host"`
 		Modules map[string][]string `ini:"map:^(?i)Modules[0-9]*$" lua:"Modules" sync:"host"`
 		Lua     map[string][]string `ini:"map:^(?i)Lua[0-9]*$" lua:"Lua" sync:"host"`
 	} `ini:"Common"`
@@ -143,6 +144,7 @@ type Config struct {
 		ForceStageZoomin    float32 `ini:"ForceStageZoomin" sync:"host"`
 		ForceStageAutoZoom  bool    `ini:"ForceStageAutoZoom" sync:"host"`
 		KeepSpritesOnReload bool    `ini:"KeepSpritesOnReload"`
+		RetryLoadOnError    bool    `ini:"RetryLoadOnError"`
 		MacOSUseCommandKey  bool    `ini:"MacOSUseCommandKey"`
 		SpeedTest           int     `ini:"SpeedTest"`
 	} `ini:"Debug"`
@@ -158,28 +160,33 @@ type Config struct {
 			GameOffsetY int32    `ini:"GameOffsetY"`
 			Localcoord  [2]int32 `ini:"Localcoord"`
 		} `ini:"Border"`
-		WindowWidth              int      `ini:"WindowWidth"`
-		WindowHeight             int      `ini:"WindowHeight"`
-		Framerate                int      `ini:"Framerate"` // TODO: test if we need strict/host here
-		VSync                    int      `ini:"VSync"`
-		Fullscreen               bool     `ini:"Fullscreen"`
-		Borderless               bool     `ini:"Borderless"`
-		RGBSpriteBilinearFilter  bool     `ini:"RGBSpriteBilinearFilter"`
-		MSAA                     int32    `ini:"MSAA"`
-		WindowCentered           bool     `ini:"WindowCentered"`
-		ExternalShaders          []string `ini:"ExternalShaders"`
-		WindowScaleMode          bool     `ini:"WindowScaleMode"`
-		FightAspectWidth         int32    `ini:"FightAspectWidth" sync:"strict"`
-		FightAspectHeight        int32    `ini:"FightAspectHeight" sync:"strict"`
-		KeepAspect               bool     `ini:"KeepAspect"`
-		RendererDebugMode        bool     `ini:"RendererDebugMode"`
-		EnableModel              bool     `ini:"EnableModel"`
-		EnableModelShadow        bool     `ini:"EnableModelShadow"`
-		ImageSuballocThresholdKB int      `ini:"ImageSuballocThresholdKB"` // ≤ this (KB) suballocated; 0 to disable
-		ImageSuballocBlockSizeMB int      `ini:"ImageSuballocBlockSizeMB"` // block size (MB) for suballocation pool
-		VRAMFallbackEnabled      bool     `ini:"VRAMFallbackEnabled"`      // Vulkan only: master switch for VRAM→HOST_VISIBLE fallback
-		VRAMSwapThresholdPercent int      `ini:"VRAMSwapThresholdPercent"` // Vulkan only: heap % that triggers swappable texture eviction
-		VRAMSwapCooldownFrames   int      `ini:"VRAMSwapCooldownFrames"`   // Vulkan only: frames between swap attempts
+		WindowWidth               int      `ini:"WindowWidth"`
+		WindowHeight              int      `ini:"WindowHeight"`
+		Framerate                 int      `ini:"Framerate"` // TODO: test if we need strict/host here
+		VSync                     int      `ini:"VSync"`
+		Fullscreen                bool     `ini:"Fullscreen"`
+		Borderless                bool     `ini:"Borderless"`
+		RGBSpriteBilinearFilter   bool     `ini:"RGBSpriteBilinearFilter"`
+		MSAA                      int32    `ini:"MSAA"`
+		WindowCentered            bool     `ini:"WindowCentered"`
+		ExternalShaders           []string `ini:"ExternalShaders"`
+		WindowScaleMode           bool     `ini:"WindowScaleMode"`
+		FightAspectWidth          int32    `ini:"FightAspectWidth" sync:"strict"`
+		FightAspectHeight         int32    `ini:"FightAspectHeight" sync:"strict"`
+		KeepAspect                bool     `ini:"KeepAspect"`
+		RendererDebugMode         bool     `ini:"RendererDebugMode"`
+		EnableModel               bool     `ini:"EnableModel"`
+		EnableModelShadow         bool     `ini:"EnableModelShadow"`
+		LifeBarTextureAtlasSize   int32    `ini:"LifeBarTextureAtlasSize"`
+		StageTextureAtlasSize     int32    `ini:"StageTextureAtlasSize"`
+		CharacterTextureAtlasSize int32    `ini:"CharacterTextureAtlasSize"`
+		FontTextureAtlasSize      int32    `ini:"FontTextureAtlasSize"`
+		TextureAtlasSize          int32    `ini:"TextureAtlasSize"`
+		ImageSuballocThresholdKB  int      `ini:"ImageSuballocThresholdKB"` // ≤ this (KB) suballocated; 0 to disable
+		ImageSuballocBlockSizeMB  int      `ini:"ImageSuballocBlockSizeMB"` // block size (MB) for suballocation pool
+		VRAMFallbackEnabled       bool     `ini:"VRAMFallbackEnabled"`      // Vulkan only: master switch for VRAM→HOST_VISIBLE fallback
+		VRAMSwapThresholdPercent  int      `ini:"VRAMSwapThresholdPercent"` // Vulkan only: heap % that triggers swappable texture eviction
+		VRAMSwapCooldownFrames    int      `ini:"VRAMSwapCooldownFrames"`   // Vulkan only: frames between swap attempts
 	} `ini:"Video"`
 	Sound struct {
 		SampleRate           int32   `ini:"SampleRate"`
@@ -195,6 +202,7 @@ type Config struct {
 		MaxBGMVolume         int     `ini:"MaxBGMVolume"`
 		AudioDucking         bool    `ini:"AudioDucking"`
 		AudioResampleQuality int     `ini:"AudioResampleQuality"`
+		FocusLossVolume      int     `ini:"FocusLossVolume"`
 	} `ini:"Sound"`
 	Arcade struct {
 		AI struct {
@@ -431,7 +439,17 @@ func (c *Config) normalize() {
 	c.SetValueUpdate("Sound.MaxBGMVolume", int(Clamp(int32(c.Sound.MaxBGMVolume), 100, 250)))
 	c.SetValueUpdate("Sound.PanningRange", Clamp(c.Sound.PanningRange, 0, 100))
 	c.SetValueUpdate("Sound.PauseMasterVolume", int(Clamp(int32(c.Sound.PauseMasterVolume), 0, 100)))
+	c.SetValueUpdate("Sound.FocusLossVolume", int(Clamp(int32(c.Sound.FocusLossVolume), 0, 100)))
 	c.SetValueUpdate("Sound.WavChannels", Clamp(c.Sound.WavChannels, 1, 256))
+
+	renderer, _ := selectRenderer(c.Video.RenderMode)
+	renderMode := renderer.GetName()
+	if strings.HasPrefix(renderMode, "Vulkan 1.3") {
+		renderMode = "Vulkan 1.3"
+	}
+	if c.Video.RenderMode != renderMode {
+		c.SetValueUpdate("Video.RenderMode", renderMode)
+	}
 
 	switch c.Video.MSAA {
 	case 0, 2, 4, 6, 8, 16, 32:

@@ -219,6 +219,37 @@ func tagKeyFirstMap(sf reflect.StructField) bool {
 	return v == "true" || v == "1" || v == "yes"
 }
 
+// Rewrites "<key>.<mapField>" queries to "<mapField>.<key>". With join, all parts
+// before a final map field form one key: "menugame.language.text" -> text["menugame.language"].
+func keyFirstParts(v reflect.Value, parts []queryPart, i int, join bool) ([]queryPart, bool) {
+	isKeyFirst := func(name string) bool {
+		fv, sf, ok := findFieldByINITag(v, name)
+		return ok && fv.Kind() == reflect.Map && fv.Type().Key().Kind() == reflect.String && tagKeyFirstMap(sf)
+	}
+	if i+1 >= len(parts) {
+		return nil, false
+	}
+	j := i + 1
+	if !isKeyFirst(parts[j].name) {
+		if !join {
+			return nil, false
+		}
+		j = len(parts) - 1
+		if j <= i+1 || !isKeyFirst(parts[j].name) {
+			return nil, false
+		}
+	}
+	names := make([]string, 0, j-i)
+	for k := i; k < j; k++ {
+		names = append(names, parts[k].name)
+	}
+	out := make([]queryPart, 0, len(parts)-(j-i)+1)
+	out = append(out, parts[:i]...)
+	out = append(out, parts[j], queryPart{name: strings.Join(names, ".")})
+	out = append(out, parts[j+1:]...)
+	return out, true
+}
+
 // returns true if root has a top-level ini:"<sec>" field with `literal:"yes"`.
 func isLiteralSectionFor(root interface{}, sec string) bool {
 	v := reflect.ValueOf(root)
@@ -1039,6 +1070,16 @@ func assignField(structPtr interface{}, parts []queryPart, value interface{}, ba
 		if v.Kind() == reflect.Struct {
 			fieldVal, fieldType, found := findFieldByINITag(v, part.name)
 			if found {
+				if part.index != nil {
+					if fieldVal.Kind() != reflect.Array && fieldVal.Kind() != reflect.Slice {
+						return true, fmt.Errorf("field '%s' is not an array or slice", part.name)
+					}
+					idx, err := strconv.Atoi(*part.index)
+					if err != nil || idx < 0 || idx >= fieldVal.Len() {
+						return true, fmt.Errorf("invalid index '%s' for field '%s'", *part.index, part.name)
+					}
+					return true, setFieldValue(fieldVal.Index(idx), value, "", strings.Join(extractNames(parts), "."), "", baseDef)
+				}
 				// If the matched field is a MAP and we're at the final token, assign to the map["default"] element.
 				if fieldVal.Kind() == reflect.Map {
 					if fieldVal.IsNil() {
@@ -1197,6 +1238,13 @@ func assignField(structPtr interface{}, parts []queryPart, value interface{}, ba
 						return nil
 					}
 
+					// Dotted keys after a text map form one key: "text.menugame.language" -> text["menugame.language"].
+					if tagKeyFirstMap(sf) && fieldVal.Type().Key().Kind() == reflect.String &&
+						fieldVal.Type().Elem().Kind() == reflect.String && i+2 < len(parts) {
+						joined := queryPart{name: strings.Join(extractNames(parts[i+1:]), ".")}
+						return assignField(structPtr, append(append([]queryPart{}, parts[:i+1]...), joined), value, baseDef)
+					}
+
 					// Normal map-of-struct behavior (using "default" key).
 					currentMapInsensitiveKeys = tagInsensitiveKeys(sf)
 
@@ -1318,16 +1366,8 @@ func assignField(structPtr interface{}, parts []queryPart, value interface{}, ba
 
 			// Handle key-first map fields:
 			// rewrite "<key>.<mapField>[...]" to "<mapField>.<key>[...]" when the map field has `keyfirst:"true"`.
-			if i+1 < len(parts) {
-				if fieldValMap, sfMap, foundMap := findFieldByINITag(v, parts[i+1].name); foundMap &&
-					fieldValMap.Kind() == reflect.Map &&
-					fieldValMap.Type().Key().Kind() == reflect.String &&
-					tagKeyFirstMap(sfMap) {
-					newParts := make([]queryPart, len(parts))
-					copy(newParts, parts)
-					newParts[i], newParts[i+1] = newParts[i+1], newParts[i]
-					return assignField(structPtr, newParts, value, baseDef)
-				}
+			if newParts, ok := keyFirstParts(v, parts, i, true); ok {
+				return assignField(structPtr, newParts, value, baseDef)
 			}
 
 			return fmt.Errorf("field '%s' not found as struct or map field", part.name)
@@ -1509,14 +1549,9 @@ func updateINIFile(obj interface{}, iniFile *ini.File, query string, value strin
 				// Key-first map syntax support:
 				// If the next token names a map field tagged `keyfirst:"true"`, swap and retry.
 				// Example: "<key>.text" -> "text.<key>" (but generalized to any tagged map field).
-				if i+1 < len(parts) {
-					if fvMap, sfMap, ok := findFieldByINITag(currentValue, parts[i+1].name); ok &&
-						fvMap.Kind() == reflect.Map &&
-						fvMap.Type().Key().Kind() == reflect.String &&
-						tagKeyFirstMap(sfMap) {
-						parts[i], parts[i+1] = parts[i+1], parts[i]
-						continue
-					}
+				if newParts, ok := keyFirstParts(currentValue, parts, i, false); ok {
+					parts = newParts
+					continue
 				}
 				// Not a direct field -> check if it's a direct map field with the same tag
 				mapFieldVal, _, mapFound := findMapFieldWithTag(currentValue, part.name)
@@ -1562,11 +1597,15 @@ func updateINIFile(obj interface{}, iniFile *ini.File, query string, value strin
 						return fmt.Errorf("field '%s' not found as struct or map field", part.name)
 					}
 					if !sectionSet {
+						// A top-level pattern map entry is a whole section, so all remaining parts form the key.
 						sectionName = part.name
 						sectionSet = true
-					} else {
-						keyNameParts = append(keyNameParts, part.name)
+						for i++; i < len(parts); i++ {
+							keyNameParts = append(keyNameParts, parts[i].name)
+						}
+						goto finalize
 					}
+					keyNameParts = append(keyNameParts, part.name)
 
 					i++
 					// If there's another part after e.g. Up, that is the actual final key
@@ -1720,15 +1759,10 @@ func GetValue(structPtr interface{}, query string) (interface{}, error) {
 				} else {
 					// Key-first map syntax support (read path):
 					// If the next token names a map field tagged `keyfirst:"true"`, swap and retry.
-					if i+1 < len(parts) {
-						if fvMap, sfMap, ok := findFieldByINITag(current, parts[i+1].name); ok &&
-							fvMap.Kind() == reflect.Map &&
-							fvMap.Type().Key().Kind() == reflect.String &&
-							tagKeyFirstMap(sfMap) {
-							parts[i], parts[i+1] = parts[i+1], parts[i]
-							i--
-							continue
-						}
+					if newParts, ok := keyFirstParts(current, parts, i, true); ok {
+						parts = newParts
+						i--
+						continue
 					}
 					return nil, fmt.Errorf("field '%s' not found in struct or pattern map for query '%s'", part.name, query)
 				}
@@ -1945,6 +1979,8 @@ func SetAnim(obj interface{}, fVal, structVal, parent reflect.Value, sffOverride
 	spr := [2]int32{-1, 0}
 	offset := [2]float32{0, 0}
 	scale := [2]float32{1, 1}
+	trans := ""
+	var alpha []int32
 	facing := float32(1)
 	xshear := float32(0)
 	angle := float32(0)
@@ -1981,6 +2017,13 @@ func SetAnim(obj interface{}, fVal, structVal, parent reflect.Value, sffOverride
 		scale[0] = float32(fv.Index(0).Float())
 		scale[1] = float32(fv.Index(1).Float())
 	}
+	if fv, ok := get("Alpha"); ok && fv.Kind() == reflect.Slice {
+		alpha, _ = fv.Interface().([]int32)
+	}
+	if fv, ok := get("Trans"); ok && fv.Kind() == reflect.String {
+		trans = fv.String()
+	}
+	tt, blend := transBlend(trans, alpha)
 	if fv, ok := get("Facing"); ok && fv.Kind() >= reflect.Int && fv.Kind() <= reflect.Int64 {
 		facing = float32(fv.Int())
 	}
@@ -2088,6 +2131,9 @@ func SetAnim(obj interface{}, fVal, structVal, parent reflect.Value, sffOverride
 		if !warnMissing {
 			a.anim = animData.ShallowCopy()
 			a.anim.warnMissing = false
+		} else if tt != TT_default {
+			// Trans changes the animation, so it can't stay shared with the table.
+			a.anim = animData.ShallowCopy()
 		}
 	} else if hasSpr {
 		a = NewAnim(sffPtr, fmt.Sprintf("%d,%d, 0,0, -1", spr[0], spr[1]))
@@ -2131,7 +2177,10 @@ func SetAnim(obj interface{}, fVal, structVal, parent reflect.Value, sffOverride
 	// animSetFriction
 	a.friction = friction
 	// animSetTile
-	// animSetAlpha
+	// animSetTrans
+	if tt != TT_default && a.anim != nil {
+		a.SetTrans(tt, blend)
+	}
 	// animSetColorKey
 	// animSetPalFX
 
@@ -2156,6 +2205,8 @@ func SetTextSprite(obj interface{}, fVal, structVal, parent reflect.Value) {
 	offset := [2]float32{0, 0}
 	font := [8]int32{-1, 0, 0, 255, 255, 255, 255, -1}
 	scale := [2]float32{1, 1}
+	trans := ""
+	var alpha []int32
 	xshear := float32(0)
 	angle := float32(0)
 	xangle := float32(0)
@@ -2190,6 +2241,12 @@ func SetTextSprite(obj interface{}, fVal, structVal, parent reflect.Value) {
 	if fv, ok := get("Scale"); ok && fv.Kind() == reflect.Array && fv.Len() == 2 {
 		scale[0] = float32(fv.Index(0).Float())
 		scale[1] = float32(fv.Index(1).Float())
+	}
+	if fv, ok := get("Alpha"); ok && fv.Kind() == reflect.Slice {
+		alpha, _ = fv.Interface().([]int32)
+	}
+	if fv, ok := get("Trans"); ok && fv.Kind() == reflect.String {
+		trans = fv.String()
 	}
 	if fv, ok := get("Xshear"); ok && (fv.Kind() == reflect.Float32 || fv.Kind() == reflect.Float64) {
 		xshear = float32(fv.Float())
@@ -2307,6 +2364,9 @@ func SetTextSprite(obj interface{}, fVal, structVal, parent reflect.Value) {
 	ts.SetPos(offset[0], offset[1])
 	// textImgSetScale
 	ts.SetScale(scale[0], scale[1])
+	// textImgSetTrans
+	ts.trans, ts.alpha = transBlend(trans, alpha)
+	ts.transInit, ts.alphaInit = ts.trans, ts.alpha
 	// textImgSetXShear
 	ts.xshear = xshear
 	// textImgSetAngle
@@ -2328,7 +2388,7 @@ func SetTextSprite(obj interface{}, fVal, structVal, parent reflect.Value) {
 	// textImgSetTextSpacing
 	ts.SetTextSpacing(textSpacing[0], textSpacing[1])
 	// textImgSetTextWrap
-	ts.textWrap = textWrap == "w" || textWrap == "1"
+	ts.SetTextWrap(textWrap)
 	// textImgSetVelocity
 	ts.SetVelocity(velocity[0], velocity[1])
 	// textImgSetMaxDist
@@ -2463,6 +2523,7 @@ func SetRect(obj interface{}, fVal, structVal, parent reflect.Value) {
 	alpha := [2]int32{0, 0}
 	pulse := [3]int32{0, 0, 0}
 	var usePulse bool
+	trans := ""
 	//var attachPfx *PalFX
 
 	get := func(name string) (reflect.Value, bool) {
@@ -2503,6 +2564,11 @@ func SetRect(obj interface{}, fVal, structVal, parent reflect.Value) {
 		}
 		usePulse = true
 	}
+	for _, name := range []string{"Trans", "ClearTrans", "BgClearTrans"} {
+		if fv, ok := get(name); ok && fv.Kind() == reflect.String {
+			trans = fv.String()
+		}
+	}
 	if fv, ok := get("Localcoord"); ok && fv.Kind() == reflect.Array && fv.Len() == 2 {
 		localcoord[0] = float32(fv.Index(0).Int())
 		localcoord[1] = float32(fv.Index(1).Int())
@@ -2524,6 +2590,9 @@ func SetRect(obj interface{}, fVal, structVal, parent reflect.Value) {
 	} else {
 		rect.SetAlpha(alpha)
 	}
+	// rectSetTrans
+	tt, _ := transBlend(trans, nil)
+	rect.SetTrans(tt)
 	// rectSetLayerno
 	rect.layerno = layerno
 	// rectSetPalFx

@@ -161,7 +161,7 @@ func loadFightFx(def string, isCharFX bool, isMainThread bool) error {
 				files = false
 				if is.LoadFile("sff", []string{def, sys.motif.Def, "", "data/"}, "",
 					func(filename string) error {
-						s, err := loadSff(filename, false, isMainThread, false)
+						s, err := loadSff(filename, SffTypeOther, isMainThread, false)
 						if err != nil {
 							return err
 						}
@@ -176,8 +176,7 @@ func loadFightFx(def string, isCharFX bool, isMainThread bool) error {
 						if err != nil {
 							return err
 						}
-						lines, i := SplitAndTrim(str, "\n"), 0
-						ffx.animTable = ReadAnimationTable(filename, ffx.sff, &ffx.sff.palList, lines, &i, true)
+						ffx.animTable = ReadAnimationTable(filename, ffx.sff, &ffx.sff.palList, str, true)
 						return nil
 					}); err != nil {
 					return err
@@ -712,9 +711,9 @@ func (lb *LifeBar) draw(layerno int16, charpn int, lbr *LifeBar, f map[int]*Fnt)
 	redlife := float32(refChar.redLife) / float32(refChar.lifeMax)
 	redval := refChar.redLife - refChar.life
 
-	// Truncate to int32 first, like before PR #3575, to avoid an off-by-one error
-	var MidPosX = float32(int32(sys.gameWidth)-320) / 2
-	var MidPosY = float32(int32(sys.gameHeight)-240) / 2
+	// Fractional, like the lifebar sprites (#1615, #3799)
+	var MidPosX = (sys.gameWidth - 320) / 2
+	var MidPosY = (sys.gameHeight - 240) / 2
 	// Calculates the clipping rectangle based on current bar settings
 	getBarClipRect := func(life float32) [4]int32 {
 		r := sys.scrrect
@@ -1101,7 +1100,7 @@ func (pb *PowerBar) step(charpn int, pbr *PowerBar, snd *Snd) {
 	pbr.prevLevel = level
 	pbr.prevPower = pbval
 
-	// Multiple front elements
+	// Multiple bg0 elements
 	fv1 := resolvePBKey(pb.bg0, pbval, refChar.powerMax)
 	pb.bg0[fv1].Action()
 
@@ -1170,9 +1169,9 @@ func (pb *PowerBar) draw(layerno int16, charpn int, pbr *PowerBar, f map[int]*Fn
 		power = float32(pbval)/1000 - Min(float32(level), float32(refChar.powerMax)/1000-1)
 	}
 
-	// Truncate to int32 first, like before PR #3575, to avoid an off-by-one error
-	var MidPosX = float32(int32(sys.gameWidth)-320) / 2
-	var MidPosY = float32(int32(sys.gameHeight)-240) / 2
+	// Fractional, like the lifebar sprites (#1615, #3799)
+	var MidPosX = (sys.gameWidth - 320) / 2
+	var MidPosY = (sys.gameHeight - 240) / 2
 	getBarClipRect := func(power float32) [4]int32 {
 		r := sys.scrrect
 
@@ -1450,9 +1449,9 @@ func (gb *GuardBar) draw(layerno int16, charpn int, gbr *GuardBar, f map[int]*Fn
 		points = 1 - points
 	}
 
-	// Truncate to int32 first, like before PR #3575, to avoid an off-by-one error
-	var MidPosX = float32(int32(sys.gameWidth)-320) / 2
-	var MidPosY = float32(int32(sys.gameHeight)-240) / 2
+	// Fractional, like the lifebar sprites (#1615, #3799)
+	var MidPosX = (sys.gameWidth - 320) / 2
+	var MidPosY = (sys.gameHeight - 240) / 2
 	getBarClipRect := func(points float32) [4]int32 {
 		r := sys.scrrect
 
@@ -1723,9 +1722,9 @@ func (sb *StunBar) draw(layerno int16, charpn int, sbr *StunBar, f map[int]*Fnt)
 		points = 1 - points
 	}
 
-	// Truncate to int32 first, like before PR #3575, to avoid an off-by-one error
-	var MidPosX = float32(int32(sys.gameWidth)-320) / 2
-	var MidPosY = float32(int32(sys.gameHeight)-240) / 2
+	// Fractional, like the lifebar sprites (#1615, #3799)
+	var MidPosX = (sys.gameWidth - 320) / 2
+	var MidPosY = (sys.gameHeight - 240) / 2
 	getBarClipRect := func(points float32) [4]int32 {
 		r := sys.scrrect
 
@@ -2472,6 +2471,7 @@ type FightScreenCombo struct {
 	start_x      float32
 	counter      map[int32]*FSText
 	text         map[int32]*FSText
+	textAnim     map[int32]*AnimLayout
 	bg           AnimLayout
 	top          AnimLayout
 	displaytime  int32
@@ -2577,6 +2577,16 @@ func readFightScreenCombo(pre string, is IniSection,
 	for k, v := range readMultipleFSText(pre, "text", is, "", 2, f, align) {
 		co.text[k] = v
 	}
+	// Like MUGEN, text can also be an anim or spr.
+	co.textAnim = make(map[int32]*AnimLayout)
+	for k := range co.text {
+		name := "text."
+		if k > 0 {
+			name = fmt.Sprintf("text%v.", k)
+		}
+		al := ReadAnimLayout(pre+name, is, sff, at, 2)
+		co.textAnim[k] = &al
+	}
 
 	// Text shake
 	is.ReadI32(pre+"text.shake.time", &co.textShake.time)
@@ -2606,6 +2616,9 @@ func readFightScreenCombo(pre string, is IniSection,
 func (co *FightScreenCombo) step(side int, hits, damage int32, percentage float32) {
 	co.bg.Action()
 	co.top.Action()
+	for _, al := range co.textAnim {
+		al.Action()
+	}
 
 	// Allows a new identical combo to still retrigger later
 	if hits < 2 && co.shownHits >= 2 {
@@ -2693,6 +2706,9 @@ func (co *FightScreenCombo) step(side int, hits, damage int32, percentage float3
 func (co *FightScreenCombo) reset() {
 	co.bg.Reset()
 	co.top.Reset()
+	for _, al := range co.textAnim {
+		al.Reset()
+	}
 	co.shownHits = 0
 	co.shownDmg = 0
 	co.shownPct = 0
@@ -2792,18 +2808,19 @@ func (co *FightScreenCombo) draw(layerno int16, f map[int]*Fnt, side int) {
 	}
 
 	// Draw text
+	blockX := x + sys.fightScreen.offsetX
+	blockY := float32(co.pos[1])
+
+	// Apply shake effect
+	textShakeScale := co.textShake.getScale()
+	textShakeOffset := co.textShake.getOffset()
+
+	drawBlockX := (blockX + textShakeOffset[0]) / textShakeScale
+	drawBlockY := (blockY + textShakeOffset[1]) / textShakeScale
+	finalScale := textShakeScale * sys.fightScreen.scale
+
+	co.textAnim[tv].Draw(drawBlockX, drawBlockY, layerno, finalScale)
 	if len(lines) > 0 && ffText != nil {
-		blockX := x + sys.fightScreen.offsetX
-		blockY := float32(co.pos[1])
-
-		// Apply shake effect
-		textShakeScale := co.textShake.getScale()
-		textShakeOffset := co.textShake.getOffset()
-
-		drawBlockX := (blockX + textShakeOffset[0]) / textShakeScale
-		drawBlockY := (blockY + textShakeOffset[1]) / textShakeScale
-		finalScale := textShakeScale * sys.fightScreen.scale
-
 		// Draw each line
 		for i, line := range lines {
 			y := drawBlockY + float32(i)*lineHeight
@@ -4857,9 +4874,9 @@ func loadFightScreen(def string) (*FightScreen, error) {
 		}
 	}
 
+	fs.animTable = ReadAnimationTable(def, fs.sff, &fs.sff.palList, str, true)
+
 	lines, lnidx := SplitAndTrim(str, "\n"), 0
-	fs.animTable = ReadAnimationTable(def, fs.sff, &fs.sff.palList, lines, &lnidx, true)
-	lnidx = 0
 	filesflg := true
 
 	// Pre-scan [info] to initialize fight screen localcoord/scale before any FightFX load
@@ -4916,7 +4933,7 @@ func loadFightScreen(def string) (*FightScreen, error) {
 				filesflg = false
 				if is.LoadFile("sff", []string{def, sys.motif.Def, "", "data/"}, "",
 					func(filename string) error {
-						s, err := loadSff(filename, false, true, false)
+						s, err := loadSff(filename, SffTypeLifeBar, true, false)
 						if err != nil {
 							return err
 						}
@@ -4938,7 +4955,7 @@ func loadFightScreen(def string) (*FightScreen, error) {
 				}
 				if is.LoadFile("fightfx.sff", []string{def, sys.motif.Def, "", "data/"}, "",
 					func(filename string) error {
-						s, err := loadSff(filename, false, true, false)
+						s, err := loadSff(filename, SffTypeOther, true, false)
 						if err != nil {
 							return err
 						}
@@ -4953,8 +4970,7 @@ func loadFightScreen(def string) (*FightScreen, error) {
 						if err != nil {
 							return err
 						}
-						lines, i := SplitAndTrim(str, "\n"), 0
-						ffx.animTable = ReadAnimationTable(filename, ffx.sff, &ffx.sff.palList, lines, &i, true)
+						ffx.animTable = ReadAnimationTable(filename, ffx.sff, &ffx.sff.palList, str, true)
 						return nil
 					}); err != nil {
 					return nil, err
@@ -6140,7 +6156,7 @@ func (fs *FightScreen) appendAction(c *Char, msg *FSMsg, refresh int32) {
 			// Use the character
 			sff = sys.cgi[c.playerNo].sff
 			at = sys.cgi[c.playerNo].animTable
-			alscale = float32(fs.localcoord[0]) / float32(sys.chars[c.playerNo][0].localcoord)
+			alscale = float32(fs.localcoord[0]) / 320 * sys.chars[c.playerNo][0].baselocalscl
 		} else if sys.ffx[msg.anim_ffx] != nil {
 			// Use common FX
 			fx := sys.ffx[msg.anim_ffx]

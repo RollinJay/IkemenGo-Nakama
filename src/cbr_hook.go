@@ -526,7 +526,7 @@ func cbrPrepareAILevel(c *Char) {
 		}
 		sysCBR.masked[c] = c.id
 	}
-	c.setASF(ASF_noailevel)
+	c.setASF(ASF_noailevel, true)
 }
 
 // cbrUnmaskAILevel clears the NoAILevel flag the adapter set on a character,
@@ -538,7 +538,7 @@ func cbrUnmaskAILevel(c *Char) {
 	if id, ok := sysCBR.masked[c]; ok {
 		delete(sysCBR.masked, c)
 		if c.id == id {
-			c.unsetASF(ASF_noailevel)
+			c.setASF(ASF_noailevel, false)
 		}
 	}
 }
@@ -549,7 +549,7 @@ func cbrUnmaskAILevel(c *Char) {
 func cbrUnmaskAll() {
 	for c, id := range sysCBR.masked {
 		if c.id == id {
-			c.unsetASF(ASF_noailevel)
+			c.setASF(ASF_noailevel, false)
 		}
 	}
 	clear(sysCBR.masked)
@@ -1061,9 +1061,9 @@ func cbrInput(c *Char) (btn [14]bool, ok bool) {
 	btn, ok = sysCBR.eng.Input(c.playerNo, !c.fbFlip)
 	s.driven, s.btn = ok, btn
 	if !ok && s.wasDriven {
-		c.setASF(s.aiFlags & (cbrMoveFlags | cbrGuardFlags))
+		c.setASF(s.aiFlags&(cbrMoveFlags|cbrGuardFlags), true)
 		if cbrGuardOff(s.aiFlags, c.ss.stateType) {
-			c.unsetSCF(SCF_guard)
+			c.setSCF(SCF_guard, false)
 		}
 		if s.aiFlags&ASF_noaibuttonjam != 0 {
 			return [14]bool{}, true

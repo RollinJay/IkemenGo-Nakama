@@ -113,6 +113,8 @@ type AnimationProperties struct {
 	Offset      [2]float32 `ini:"offset"`
 	Facing      int32      `ini:"facing" default:"1"`
 	Scale       [2]float32 `ini:"scale" default:"1,1"`
+	Trans       string     `ini:"trans" default:"default"`
+	Alpha       []int32    `ini:"alpha"`
 	Xshear      float32    `ini:"xshear"`
 	Angle       float32    `ini:"angle"`
 	XAngle      float32    `ini:"xangle"`
@@ -143,6 +145,8 @@ type AnimationCharPreloadProperties struct {
 	Offset      [2]float32 `ini:"offset"`
 	Facing      int32      `ini:"facing" default:"1"`
 	Scale       [2]float32 `ini:"scale" default:"1,1"`
+	Trans       string     `ini:"trans" default:"default"`
+	Alpha       []int32    `ini:"alpha"`
 	Xshear      float32    `ini:"xshear"`
 	Angle       float32    `ini:"angle"`
 	XAngle      float32    `ini:"xangle"`
@@ -163,6 +167,8 @@ type AnimationStagePreloadProperties struct {
 	Offset      [2]float32 `ini:"offset"`
 	Facing      int32      `ini:"facing" default:"1"`
 	Scale       [2]float32 `ini:"scale" default:"1,1"`
+	Trans       string     `ini:"trans" default:"default"`
+	Alpha       []int32    `ini:"alpha"`
 	Xshear      float32    `ini:"xshear"`
 	Angle       float32    `ini:"angle"`
 	XAngle      float32    `ini:"xangle"`
@@ -179,6 +185,8 @@ type TextProperties struct {
 	Font           [8]int32   `ini:"font" default:"-1,0,0,255,255,255,255,-1"`
 	Offset         [2]float32 `ini:"offset"`
 	Scale          [2]float32 `ini:"scale" default:"1,1"`
+	Trans          string     `ini:"trans" default:"default"`
+	Alpha          []int32    `ini:"alpha"`
 	Xshear         float32    `ini:"xshear"`
 	Angle          float32    `ini:"angle"`
 	XAngle         float32    `ini:"xangle"`
@@ -196,6 +204,8 @@ type TextMapProperties struct {
 	Font           [8]int32          `ini:"font" default:"-1,0,0,255,255,255,255,-1"`
 	Offset         [2]float32        `ini:"offset"`
 	Scale          [2]float32        `ini:"scale" default:"1,1"`
+	Trans          string            `ini:"trans" default:"default"`
+	Alpha          []int32           `ini:"alpha"`
 	Xshear         float32           `ini:"xshear"`
 	Angle          float32           `ini:"angle"`
 	XAngle         float32           `ini:"xangle"`
@@ -212,6 +222,7 @@ type TextMapProperties struct {
 type BoxBgProperties struct {
 	Visible    bool     `ini:"visible"`
 	Col        [3]int32 `ini:"col"`
+	Trans      string   `ini:"trans" default:"default"`
 	Alpha      [2]int32 `ini:"alpha" default:"0,255"`
 	Layerno    int16    `ini:"layerno"`
 	Localcoord [2]int32 `ini:"localcoord"`
@@ -230,6 +241,7 @@ type BoxCursorProperties struct {
 	Visible    bool     `ini:"visible"`
 	Coords     [4]int32 `ini:"coords"`
 	Col        [3]int32 `ini:"col"`
+	Trans      string   `ini:"trans" default:"default"`
 	Layerno    int16    `ini:"layerno"`
 	Localcoord [2]int32 `ini:"localcoord"`
 	Pulse      [3]int32 `ini:"pulse"`
@@ -241,6 +253,7 @@ type BoxCursorProperties struct {
 
 type OverlayProperties struct {
 	Col        [3]int32 `ini:"col"`
+	Trans      string   `ini:"trans" default:"default"`
 	Alpha      [2]int32 `ini:"alpha" default:"0,255"`
 	Layerno    int16    `ini:"layerno"`
 	Window     [4]int32 `ini:"window"`
@@ -268,6 +281,7 @@ type BgDefProperties struct {
 	BGDef          *BGDef
 	Spr            string   `ini:"spr"`
 	BgClearColor   [3]int32 `ini:"bgclearcolor" default:"-1,0,0"`
+	BgClearTrans   string   `ini:"bgcleartrans" default:"default"`
 	BgClearAlpha   [2]int32 `ini:"bgclearalpha" default:"255,0"`
 	BgClearLayerno int16    `ini:"bgclearlayerno" default:"0"`
 	StartLayer     int32    `ini:"startlayer" default:"0"`
@@ -318,7 +332,7 @@ type MenuProperties struct {
 		Delete struct { // only used by [Title Info], [Replay Info]
 			KeyCode string `ini:"keycode"`
 		} `ini:"delete"`
-		Rename struct { // only used by [Replay Info]
+		Rename struct { // only used by [Title Info], [Replay Info]
 			KeyCode string `ini:"keycode"`
 		} `ini:"rename"`
 	} `ini:"item"`
@@ -364,8 +378,11 @@ type MenuProperties struct {
 }
 
 type InfoBoxProperties struct {
-	Title   TextProperties    `ini:"title"`
-	Text    TextProperties    `ini:"text"`
+	Title TextProperties `ini:"title"`
+	Text  struct {
+		TextProperties
+		TextWrap string `ini:"textwrap" default:"w"`
+	} `ini:"text"`
 	Overlay OverlayProperties `ini:"overlay"`
 	KeyCode string            `ini:"keycode"`
 }
@@ -373,14 +390,14 @@ type InfoBoxProperties struct {
 type CellOverrideProperties struct {
 	Offset      [2]float32 `ini:"offset"`
 	Spacing     [2]float32 `ini:"spacing"`
-	Facing      int32      `ini:"facing" default:"1"`
+	Facing      int32      `ini:"facing"`
 	Skip        bool       `ini:"skip"`
 	Scale       [2]float32 `ini:"scale"`
 	XShear      float32    `ini:"xshear"`
 	Angle       float32    `ini:"angle"`
 	XAngle      float32    `ini:"xangle"`
 	YAngle      float32    `ini:"yangle"`
-	Projection  string     `ini:"projection" default:"orthographic"`
+	Projection  string     `ini:"projection"`
 	FocalLength float32    `ini:"focallength"`
 }
 
@@ -493,6 +510,9 @@ type PlayerSelectProperties struct {
 			Key []string `ini:"key"`
 			Snd [2]int32 `ini:"snd" default:"-1,0"`
 		} `ini:"done"`
+		Cancel struct {
+			Key []string `ini:"key"`
+		} `ini:"cancel"`
 		Next struct {
 			Key []string `ini:"key"`
 		} `ini:"next"`
@@ -534,9 +554,10 @@ type PlayerSelectProperties struct {
 			AnimationCharPreloadProperties `skipinit:"true"`
 			Snd                            [2]int32 `ini:"snd" default:"-1,0"`
 		} `ini:"preview"`
-		Number TextProperties      `ini:"number"`
-		Text   TextProperties      `ini:"text"`
-		Bg     AnimationProperties `ini:"bg"`
+		Preview2 AnimationCharPreloadProperties `ini:"preview2" skipinit:"true"`
+		Number   TextProperties                 `ini:"number"`
+		Text     TextProperties                 `ini:"text"`
+		Bg       AnimationProperties            `ini:"bg"`
 	} `ini:"palmenu"`
 }
 
@@ -707,7 +728,15 @@ type SelectInfoProperties struct {
 			SwitchTime int32 `ini:"switchtime"`
 		} `ini:"random"`
 		MapCell map[string]*CellOverrideProperties `ini:"map:^[0-9*]+-[0-9*]+$" lua:""`
-		Slot    AnimationProperties                `ini:"slot"`
+		Slot    struct {
+			AnimationProperties
+			Next struct {
+				Key []string `ini:"key"`
+			} `ini:"next"`
+			Previous struct {
+				Key []string `ini:"key"`
+			} `ini:"previous"`
+		} `ini:"slot"`
 	} `ini:"cell"`
 	P1      PlayerSelectProperties `ini:"p1"`
 	P2      PlayerSelectProperties `ini:"p2"`
@@ -749,12 +778,30 @@ type SelectInfoProperties struct {
 		Move struct {
 			Snd [2]int32 `ini:"snd" default:"-1,0"`
 		} `ini:"move"`
+		Swap struct {
+			Snd [2]int32 `ini:"snd" default:"-1,0"`
+		} `ini:"swap"`
 		Portrait struct {
 			AnimationStagePreloadProperties `skipinit:"true"`
 			Bg                              AnimationProperties `ini:"bg"`
 			Random                          AnimationProperties `ini:"random"`
 			Loading                         AnimationProperties `ini:"loading"`
+			Slot                            AnimationProperties `ini:"slot"`
 		} `ini:"portrait"`
+		Previous struct {
+			Key []string `ini:"key"`
+		} `ini:"previous"`
+		Next struct {
+			Key []string `ini:"key"`
+		} `ini:"next"`
+		Skip struct {
+			Previous struct {
+				Key []string `ini:"key"`
+			} `ini:"previous"`
+			Next struct {
+				Key []string `ini:"key"`
+			} `ini:"next"`
+		} `ini:"skip"`
 	} `ini:"stage"`
 	Done struct {
 		Key []string `ini:"key"`
@@ -1431,54 +1478,49 @@ func preprocessINIContent(input string) string {
 // applyCustomDefaults injects custom defaults.
 func applyCustomDefaults(m *Motif, iniFile *ini.File) {
 	// Copy the first spacing value into the second one when only a single value is defined in system.def.
-	sec := "Select Info"
 	// Only act if the user actually set the key in their system.def
-	s, err := iniFile.GetSection(sec)
-	if err != nil || s == nil {
-		return
-	}
-	k, err := s.GetKey("cell.spacing")
-	if err != nil {
-		return
-	}
-	raw := strings.TrimSpace(k.Value())
-	// If user specified a single value (no comma/&), duplicate it into the second slot.
-	if raw != "" && !strings.Contains(raw, ",") && !strings.Contains(raw, "&") {
-		// At this point, the first component has already been parsed into the struct.
-		// Just mirror it to the second component.
-		m.SelectInfo.Cell.Spacing[1] = m.SelectInfo.Cell.Spacing[0]
+	if s, err := iniFile.GetSection("Select Info"); err == nil && s != nil {
+		if k, err := s.GetKey("cell.spacing"); err == nil {
+			raw := strings.TrimSpace(k.Value())
+			// If user specified a single value (no comma/&), duplicate it into the second slot.
+			if raw != "" && !strings.Contains(raw, ",") && !strings.Contains(raw, "&") {
+				// At this point, the first component has already been parsed into the struct.
+				// Just mirror it to the second component.
+				m.SelectInfo.Cell.Spacing[1] = m.SelectInfo.Cell.Spacing[0]
+			}
+		}
 	}
 
 	// Inject computed defaults based on system.def localcoord when specific keys in system.def are not defined.
 	w := int(m.Info.Localcoord[0])
 	h := int(m.Info.Localcoord[1])
-	sec = "Title Info"
+	sec := "Title Info"
 
-	// loading.offset = (W - 1 - 10*H/320, H - 8)
+	// loading.offset
 	if !hasUserKey(iniFile, sec, "loading.offset") {
 		x := w - 1 - (10*h)/320
-		y := h - 8
+		y := h - 6
 		_ = SetValue(m, "title_info.loading.offset", fmt.Sprintf("%d, %d", x, y))
 	}
 
-	// footer.title.offset = (2*W/320, H)
+	// footer.title.offset
 	if !hasUserKey(iniFile, sec, "footer.title.offset") {
 		x := (2 * w) / 320
-		y := h
+		y := h - 2
 		_ = SetValue(m, "title_info.footer.title.offset", fmt.Sprintf("%d, %d", x, y))
 	}
 
-	// footer.info.offset = (W/2, H)
+	// footer.info.offset
 	if !hasUserKey(iniFile, sec, "footer.info.offset") {
 		x := w / 2
-		y := h
+		y := h - 2
 		_ = SetValue(m, "title_info.footer.info.offset", fmt.Sprintf("%d, %d", x, y))
 	}
 
-	// footer.version.offset = (W - 1 - 2*W/320, H)
+	// footer.version.offset
 	if !hasUserKey(iniFile, sec, "footer.version.offset") {
 		x := w - 1 - (2*w)/320
-		y := h
+		y := h - 2
 		_ = SetValue(m, "title_info.footer.version.offset", fmt.Sprintf("%d, %d", x, y))
 	}
 
@@ -1487,20 +1529,19 @@ func applyCustomDefaults(m *Motif, iniFile *ini.File) {
 		_ = SetValue(m, "title_info.footer.version.text", fmt.Sprintf("%s - %s", Version, BuildTime))
 	}
 
-	// footer.overlay.window = (0, H - 7, W, H)
+	// footer.overlay.window
 	if !hasUserKey(iniFile, sec, "footer.overlay.window") {
 		x1, y1, x2, y2 := 0, h-7, w, h
 		_ = SetValue(m, "title_info.footer.overlay.window", fmt.Sprintf("%d, %d, %d, %d", x1, y1, x2, y2))
 	}
 }
 
-// reserveUserFontSlots marks user-specified [Files] font indices as taken so
-// resolveInlineFonts won't auto-assign inline fonts to those slots.
-func reserveUserFontSlots(m *Motif) {
-	if m == nil || m.UserIniFile == nil {
+// Reserves the [Files] font slots. Inline fonts with the same file and height reuse them.
+func reserveFontSlots(m *Motif) {
+	if m == nil || m.IniFile == nil {
 		return
 	}
-	sec, err := m.UserIniFile.GetSection("Files")
+	sec, err := m.IniFile.GetSection("Files")
 	if err != nil || sec == nil {
 		return
 	}
@@ -1508,13 +1549,35 @@ func reserveUserFontSlots(m *Motif) {
 	for _, k := range sec.Keys() {
 		name := k.Name()
 		match := re.FindStringSubmatch(name)
-		if len(match) == 2 {
-			idx := int(Atoi(match[1]))
-			if _, exists := m.Fnt[idx]; !exists {
-				m.Fnt[idx] = nil // placeholder to block ensureFontIndex from using this slot
-			}
+		if len(match) != 2 {
+			continue
+		}
+		path := strings.Trim(strings.TrimSpace(k.Value()), `"`)
+		if path == "" {
+			continue
+		}
+		idx := int(Atoi(match[1]))
+		if _, exists := m.Fnt[idx]; !exists {
+			m.Fnt[idx] = nil // placeholder to block ensureFontIndex from using this slot
+		}
+		resolved := m.resolveFontFile(path)
+		height := int32(-1)
+		if hk, err := sec.GetKey(name + ".height"); err == nil && IsInt(strings.TrimSpace(hk.Value())) {
+			height = Atoi(strings.TrimSpace(hk.Value()))
+		}
+		if _, taken := m.fntIndexByKey[fontKey(resolved, height)]; !taken {
+			registerFontIndex(m.fntIndexByKey, resolved, height, idx)
 		}
 	}
+}
+
+// Finds a font file the same way ensureFontIndex does.
+func (m *Motif) resolveFontFile(path string) string {
+	path = strings.Trim(strings.TrimSpace(path), `"`)
+	if resolved := SearchFile(path, []string{m.Def, "", "data/"}, "font/"); resolved != "" {
+		return resolved
+	}
+	return path
 }
 
 // returns a stable-sorted list of files named "+system.def" located anywhere under the given root (e.g. external/mods), including nested subdirs.
@@ -1852,7 +1915,7 @@ func loadMotif(def string) (*Motif, error) {
 	}
 
 	// Resolve inline fonts early, so TitleInfo.Loading can get a real font index.
-	reserveUserFontSlots(&m)
+	reserveFontSlots(&m)
 	resolveInlineFonts(m.IniFile, m.Def, m.Fnt, m.fntIndexByKey, m.SetValueUpdate)
 	syncFontsMap(&m.Files.Font, m.Fnt, m.fntIndexByKey)
 	sys.keepAlive()
@@ -1865,12 +1928,11 @@ func loadMotif(def string) (*Motif, error) {
 	m.loadFiles()
 	sys.keepAlive()
 
-	lines, i := SplitAndTrim(motifText, "\n"), 0
-	m.AnimTable = ReadAnimationTable(m.Def, m.Sff, &m.Sff.palList, lines, &i, true)
-	i = 0
+	m.AnimTable = ReadAnimationTable(m.Def, m.Sff, &m.Sff.palList, motifText, true)
 
 	m.overrideParams()
 	m.fixLocalcoordOverrides()
+	m.inheritCursorCellOverrides()
 	m.applyGlyphDefaultsFromMovelist()
 	m.populateDataPointers()
 	m.applyPostParsePosAdjustments()
@@ -2074,7 +2136,7 @@ func (m *Motif) mergeWithInheritance(specs []InheritSpec) {
 		}
 
 		lowerPrefix := strings.ToLower(dstPrefix)
-		for _, prefix := range []string{".face.random.", ".face2.random.", ".face.slot.", ".face2.slot.", ".palmenu.preview."} {
+		for _, prefix := range []string{".face.random.", ".face2.random.", ".face.slot.", ".face2.slot.", ".palmenu.preview.", ".palmenu.preview2."} {
 			if strings.Contains(lowerPrefix, prefix) {
 				return true
 			}
@@ -2142,12 +2204,6 @@ func (m *Motif) mergeWithInheritance(specs []InheritSpec) {
 		for suf := range suffixes {
 			dstKey := sp.DstPrefix + suf
 			srcKey := sp.SrcPrefix + suf
-			// Skip palmenu.preview anim/spr inheritance
-			lowerDst := strings.ToLower(sp.DstPrefix)
-			if strings.Contains(lowerDst, ".palmenu.preview.") &&
-				(strings.EqualFold(suf, "anim") || strings.EqualFold(suf, "spr")) {
-				continue
-			}
 			if shouldSkipAnimSpr(sp.DstPrefix, suf) {
 				continue
 			}
@@ -2173,17 +2229,21 @@ func (m *Motif) mergeWithInheritance(specs []InheritSpec) {
 			)
 
 			// Priority: user dst > user src > default dst > default src
-			if v, ok := get(user, sp.DstSec, dstKey); ok {
-				val, src = v, srcUserDst
-			} else if v, ok := get(user, sp.SrcSec, srcKey); ok {
-				val, src = v, srcUserSrc
-			} else if v, ok := get(defs, sp.DstSec, dstKey); ok {
-				val, src = v, srcDefDst
-			} else if v, ok := get(defs, sp.SrcSec, srcKey); ok {
-				val, src = v, srcDefSrc
+			fromSec, fromKey := sp.DstSec, dstKey
+			if _, ok := get(user, sp.DstSec, dstKey); ok {
+				src = srcUserDst
+			} else if _, ok := get(user, sp.SrcSec, srcKey); ok {
+				fromSec, fromKey, src = sp.SrcSec, srcKey, srcUserSrc
+			} else if _, ok := get(defs, sp.DstSec, dstKey); ok {
+				src = srcDefDst
+			} else if _, ok := get(defs, sp.SrcSec, srcKey); ok {
+				fromSec, fromKey, src = sp.SrcSec, srcKey, srcDefSrc
 			} else {
 				continue
 			}
+			// Read the value from the merged INI: font file names are already resolved
+			// to font indices there, while the user and default INIs hold the raw names.
+			val, _ = get(merged, fromSec, fromKey)
 
 			// Write into the merged ini & struct.
 			secPath := strings.ReplaceAll(sp.DstSec, " ", "_")
@@ -2277,6 +2337,8 @@ func (m *Motif) overrideParams() {
 		{SrcSec: "Select Info", SrcPrefix: "p2.face2.", DstSec: "Select Info", DstPrefix: "p2.face2.loading."},
 		{SrcSec: "Select Info", SrcPrefix: "p1.face.", DstSec: "Select Info", DstPrefix: "p1.palmenu.preview."},
 		{SrcSec: "Select Info", SrcPrefix: "p2.face.", DstSec: "Select Info", DstPrefix: "p2.palmenu.preview."},
+		{SrcSec: "Select Info", SrcPrefix: "p1.face2.", DstSec: "Select Info", DstPrefix: "p1.palmenu.preview2."},
+		{SrcSec: "Select Info", SrcPrefix: "p2.face2.", DstSec: "Select Info", DstPrefix: "p2.palmenu.preview2."},
 		{SrcSec: "Select Info", SrcPrefix: "p1.teammenu.item.", DstSec: "Select Info", DstPrefix: "p1.teammenu.item.active."},
 		{SrcSec: "Select Info", SrcPrefix: "p1.teammenu.item.", DstSec: "Select Info", DstPrefix: "p1.teammenu.item.active2."},
 		{SrcSec: "Select Info", SrcPrefix: "p2.teammenu.item.", DstSec: "Select Info", DstPrefix: "p2.teammenu.item.active."},
@@ -2360,6 +2422,76 @@ func (m *Motif) overrideParams() {
 	m.mergeWithInheritance(specs)
 }
 
+// Propagate p<n>.cursor.<state> parameters into their per cell "<col>-<row>" variants (wildcards included)
+func (m *Motif) inheritCursorCellOverrides() {
+	if m == nil || m.IniFile == nil {
+		return
+	}
+	sec, err := m.IniFile.GetSection("Select Info")
+	if err != nil || sec == nil {
+		return
+	}
+	re := regexp.MustCompile(`(?i)^(p[1-8]\.cursor\.(?:active|done|preview))\.([0-9*]+-[0-9*]+)\.(.+)$`)
+	variants := map[string]map[string]map[string]bool{}
+	for _, k := range sec.Keys() {
+		mt := re.FindStringSubmatch(k.Name())
+		if mt == nil {
+			continue
+		}
+		state, cell, param := strings.ToLower(mt[1]), strings.ToLower(mt[2]), strings.ToLower(mt[3])
+		if variants[state] == nil {
+			variants[state] = map[string]map[string]bool{}
+		}
+		if variants[state][cell] == nil {
+			variants[state][cell] = map[string]bool{}
+		}
+		variants[state][cell][param] = true
+	}
+	si := reflect.ValueOf(&m.SelectInfo).Elem()
+	for state, cells := range variants {
+		mapVal := si
+		for _, part := range strings.Split(state, ".") {
+			fieldVal, _, found := findFieldByINITag(mapVal, part)
+			if !found {
+				mapVal = reflect.Value{}
+				break
+			}
+			mapVal = fieldVal
+		}
+		if !mapVal.IsValid() || mapVal.Kind() != reflect.Map ||
+			mapVal.Type().Elem().Kind() != reflect.Ptr {
+			continue
+		}
+		def := mapVal.MapIndex(reflect.ValueOf("default"))
+		if !def.IsValid() || def.IsNil() {
+			continue
+		}
+		for _, key := range mapVal.MapKeys() {
+			params := cells[strings.ToLower(key.String())]
+			if params == nil {
+				continue
+			}
+			cur := mapVal.MapIndex(key)
+			if !cur.IsValid() || cur.IsNil() {
+				continue
+			}
+			merged := reflect.New(mapVal.Type().Elem().Elem())
+			merged.Elem().Set(def.Elem())
+			for param := range params {
+				if i := strings.Index(param, "."); i >= 0 {
+					param = param[:i]
+				}
+				dst, _, ok := findFieldByINITag(merged.Elem(), param)
+				src, _, found := findFieldByINITag(cur.Elem(), param)
+				if ok && found {
+					dst.Set(src)
+				}
+			}
+			mapVal.SetMapIndex(key, merged)
+		}
+	}
+}
+
 func (m *Motif) customPauseMenuSections() []string {
 	if m == nil || m.IniFile == nil {
 		return nil
@@ -2411,7 +2543,7 @@ func (m *Motif) loadBgDefProperties(bgDef *BgDefProperties, bgname, spr string) 
 		LoadFile(&bgDef.Spr, []string{bgDef.Spr, m.Def, "", "data/"}, "", func(filename string) error {
 			if filename != "" {
 				var err error
-				bgDef.Sff, err = loadSff(filename, false, true, false)
+				bgDef.Sff, err = loadSff(filename, SffTypeOther, true, false)
 				if err != nil {
 					LogMessage("Failed to load %v: %v", filename, err)
 				}
@@ -2439,13 +2571,13 @@ func (m *Motif) loadFiles() {
 	LoadFile(&m.Files.Spr, []string{m.Files.Spr}, "", func(filename string) error {
 		if filename != "" {
 			var err error
-			m.Sff, err = loadSff(filename, false, true, false)
+			m.Sff, err = loadSff(filename, SffTypeOther, true, false)
 			if err != nil {
 				LogMessage("Failed to load %v: %v", filename, err)
 			}
 		}
 		if m.Sff == nil {
-			m.Sff = newSff()
+			m.Sff = newSff(SffTypeOther)
 		}
 		return nil
 	})
@@ -2454,13 +2586,13 @@ func (m *Motif) loadFiles() {
 	LoadFile(&m.Files.Glyphs, []string{m.Files.Glyphs}, "", func(filename string) error {
 		if filename != "" {
 			var err error
-			m.GlyphsSff, err = loadSff(filename, false, true, false)
+			m.GlyphsSff, err = loadSff(filename, SffTypeFont, true, false)
 			if err != nil {
 				LogMessage("Failed to load %v: %v", filename, err)
 			}
 		}
 		if m.GlyphsSff == nil {
-			m.GlyphsSff = newSff()
+			m.GlyphsSff = newSff(SffTypeFont)
 		}
 		return nil
 	})
@@ -2563,6 +2695,8 @@ func (m *Motif) loadFiles() {
 		if m.Snd == nil {
 			m.Snd = newSnd()
 		}
+		// Holding a direction in a menu replays its sound faster than it ends.
+		m.Snd.restart = true
 		return nil
 	})
 	sys.keepAlive()
@@ -2732,7 +2866,7 @@ func (m *Motif) applyPostParsePosAdjustments() {
 	// Select Screen: Stage
 	{
 		st := &m.SelectInfo.Stage
-		offsetAnims(st.Pos[0], st.Pos[1], st.Portrait.Bg.AnimData, st.Portrait.Random.AnimData)
+		offsetAnims(st.Pos[0], st.Pos[1], st.Portrait.Bg.AnimData, st.Portrait.Random.AnimData, st.Portrait.Slot.AnimData)
 		offsetTexts(st.Pos[0], st.Pos[1], st.TextSpriteData, st.Active.TextSpriteData, st.Active2.TextSpriteData, st.Done.TextSpriteData)
 	}
 
@@ -2857,26 +2991,28 @@ func (m *Motif) drawLoading() {
 	ts.Reset()
 
 	sys.mainThreadTask <- func() {
-		// End previous frame
-		gfx.EndFrame()
+		if !sys.window.renderingPaused {
+			// End previous frame
+			gfx.EndFrame()
 
-		// Start a one-off frame
-		gfx.BeginFrame(true)
+			// Start a one-off frame
+			gfx.BeginFrame(true)
 
-		FillRect(sys.scrrect, 0x000000, [2]int32{255, 0}, nil)
+			FillRect(sys.scrrect, 0x000000, [2]int32{255, 0}, nil)
 
-		ts.Draw(ts.layerno)
+			ts.Draw(ts.layerno)
 
-		// Submit and present
-		gfx.EndFrame()
-		if strings.HasPrefix(gfx.GetName(), "OpenGL") {
-			sys.window.SwapBuffers()
-		} else {
-			gfx.Await()
+			// Submit and present
+			gfx.EndFrame()
+			if strings.HasPrefix(gfx.GetName(), "OpenGL") {
+				sys.window.SwapBuffers()
+			} else {
+				gfx.Await()
+			}
+
+			// Prepare a fresh frame for whatever comes next (no clear)
+			gfx.BeginFrame(false)
 		}
-
-		// Prepare a fresh frame for whatever comes next (no clear)
-		gfx.BeginFrame(false)
 	}
 	sys.runMainThreadTask()
 }
@@ -2900,7 +3036,7 @@ func (mo *Motif) processStateChange(c *Char, states []int32) bool {
 	if len(states) == 0 {
 		for _, ch := range sys.chars[c.playerNo] {
 			if ch != nil {
-				ch.setSCF(SCF_disabled)
+				ch.setSCF(SCF_disabled, true)
 			}
 		}
 		return true
@@ -2914,7 +3050,7 @@ func (mo *Motif) processStateChange(c *Char, states []int32) bool {
 			// If the player slot was previously disabled, re-enable its loaded chars.
 			for _, ch := range sys.chars[c.playerNo] {
 				if ch != nil && ch.scf(SCF_disabled) {
-					ch.unsetSCF(SCF_disabled)
+					ch.setSCF(SCF_disabled, false)
 				}
 			}
 			c.changeState(stateNo, -1, -1, "")
@@ -3021,7 +3157,8 @@ func (m *Motif) reset() {
 }
 
 func (m *Motif) step() {
-	if !m.me.active && !(sys.fightScreen.round.fadeOut.isActive() || sys.fightScreen.round.fadeIn.isActive()) {
+	if !m.me.active && (!sys.paused || sys.frameStepFlag) &&
+		!(sys.fightScreen.round.fadeOut.isActive() || sys.fightScreen.round.fadeIn.isActive()) {
 		if m.fadeOut.isActive() {
 			m.fadeOut.step()
 		} else if m.fadeIn.isActive() {
@@ -3103,6 +3240,8 @@ func (m *Motif) shouldScopeMotifAspect() bool {
 }
 
 func (m *Motif) draw(layerno int16) {
+	// Match effects use the fight viewport, even when motif overlays change aspect.
+	sys.matchStoryboards.draw(layerno)
 	if m.shouldScopeMotifAspect() {
 		prev := sys.captureAspectState()
 		sys.setGameSize(sys.scrrect[2], sys.scrrect[3])
@@ -3143,6 +3282,7 @@ func (m *Motif) draw(layerno int16) {
 }
 
 func (m *Motif) drawFade() {
+	sys.matchStoryboards.drawFade()
 	if m.shouldScopeMotifAspect() {
 		prev := sys.captureAspectState()
 		sys.setGameSize(sys.scrrect[2], sys.scrrect[3])
@@ -3575,9 +3715,9 @@ func (ch *MotifChallenger) step(m *Motif) {
 	}
 
 	// These were a convenience. Motif should block these things directly or with system flags instead
-	//sys.setGSF(GSF_nobardisplay) // They already hide without this
-	//sys.setGSF(GSF_nomusic) // Checked in tickSound()
-	//sys.setGSF(GSF_timerfreeze) // Now redundant because game pauses
+	//sys.setGSF(GSF_nobardisplay, true) // They already hide without this
+	//sys.setGSF(GSF_nomusic, true) // Checked in tickSound()
+	//sys.setGSF(GSF_timerfreeze, true) // Now redundant because game pauses
 
 	if ch.counter == m.ChallengerInfo.Pause.Time {
 		// Motif shouldn't touch game variables
@@ -4705,7 +4845,7 @@ func (di *MotifDialogue) applyToken(m *Motif, line *DialogueParsedLine, token Di
 			}
 			params := newPlaySndParams()
 			c := sys.chars[token.pn-1][0]
-			params.xPos = &c.pos[0]
+			params.sourceID = c.id
 			params.localScale = c.localscl
 			params.log = false
 
@@ -4757,12 +4897,12 @@ func (di *MotifDialogue) applyToken(m *Motif, line *DialogueParsedLine, token Di
 				stateNo := int32(v)
 				if stateNo == -1 {
 					for _, ch := range sys.chars[token.pn-1] {
-						ch.setSCF(SCF_disabled)
+						ch.setSCF(SCF_disabled, true)
 					}
 				} else if sys.chars[token.pn-1][0].selfStatenoExist(BytecodeInt(stateNo)) == BytecodeBool(true) {
 					for _, ch := range sys.chars[token.pn-1] {
 						if ch.scf(SCF_disabled) {
-							ch.unsetSCF(SCF_disabled)
+							ch.setSCF(SCF_disabled, false)
 						}
 					}
 					sys.chars[token.pn-1][0].changeState(int32(stateNo), -1, -1, "")
@@ -4777,8 +4917,17 @@ func (di *MotifDialogue) applyToken(m *Motif, line *DialogueParsedLine, token Di
 				return true
 			}
 			mapName, ok1 := token.value[0].(string)
-			mapVal, ok2 := token.value[1].(float32)
-			if !ok1 || !ok2 {
+			if !ok1 {
+				return false
+			}
+			// Typed from the token: numeric values stay numeric, strings are stored as text
+			var mv TypedValue
+			switch v := token.value[1].(type) {
+			case float32:
+				mv = TypedValue{Type: VT_Float, Num: float64(v)}
+			case string:
+				mv = TypedValue{Type: VT_String, Str: v}
+			default:
 				return false
 			}
 			mapOp := int32(0)
@@ -4787,7 +4936,7 @@ func (di *MotifDialogue) applyToken(m *Motif, line *DialogueParsedLine, token Di
 					mapOp = 1
 				}
 			}
-			sys.chars[token.pn-1][0].mapSet(mapName, mapVal, mapOp)
+			sys.chars[token.pn-1][0].mapSetValue(mapName, mv, mapOp)
 		}
 		return true
 	default:
@@ -6602,6 +6751,15 @@ func victoryPortraitAnim(m *Motif, sc *SelectChar, slot string,
 			isCopied = true
 			if idx, ok := a.anim.sff.palList.PalTable[[2]uint16{1, uint16(pal)}]; ok {
 				a.anim.sff.palList.paletteMap[0] = idx
+				// SFFv1 can preload a duplicate of the base palette at index 1
+				if a.anim.sff.header.Version[0] == 1 && len(a.anim.sff.palList.paletteMap) > 1 {
+					for _, spr := range a.anim.sff.sprites {
+						if spr != nil && spr.sffv1BasePal {
+							a.anim.sff.palList.paletteMap[1] = idx
+							break
+						}
+					}
+				}
 			}
 		}
 		//fmt.Printf("[Victory] slot=%s -> applied palette %d\n", slot, pal)

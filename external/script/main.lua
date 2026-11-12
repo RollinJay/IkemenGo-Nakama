@@ -1,41 +1,5 @@
 main = {}
 --;===========================================================
---; INITIALIZE DATA
---;===========================================================
-do
-	local RANDOM_IMAX = 2147483647 -- Go IMax / Park-Miller modulus
-	function math.random(min, max)
-		local r = getRandom()
-		-- math.random() -> float in [0, 1)
-		if min == nil then
-			return r / RANDOM_IMAX
-		end
-		-- math.random(max) -> integer in [1, max]
-		if max == nil then
-			max = min
-			min = 1
-		end
-		min = math.floor(min)
-		max = math.floor(max)
-		if max < min then
-			error("bad argument #2 to 'random' (interval is empty)", 2)
-		end
-		local range = max - min + 1
-		if range <= 0 or range > RANDOM_IMAX then
-			error("bad argument to 'random' (interval is too large)", 2)
-		end
-		-- Match Go Rand(min, max):
-		-- return min + Random() / (IMax / range + 1)
-		return min + math.floor(r / (math.floor(RANDOM_IMAX / range) + 1))
-	end
-	-- Keep deterministic engine RNG authoritative.
-	-- math.randomseed(...) is intentionally ignored because math.random uses getRandom().
-	function math.randomseed(_)
-		-- intentionally ignored
-	end
-end
-
---;===========================================================
 --; COMMON FUNCTIONS
 --;===========================================================
 
@@ -772,6 +736,7 @@ function main.f_materializeCharCell(row)
 					params.scale[1] * ch.portraitscale * motif.info.localcoord[1] / ch.localcoord,
 					params.scale[2] * ch.portraitscale * motif.info.localcoord[1] / ch.localcoord
 				)
+				animSetTrans(a, params.trans, params.alpha[1], params.alpha[2])
 				animSetFacing(a, params.facing)
 				animSetXShear(a, params.xshear)
 				animSetAngle(a, params.angle)
@@ -808,6 +773,7 @@ function main.f_materializeStagePortrait(stageNo)
 						params.scale[1] * st.portraitscale * motif.info.localcoord[1] / st.localcoord,
 						params.scale[2] * st.portraitscale * motif.info.localcoord[1] / st.localcoord
 					)
+					animSetTrans(a, params.trans, params.alpha[1], params.alpha[2])
 					animSetFacing(a, params.facing)
 					animSetXShear(a, params.xshear)
 					animSetAngle(a, params.angle)
@@ -1281,7 +1247,7 @@ function main.f_warning(text, sec, background, overlay, titleData, textData, can
 			sndPlay(motif.Snd, cancel_snd[1], cancel_snd[2])
 			ret = false
 			break
-		elseif getKey() ~= '' or getInput(-1, sec.menu.done.key) then
+		elseif getKey() ~= '' or getInput(-1, {'U', 'D', 'L', 'R', 'a', 'b', 'c', 'x', 'y', 'z', 's', 'd', 'w', 'm'}) then
 			sndPlay(motif.Snd, done_snd[1], done_snd[2])
 			resetKey()
 			ret = true
@@ -1507,17 +1473,14 @@ function main.f_addChar(line, playable, loading, slot)
 			main.t_selChars[idx].hasSlot = true
 		end
 	end
-	for _, v in ipairs({'next', 'previous', 'select'}) do
-		if main.t_selChars[row][v] ~= nil then
-			commandAdd(main.t_selChars[row][v], main.t_selChars[row][v])
-			if main.t_selGrid[#main.t_selGrid][v] == nil then
-				main.t_selGrid[#main.t_selGrid][v] = {}
-			end
-			if main.t_selGrid[#main.t_selGrid][v][main.t_selChars[row][v]] == nil then
-				main.t_selGrid[#main.t_selGrid][v][main.t_selChars[row][v]] = {}
-			end
-			table.insert(main.t_selGrid[#main.t_selGrid][v][main.t_selChars[row][v]], #main.t_selGrid[#main.t_selGrid].chars)
-		end
+	-- slot 'select' commands
+	local selectCmd = main.t_selChars[row].select
+	if selectCmd ~= nil then
+		local grid = main.t_selGrid[#main.t_selGrid]
+		commandAdd(selectCmd, selectCmd)
+		grid.select = grid.select or {}
+		grid.select[selectCmd] = grid.select[selectCmd] or {}
+		table.insert(grid.select[selectCmd], #grid.chars)
 	end
 	if loading then
 		main.f_loadingRefresh()
@@ -1571,7 +1534,67 @@ function main.f_addStage(file, hidden, line)
 	return stageNo
 end
 
+-- Add one [ExtraStages] entry, slot membership only affects the stage menu
+-- random and arcade pools keep every stage reference individually
+function main.f_addStageEntry(line, stageSlot)
+	local unlock = ''
+	local hidden = 0
+	line = line:gsub(',%s*unlock%s*=%s*(.-)%s*$', function(m1)
+		unlock = (m1 or ''):match('^%s*(.-)%s*$')
+		hidden = 1
+		return ''
+	end)
+	local row
+	for i, c in ipairs(main.f_strsplit(',', line)) do
+		c = c:match('^%s*(.-)%s*$')
+		if i == 1 then
+			if c == '' then return end
+			row = main.f_addStage(c, hidden, line)
+			if row == nil then return end
+			table.insert(main.t_includeStage[1], row)
+			table.insert(main.t_includeStage[2], row)
+		else
+			local param, value = c:match('^(.-)%s*=%s*(.-)$')
+			if param ~= nil and value ~= nil and param ~= '' and value ~= '' then
+				main.t_selStages[row][param] = tonumber(value) or value
+				if param == 'order' then
+					local order = main.t_selStages[row].order
+					main.t_orderStages[order] = main.t_orderStages[order] or {}
+					table.insert(main.t_orderStages[order], row)
+				end
+			end
+		end
+	end
+	if row == nil then return end
+	local st = main.t_selStages[row]
+	if st.order == nil then
+		st.order = 1
+		main.t_orderStages[1] = main.t_orderStages[1] or {}
+		table.insert(main.t_orderStages[1], row)
+	end
+	if unlock ~= '' then
+		main.t_unlockLua.stages[row] = unlock
+	end
+	if stageSlot == nil then
+		table.insert(main.t_stageSlots, {stages = {}, slot = 1})
+		stageSlot = #main.t_stageSlots
+	end
+	st.stageSlot = stageSlot
+	local group = main.t_stageSlots[stageSlot]
+	table.insert(group.stages, row)
+	-- slot 'select' commands
+	if st.select ~= nil then
+		local selectCmd = tostring(st.select)
+		commandAdd(selectCmd, selectCmd)
+		group.select = group.select or {}
+		group.select[selectCmd] = group.select[selectCmd] or {}
+		table.insert(group.select[selectCmd], row)
+	end
+	return row
+end
+
 main.t_includeStage = {{}, {}} --includestage = 1, includestage = -1
+main.t_stageSlots = {}
 main.t_orderChars = {default = {}}
 main.t_orderStages = {}
 main.t_bonusChars = {}
@@ -1584,6 +1607,7 @@ local tmp = ''
 local section = 0
 local row = 0
 local slot = false
+local stageSlot
 local csCell = 0
 local content = main.f_fileRead(motif.files.select)
 content = content:gsub('([^\r\n;]*)%s*;[^\r\n]*', '%1')
@@ -1609,6 +1633,9 @@ end
 for line in content:gmatch('[^\r\n]+') do
 --for line in io.lines("data/select.def") do
 	local lineCase = line:lower()
+	if lineCase:match('^%s*%[') then
+		stageSlot = nil
+	end
 	if lineCase:match('^%s*%[%s*characters%s*%]') then
 		row = 0
 		section = 1
@@ -1662,68 +1689,60 @@ for line in content:gmatch('[^\r\n]+') do
 			csRow = math.floor(csCell / motif.select_info.columns) + 1
 			cellKey = (csCol - 1) .. '-' .. (csRow - 1)
 		end
-		if lineCase:match(',%s*exclude%s*=%s*1') then --character should be added after all slots are filled
-			table.insert(t_addExluded, line)
-		elseif lineCase:match('^%s*slot%s*=%s*{%s*$') then --start of the 'multiple chars in one slot' assignment
+		local slotStart = lineCase:match('^%s*slot%s*{%s*()')
+		if slotStart ~= nil then
 			table.insert(main.t_selGrid, {['chars'] = {}, ['slot'] = 1})
 			slot = true
-		elseif slot and lineCase:match('^%s*}%s*$') then --end of 'multiple chars in one slot' assignment
-			slot = false
-			csCell = csCell + 1
-		else
-			main.f_addChar(line, true, true, slot)
-			if not slot then
+			line = line:sub(slotStart)
+		end
+		local slotEnd = false
+		if slot then
+			local slotLine = line:match('^(.-)%s*}%s*$')
+			if slotLine ~= nil then
+				line = slotLine
+				slotEnd = true
+			end
+			-- One character per line, the trailing comma is optional.
+			line = line:gsub(',%s*$', '')
+			lineCase = line:lower()
+		end
+		if lineCase:match(',%s*exclude%s*=%s*1') then --character should be added after all slots are filled
+			table.insert(t_addExluded, line)
+		elseif line:match('%S') then
+			if slot then
+				main.f_addChar(line, true, true, true)
+			else
+				main.f_addChar(line, true, true, false)
 				csCell = csCell + 1
 			end
 		end
+		if slotEnd then
+			slot = false
+			csCell = csCell + 1
+		end
 	elseif section == 2 then --[ExtraStages]
-		--store 'unlock' param and get rid of everything that follows it
-		local unlock = ''
-		local hidden = 0 --TODO: temporary flag, won't be used once stage selection screen is ready
-		line = line:gsub(',%s*unlock%s*=%s*(.-)%s*$', function(m1)
-			unlock = (m1 or ''):match('^%s*(.-)%s*$')
-			hidden = 1
-			return ''
-		end)
-		--parse rest of the line
-		for i, c in ipairs(main.f_strsplit(',', line)) do --split using "," delimiter
-			c = c:gsub('^%s*(.-)%s*$', '%1')
-			if i == 1 then
-				row = main.f_addStage(c, hidden, line)
-				if row == nil then
-					break
-				end
-				table.insert(main.t_includeStage[1], row)
-				table.insert(main.t_includeStage[2], row)
-			else
-				local param, value = c:match('^(.-)%s*=%s*(.-)$')
-				if param ~= nil and value ~= nil and param ~= '' and value ~= '' then
-					main.t_selStages[row][param] = tonumber(value)
-					--order (more than 1 order param can be set at the same time)
-					if param:match('order') then
-						if main.t_orderStages[main.t_selStages[row].order] == nil then
-							main.t_orderStages[main.t_selStages[row].order] = {}
-						end
-						table.insert(main.t_orderStages[main.t_selStages[row].order], row)
-					end
-				end
-			end
+		local slotStart = lineCase:match('^%s*slot%s*{%s*()')
+		if slotStart ~= nil then
+			table.insert(main.t_stageSlots, {stages = {}, slot = 1})
+			stageSlot = #main.t_stageSlots
+			line = line:sub(slotStart)
 		end
-		if row ~= nil then
-			--default order (only if no explicit order was set)
-			if main.t_selStages[row].order == nil then
-				main.t_selStages[row].order = 1
-				if main.t_orderStages[main.t_selStages[row].order] == nil then
-					main.t_orderStages[main.t_selStages[row].order] = {}
-				end
-				table.insert(main.t_orderStages[main.t_selStages[row].order], row)
+		local slotEnd = false
+		if stageSlot ~= nil then
+			local slotLine = line:match('^(.-)%s*}%s*$')
+			if slotLine ~= nil then
+				line = slotLine
+				slotEnd = true
 			end
-			--unlock param
-			if unlock ~= '' then
-				--main.t_selStages[row].unlock = unlock
-				main.t_unlockLua.stages[row] = unlock
+			-- One stage per line, the trailing comma is optional.
+			line = line:gsub(',%s*$', '')
+			if line:match('%S') then
+				main.f_addStageEntry(line, stageSlot)
 			end
+		elseif line:match('%S') then
+			main.f_addStageEntry(line)
 		end
+		if slotEnd then stageSlot = nil end
 	elseif section == 3 then --[Options]
 		if lineCase:match('%.maxmatches%s*=') then
 			local rowName, line = lineCase:match('^%s*(.-)%.maxmatches%s*=%s*(.+)')
@@ -1818,13 +1837,49 @@ if #main.t_includeStage[1] == 0 or #main.t_includeStage[2] == 0 then
 	table.insert(main.t_includeStage[2], row)
 end
 
---update selectableStages table
+-- Rebuild the flat random pool and the grouped menu independently
 function main.f_updateSelectableStages()
+	local previousPool = main.t_selectableStages or {}
+	local selected = {}
+	for i, group in ipairs(main.t_stageSlots) do
+		selected[i] = group.available and group.available[group.slot]
+		group.available = {}
+	end
 	main.t_selectableStages = {}
+	main.t_selectableStageSlots = {}
+	local seen = {}
 	for _, v in ipairs(main.t_includeStage[2]) do
-		if main.t_selStages[v].hidden == nil or main.t_selStages[v].hidden == 0 then
+		local st = main.t_selStages[v]
+		if st.hidden == nil or st.hidden == 0 then
 			table.insert(main.t_selectableStages, v)
+			-- Stages supplied by character parameters or the default fallback
+			-- have no explicit menu group
+			if st.stageSlot == nil then
+				table.insert(main.t_stageSlots, {stages = {v}, available = {}, slot = 1})
+				st.stageSlot = #main.t_stageSlots
+			end
+			local group = main.t_stageSlots[st.stageSlot]
+			table.insert(group.available, v)
+			if not seen[st.stageSlot] then
+				seen[st.stageSlot] = true
+				table.insert(main.t_selectableStageSlots, group)
+			end
 		end
+	end
+	for i, group in ipairs(main.t_stageSlots) do
+		group.slot = 1
+		for j, ref in ipairs(group.available) do
+			if ref == selected[i] then group.slot = j; break end
+		end
+	end
+	-- Shuffle bags contain indices into the flat pool, so invalidate the menu
+	-- bag when unlocking or hiding stages changes that pool
+	local changed = #previousPool ~= #main.t_selectableStages
+	for i, ref in ipairs(main.t_selectableStages) do
+		if previousPool[i] ~= ref then changed = true; break end
+	end
+	if changed and start ~= nil and start.shuffleStages ~= nil then
+		start.shuffleStages.stageMenu = nil
 	end
 end
 main.f_updateSelectableStages()
@@ -1854,7 +1909,7 @@ end
 --returns table storing menu window coordinates
 function main.f_menuWindow(t, offset)
 	local offset = offset or {0, 0}
-	if t.window.margins.y[1] ~= 0 or t.window.margins.y[2] ~= 0 then
+	if t.window.visibleitems > 0 and (t.window.margins.y[1] ~= 0 or t.window.margins.y[2] ~= 0) then
 		return {
 			0,
 			math.max(0, t.pos[2] + offset[2] - t.window.margins.y[1]),
@@ -2659,6 +2714,30 @@ main.t_itemname.teamarcade = main.t_itemname.arcade
 main.t_itemname.teamversus = main.t_itemname.versus
 if gameOption('Debug.DumpLuaTables') then main.f_printTable(main.t_itemname, 'debug/t_mainItemname.txt') end
 
+function main.f_editIP(item, t)
+	if not t[item].itemname:match('^ip_') then
+		return t
+	end
+	local name = t[item].itemname:gsub('^ip_', '')
+	sndPlay(motif.Snd, motif[main.group].cursor.move.snd[1], motif[main.group].cursor.move.snd[2])
+	local address = main.f_drawInput(
+		motif[main.group].textinput.TextSpriteData,
+		motif[main.group].textinput.text.address,
+		motif[main.group],
+		motif[main.background],
+		motif[main.group].textinput.overlay.RectData,
+		gameOption('Netplay.IP.' .. name)
+	)
+	if not isValidIp(address) then
+		sndPlay(motif.Snd, motif[main.group].cancel.snd[1], motif[main.group].cancel.snd[2])
+		return t
+	end
+	sndPlay(motif.Snd, motif[main.group].cursor.done.snd.default[1], motif[main.group].cursor.done.snd.default[2])
+	modifyGameOption('Netplay.IP.' .. name, address)
+	saveGameOption(getCommandLineValue("-config"))
+	return t
+end
+
 function main.f_deleteIP(item, t)
 	if t[item].itemname:match('^ip_') then
 		sndPlay(motif.Snd, motif.title_info.cancel.snd[1], motif.title_info.cancel.snd[2])
@@ -2804,19 +2883,23 @@ function main.f_createMenu(tbl, bool_bgreset, bool_main, bool_f1, bool_del)
 				end
 				local cancelInputTime = getInputTime(-1, motif[main.group].menu.cancel.key)
 				if esc() or cancelInputTime > 0 then
-					if not bool_main then
-						sndPlay(motif.Snd, motif[main.group].cancel.snd[1], motif[main.group].cancel.snd[2])
-					elseif not esc() and t[item].itemname ~= 'exit' then
-						--menu key moves cursor to exit without exiting the game
-						for i = 1, #t do
-							if t[i].itemname == 'exit' then
-								sndPlay(motif.Snd, motif[main.group].cancel.snd[1], motif[main.group].cancel.snd[2])
-								item = i
-								cursorPosY = math.min(item, motif[main.group].menu.window.visibleitems)
-								if cursorPosY >= motif[main.group].menu.window.visibleitems then
-									moveTxt = (item - motif[main.group].menu.window.visibleitems) * motif[main.group].menu.item.spacing[2]
+					-- Only a fresh press (or Esc) backs out or moves to Exit.
+					local fresh = esc() or cancelInputTime == 1
+					if fresh then
+						if not bool_main then
+							sndPlay(motif.Snd, motif[main.group].cancel.snd[1], motif[main.group].cancel.snd[2])
+						elseif not esc() and t[item].itemname ~= 'exit' then
+							-- menu key moves cursor to exit without exiting the game
+							for i = 1, #t do
+								if t[i].itemname == 'exit' then
+									sndPlay(motif.Snd, motif[main.group].cancel.snd[1], motif[main.group].cancel.snd[2])
+									item = i
+									cursorPosY = math.min(item, motif[main.group].menu.window.visibleitems)
+									if cursorPosY >= motif[main.group].menu.window.visibleitems then
+										moveTxt = (item - motif[main.group].menu.window.visibleitems) * motif[main.group].menu.item.spacing[2]
+									end
+									break
 								end
-								break
 							end
 						end
 					end
@@ -2831,7 +2914,7 @@ function main.f_createMenu(tbl, bool_bgreset, bool_main, bool_f1, bool_del)
 							motif.infobox.text.TextSpriteData
 						)
 					end
-					if not bool_main or esc() then
+					if fresh and (not bool_main or esc()) then
 						break
 					end
 				elseif bool_f1 and (getKey(motif.infobox.keycode) or gameOption('Config.FirstRun')) then
@@ -2855,6 +2938,8 @@ function main.f_createMenu(tbl, bool_bgreset, bool_main, bool_f1, bool_del)
 					resetKey()
 				elseif bool_del and getKey(motif[main.group].menu.item.delete.keycode) then
 					tbl.items = main.f_deleteIP(item, t)
+				elseif bool_del and getKey(motif[main.group].menu.item.rename.keycode) then
+					tbl.items = main.f_editIP(item, t)
 				elseif main.f_hiscoreDisplay(t[item].itemname) then
 					demoFrameCounter = 0
 				elseif getInput(-1, motif[main.group].menu.done.key) then
@@ -4120,6 +4205,8 @@ if gameOption('Debug.DumpLuaTables') then
 	main.f_printTable(main.t_charDef, "debug/t_charDef.txt")
 	main.f_printTable(main.t_includeStage, "debug/t_includeStage.txt")
 	main.f_printTable(main.t_selectableStages, "debug/t_selectableStages.txt")
+	main.f_printTable(main.t_stageSlots, "debug/t_stageSlots.txt")
+	main.f_printTable(main.t_selectableStageSlots, "debug/t_selectableStageSlots.txt")
 	main.f_printTable(main.t_selGrid, "debug/t_selGrid.txt")
 	main.f_printTable(main.t_unlockLua, "debug/t_unlockLua.txt")
 	main.f_printTable(loadGameOption(), "debug/config.txt")

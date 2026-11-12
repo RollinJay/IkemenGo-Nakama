@@ -1,5 +1,3 @@
-//go:build !kinc && !android
-
 package main
 
 import (
@@ -22,17 +20,21 @@ import (
 )
 
 type Font_VK struct {
-	fontChar    map[rune]*character
-	ttf         *truetype.Font
-	scale       int32
-	vao         uint32
-	vbo         uint32
-	program     uint32
-	color       color
-	shaderPalFX ShaderPalFX
-	resolution  [2]float32
-	textures    []*TextureAtlas
-	descriptors []*list.Element
+	fontChar     map[rune]*character
+	ttf          *truetype.Font
+	scale        int32
+	vao          uint32
+	vbo          uint32
+	program      uint32
+	color        color
+	blendEq      BlendEquation
+	blendSrc     BlendFunc
+	blendDst     BlendFunc
+	shaderPalFX  ShaderPalFX
+	resolution   [2]float32
+	textures     []*TextureAtlas
+	descriptors  []*list.Element
+	customShader CustomShaderRenderData
 }
 
 type FontRenderer_VK struct {
@@ -40,6 +42,7 @@ type FontRenderer_VK struct {
 	program         *VulkanProgramInfo
 	descriptorPools []vk.DescriptorPool
 	freeDescriptors list.List
+	coveragePalTex  Texture
 }
 
 func (r *FontRenderer_VK) Init(rendererVk interface{}) {
@@ -203,80 +206,68 @@ func (r *FontRenderer_VK) Init(rendererVk interface{}) {
 		StencilTestEnable: vk.False,
 	}
 
-	attachmentStates := make([]vk.PipelineColorBlendAttachmentState, 0, 2)
-	colorBlendStates := make([]vk.PipelineColorBlendStateCreateInfo, 0, 2)
-	pipelineCreateInfos := make([]vk.GraphicsPipelineCreateInfo, 0, 2)
+	// Pipeline 0 has no blending. The others cover every blend state sprites use,
+	// so text with a set alpha blends the same way.
+	type blendState struct {
+		op       vk.BlendOp
+		src, dst vk.BlendFactor
+		key      VulkanBlendState
+	}
+	blends := []blendState{{op: vk.BlendOpAdd, src: vk.BlendFactorOne, dst: vk.BlendFactorZero}}
+	ops := map[BlendEquation]vk.BlendOp{BlendAdd: vk.BlendOpAdd, BlendReverseSubtract: vk.BlendOpReverseSubtract}
+	factors := map[BlendFunc]vk.BlendFactor{BlendOne: vk.BlendFactorOne, BlendSrcAlpha: vk.BlendFactorSrcAlpha, BlendZero: vk.BlendFactorZero,
+		BlendOneMinusSrcAlpha: vk.BlendFactorOneMinusSrcAlpha}
+	for _, op := range []BlendEquation{BlendAdd, BlendReverseSubtract} {
+		for _, src := range []BlendFunc{BlendOne, BlendSrcAlpha, BlendZero} {
+			for _, dst := range []BlendFunc{BlendOneMinusSrcAlpha, BlendOne, BlendZero} {
+				blends = append(blends, blendState{ops[op], factors[src], factors[dst], VulkanBlendState{op: op, src: src, dst: dst}})
+			}
+		}
+	}
+	attachmentStates := make([]vk.PipelineColorBlendAttachmentState, len(blends))
+	colorBlendStates := make([]vk.PipelineColorBlendStateCreateInfo, len(blends))
+	pipelineCreateInfos := make([]vk.GraphicsPipelineCreateInfo, len(blends))
 	pipelineIndexMap := map[interface{}]int{}
-	attachmentStates = append(attachmentStates, vk.PipelineColorBlendAttachmentState{
-		ColorWriteMask: vk.ColorComponentFlags(
-			vk.ColorComponentRBit | vk.ColorComponentGBit |
-				vk.ColorComponentBBit | vk.ColorComponentABit,
-		),
-		BlendEnable:         vk.True,
-		SrcColorBlendFactor: vk.BlendFactorOne,
-		DstColorBlendFactor: vk.BlendFactorZero,
-		ColorBlendOp:        vk.BlendOpAdd,
-		SrcAlphaBlendFactor: vk.BlendFactorOne,
-		DstAlphaBlendFactor: vk.BlendFactorZero,
-		AlphaBlendOp:        vk.BlendOpAdd,
-	})
-	colorBlendStates = append(colorBlendStates, vk.PipelineColorBlendStateCreateInfo{
-		SType:           vk.StructureTypePipelineColorBlendStateCreateInfo,
-		LogicOpEnable:   vk.False,
-		LogicOp:         vk.LogicOpCopy,
-		AttachmentCount: 1,
-		PAttachments:    []vk.PipelineColorBlendAttachmentState{attachmentStates[0]},
-	})
-	pipelineCreateInfos = append(pipelineCreateInfos, vk.GraphicsPipelineCreateInfo{
-		SType:               vk.StructureTypeGraphicsPipelineCreateInfo,
-		StageCount:          2, // vert + frag
-		PStages:             shaderStages,
-		PVertexInputState:   &vertexInputState,
-		PInputAssemblyState: &inputAssemblyState,
-		PViewportState:      &viewportState,
-		PRasterizationState: &rasterState,
-		PMultisampleState:   &multisampleState,
-		PColorBlendState:    &colorBlendStates[0],
-		PDynamicState:       &dynamicState,
-		Layout:              program.pipelineLayout,
-		RenderPass:          renderer.mainRenderPass.renderPass,
-		PDepthStencilState:  &depthStencilState,
-	})
-	attachmentStates = append(attachmentStates, vk.PipelineColorBlendAttachmentState{
-		ColorWriteMask: vk.ColorComponentFlags(
-			vk.ColorComponentRBit | vk.ColorComponentGBit |
-				vk.ColorComponentBBit | vk.ColorComponentABit,
-		),
-		BlendEnable:         vk.True,
-		SrcColorBlendFactor: vk.BlendFactorSrcAlpha,
-		DstColorBlendFactor: vk.BlendFactorOneMinusSrcAlpha,
-		ColorBlendOp:        vk.BlendOpAdd,
-		SrcAlphaBlendFactor: vk.BlendFactorOne,
-		DstAlphaBlendFactor: vk.BlendFactorZero,
-		AlphaBlendOp:        vk.BlendOpAdd,
-	})
-	colorBlendStates = append(colorBlendStates, vk.PipelineColorBlendStateCreateInfo{
-		SType:           vk.StructureTypePipelineColorBlendStateCreateInfo,
-		LogicOpEnable:   vk.False,
-		LogicOp:         vk.LogicOpCopy,
-		AttachmentCount: 1,
-		PAttachments:    []vk.PipelineColorBlendAttachmentState{attachmentStates[1]},
-	})
-	pipelineCreateInfos = append(pipelineCreateInfos, vk.GraphicsPipelineCreateInfo{
-		SType:               vk.StructureTypeGraphicsPipelineCreateInfo,
-		StageCount:          2, // vert + frag
-		PStages:             shaderStages,
-		PVertexInputState:   &vertexInputState,
-		PInputAssemblyState: &inputAssemblyState,
-		PViewportState:      &viewportState,
-		PRasterizationState: &rasterState,
-		PMultisampleState:   &multisampleState,
-		PColorBlendState:    &colorBlendStates[1],
-		PDynamicState:       &dynamicState,
-		Layout:              program.pipelineLayout,
-		RenderPass:          renderer.mainRenderPass.renderPass,
-		PDepthStencilState:  &depthStencilState,
-	})
+	for i, blend := range blends {
+		attachmentStates[i] = vk.PipelineColorBlendAttachmentState{
+			ColorWriteMask: vk.ColorComponentFlags(
+				vk.ColorComponentRBit | vk.ColorComponentGBit |
+					vk.ColorComponentBBit | vk.ColorComponentABit,
+			),
+			BlendEnable:         vk.True,
+			SrcColorBlendFactor: blend.src,
+			DstColorBlendFactor: blend.dst,
+			ColorBlendOp:        blend.op,
+			SrcAlphaBlendFactor: vk.BlendFactorOne,
+			DstAlphaBlendFactor: vk.BlendFactorZero,
+			AlphaBlendOp:        vk.BlendOpAdd,
+		}
+		colorBlendStates[i] = vk.PipelineColorBlendStateCreateInfo{
+			SType:           vk.StructureTypePipelineColorBlendStateCreateInfo,
+			LogicOpEnable:   vk.False,
+			LogicOp:         vk.LogicOpCopy,
+			AttachmentCount: 1,
+			PAttachments:    []vk.PipelineColorBlendAttachmentState{attachmentStates[i]},
+		}
+		pipelineCreateInfos[i] = vk.GraphicsPipelineCreateInfo{
+			SType:               vk.StructureTypeGraphicsPipelineCreateInfo,
+			StageCount:          2, // vert + frag
+			PStages:             shaderStages,
+			PVertexInputState:   &vertexInputState,
+			PInputAssemblyState: &inputAssemblyState,
+			PViewportState:      &viewportState,
+			PRasterizationState: &rasterState,
+			PMultisampleState:   &multisampleState,
+			PColorBlendState:    &colorBlendStates[i],
+			PDynamicState:       &dynamicState,
+			Layout:              program.pipelineLayout,
+			RenderPass:          renderer.mainRenderPass[0].renderPass,
+			PDepthStencilState:  &depthStencilState,
+		}
+		if i > 0 {
+			pipelineIndexMap[blend.key] = i
+		}
+	}
 	pipelines := make([]vk.Pipeline, len(pipelineCreateInfos))
 	err = vk.Error(vk.CreateGraphicsPipelines(renderer.device,
 		renderer.pipelineCache, uint32(len(pipelineCreateInfos)), pipelineCreateInfos, nil, pipelines))
@@ -466,7 +457,7 @@ func (f *Font_VK) GenerateGlyphs(low, high rune) error {
 		for uv, ok = f.textures[textureIndex].AddImage(int32(rgba.Rect.Dx()), int32(rgba.Rect.Dy()), stride, pix); !ok; uv, ok = f.textures[textureIndex].AddImage(int32(rgba.Rect.Dx()), int32(rgba.Rect.Dy()), stride, pix) {
 			textureIndex += 1
 			if textureIndex >= len(f.textures) {
-				newAtlas := CreateTextureAtlas(256, 256, 8, true)
+				newAtlas := CreateTextureAtlas(sys.cfg.Video.FontTextureAtlasSize, sys.cfg.Video.FontTextureAtlasSize, 8, true)
 				newAtlas.texture.MarkNonSwappable()
 				f.textures = append(f.textures, newAtlas)
 				descriptorSet := gfxFont.(*FontRenderer_VK).freeDescriptors.Front()
@@ -509,6 +500,7 @@ func (f *Font_VK) GenerateGlyphs(low, high rune) error {
 
 		char.uv = uv
 		char.textureID = uint32(textureIndex)
+		char.texture = gfx.newSubTexture(f.textures[textureIndex].texture, int32(char.width), int32(char.height), char.uv)
 
 		//add char to fontChar list
 		f.fontChar[ch] = char
@@ -539,7 +531,7 @@ func (r *FontRenderer_VK) LoadTrueTypeFont(reader io.Reader, scale int32, low, h
 	f.scale = scale
 	f.SetColor(1.0, 1.0, 1.0, 1.0) //set default white
 	f.SetPalFX(NewShaderPalFX())
-	f.textures = append(f.textures, CreateTextureAtlas(256, 256, 8, true))
+	f.textures = append(f.textures, CreateTextureAtlas(sys.cfg.Video.FontTextureAtlasSize, sys.cfg.Video.FontTextureAtlasSize, 8, true))
 	f.textures[len(f.textures)-1].texture.MarkNonSwappable()
 	descriptorSet := r.freeDescriptors.Front()
 	r.freeDescriptors.Remove(descriptorSet)
@@ -578,8 +570,17 @@ func (f *Font_VK) SetColor(red float32, green float32, blue float32, alpha float
 	return
 }
 
+// SetBlending sets how Printf blends the text when blending is on.
+func (f *Font_VK) SetBlending(eq BlendEquation, src, dst BlendFunc) {
+	f.blendEq, f.blendSrc, f.blendDst = eq, src, dst
+}
+
 func (f *Font_VK) SetPalFX(state ShaderPalFX) {
 	f.shaderPalFX = state
+}
+
+func (f *Font_VK) SetCustomShader(shader CustomShaderRenderData) {
+	f.customShader = shader
 }
 
 func (f *Font_VK) UpdateResolution(windowWidth int, windowHeight int) {
@@ -591,6 +592,16 @@ func (f *Font_VK) UpdateResolution(windowWidth int, windowHeight int) {
 func (f *Font_VK) Printf(x, y float32, xscl, yscl float32, spacingXAdd float32, align int32, blend bool, window [4]int32,
 	rxadd float32, rot Rotation, projectionMode int32, fLength float32, rcx, rcy float32,
 	fs string, argv ...interface{}) error {
+	if f.customShader.name != "" {
+		r := gfx.(*Renderer_VK)
+		if id, ok := r.customShaderMap[f.customShader.name]; ok {
+			if _, ok := r.customPrograms[id]; ok {
+				return f.printfCustom(x, y, xscl, yscl, spacingXAdd, align, blend, window,
+					rxadd, rot, projectionMode, fLength, rcx, rcy, fs, argv...)
+			}
+		}
+	}
+
 	r := gfx.(*Renderer_VK)
 	switchedProgram := r.VKState.boundProgram != gfxFont.(*FontRenderer_VK).program
 	r.VKState.boundProgram = gfxFont.(*FontRenderer_VK).program
@@ -608,7 +619,7 @@ func (f *Font_VK) Printf(x, y float32, xscl, yscl float32, spacingXAdd float32, 
 	//setup blending mode
 	pipelineIndex := 0
 	if blend {
-		pipelineIndex = 1
+		pipelineIndex = gfxFont.(*FontRenderer_VK).program.pipelineIndexMap[VulkanBlendState{op: f.blendEq, src: f.blendSrc, dst: f.blendDst}]
 	}
 	pipeline := gfxFont.(*FontRenderer_VK).program.pipelines[pipelineIndex]
 	if switchedProgram || pipeline != r.VKState.currentPipeline {
@@ -758,6 +769,134 @@ func (f *Font_VK) Printf(x, y float32, xscl, yscl float32, spacingXAdd float32, 
 	if numVerticesToDraw > 0 {
 		vk.CmdDraw(r.commandBuffers[0], numVerticesToDraw, 1, firstVertex, 0)
 	}
+	return nil
+}
+
+// printfCustom draws text through the sprite pipeline using a custom shader, instead of the font pipeline
+func (f *Font_VK) printfCustom(x, y float32, xscl, yscl float32, spacingXAdd float32, align int32,
+	blend bool, window [4]int32, rxadd float32, rot Rotation, projectionMode int32, fLength float32,
+	rcx, rcy float32, fs string, argv ...interface{}) error {
+
+	text := fmt.Sprintf(fs, argv...)
+	indices := []rune(text)
+	if len(indices) == 0 {
+		return nil
+	}
+
+	// Palette that turns the atlas coverage (index 0-255) into white with that alpha
+	fr := gfxFont.(*FontRenderer_VK)
+	if fr.coveragePalTex == nil {
+		pal := make([]uint32, 256)
+		for i := range pal {
+			pal[i] = 0x00FFFFFF | uint32(i)<<24
+		}
+		fr.coveragePalTex = NewTextureFromPalette(pal)
+	}
+
+	// Must come before anything that depends on the current program (e.g. the param push constants)
+	gfx.SetSpritePipeline(f.customShader.name)
+
+	if blend {
+		gfx.EnableBlending(f.blendEq, f.blendSrc, f.blendDst)
+	} else {
+		gfx.DisableBlending()
+	}
+	gfx.EnableScissor(window[0], window[1], window[2], window[3])
+
+	// Same projection as the GL branch: origin at the top, Y going down
+	resW, resH := float32(f.resolution[0]), float32(f.resolution[1])
+	proj := gfx.OrthographicProjectionMatrix(0, resW, resH, 0, -1, 1)
+	identity := [16]float32{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1}
+	gfx.SetUniformMatrix("projection", proj[:])
+	gfx.SetUniformMatrix("modelview", identity[:])
+	gfx.SetUniformF("x1x2x4x3", 0, 0, 0, 0)
+
+	gfx.SetUniformI("isFlat", 0)
+	gfx.SetUniformI("isRgba", 0) // Atlas is 8-bit: go through the palette path
+	gfx.SetTexture("pal", fr.coveragePalTex)
+	gfx.SetUniformI("mask", 0)
+	gfx.SetUniformI("isTrapez", 0)
+	gfx.SetUniformI("neg", int(Btoi(f.shaderPalFX.neg)))
+	gfx.SetUniformF("alpha", f.color.a)
+	gfx.SetUniformFv("add", f.shaderPalFX.add[:])
+	mult := [3]float32{
+		f.shaderPalFX.mult[0] * f.color.r,
+		f.shaderPalFX.mult[1] * f.color.g,
+		f.shaderPalFX.mult[2] * f.color.b,
+	}
+	gfx.SetUniformFv("mult", mult[:])
+	gfx.SetUniformF("gray", f.shaderPalFX.gray)
+	gfx.SetUniformF("hue", f.shaderPalFX.hue)
+	gfx.SetUniformFv("tint", []float32{0, 0, 0, 0})
+	if f.customShader.tex1 != nil {
+		gfx.SetTexture("tex1", f.customShader.tex1)
+	}
+	if f.customShader.tex2 != nil {
+		gfx.SetTexture("tex2", f.customShader.tex2)
+	}
+	f.customShader.setUniforms()
+
+	alignScale := xscl
+	if alignScale == 0 {
+		alignScale = yscl
+	}
+	if align == 0 {
+		x -= f.widthRunes(indices, alignScale, spacingXAdd) * 0.5
+	} else if align < 0 {
+		x -= f.widthRunes(indices, alignScale, spacingXAdd)
+	}
+	needsTransform := rxadd != 0 || !rot.IsZero()
+	spacing := spacingXAdd * xscl
+	renderedAny := false
+
+	for _, runeIndex := range indices {
+		ch, ok := f.fontChar[runeIndex]
+		if !ok {
+			low := runeIndex - (runeIndex % 32)
+			f.GenerateGlyphs(low, low+31)
+			ch, ok = f.fontChar[runeIndex]
+		}
+		if !ok {
+			continue
+		}
+
+		if renderedAny {
+			x += spacing
+		}
+
+		xpos := x + float32(ch.bearingH)*xscl
+		ypos := y - float32(ch.height-ch.bearingV)*yscl
+		gw := float32(ch.width) * xscl
+		gh := float32(ch.height) * yscl
+
+		x1, y1 := xpos+gw, ypos
+		x2, y2 := xpos, ypos
+		x3, y3 := xpos, ypos+gh
+		x4, y4 := xpos+gw, ypos+gh
+		if needsTransform {
+			x1, y1, x2, y2, x3, y3, x4, y4 = transformTextQuad(
+				x1, y1, x2, y2, x3, y3, x4, y4,
+				rxadd, rot, projectionMode, fLength, rcx, rcy,
+			)
+		}
+
+		gfx.SetTexture("tex", ch.texture)
+
+		// Triangle strip: top-left, top-right, bottom-left, bottom-right
+		verts := [16]float32{
+			x2, y2, ch.uv[0], ch.uv[1],
+			x1, y1, ch.uv[2], ch.uv[1],
+			x3, y3, ch.uv[0], ch.uv[3],
+			x4, y4, ch.uv[2], ch.uv[3],
+		}
+		gfx.SetVertexData(verts[:]...)
+		gfx.RenderQuad()
+
+		x += float32(ch.advance>>6) * xscl
+		renderedAny = true
+	}
+
+	gfx.DisableScissor()
 	return nil
 }
 
