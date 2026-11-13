@@ -19,7 +19,7 @@ require (
 	github.com/tidwall/gjson v1.20.0
 	github.com/tidwall/sjson v1.2.5
 	github.com/veandco/go-sdl2 v0.5.0-alpha.7.0.20250220045537-7f43f67a3a12
-	github.com/xtaci/kcp-go/v5 v5.7.2
+	github.com/xtaci/kcp-go/v5 v5.7.5
 	github.com/yuin/gopher-lua v1.1.2
 	golang.org/x/exp v0.0.0-20220609121020-a51bd0440498
 	golang.org/x/image v0.47.0
@@ -35,11 +35,14 @@ require (
 	github.com/icza/bitio v1.1.0 // indirect
 	github.com/jfreymuth/oggvorbis v1.0.5 // indirect
 	github.com/jfreymuth/vorbis v1.0.2 // indirect
+	github.com/juju/ratelimit v1.0.2 // indirect
 	github.com/klauspost/cpuid/v2 v2.4.1 // indirect
 	github.com/klauspost/reedsolomon v1.14.2 // indirect
+	github.com/kr/pretty v0.3.1 // indirect
 	github.com/lucasb-eyer/go-colorful v1.2.0 // indirect
 	github.com/mewkiz/flac v1.0.12 // indirect
 	github.com/mewkiz/pkg v0.0.0-20230226050401-4010bf0fec14 // indirect
+	github.com/pion/transport/v5 v5.1.4 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/samhocevar/go-meltysynth v0.0.0-20230403180939-aca4a036cb16 // indirect
 	github.com/tidwall/match v1.1.1 // indirect
@@ -47,7 +50,6 @@ require (
 	github.com/tjfoc/gmsm v1.4.1 // indirect
 	golang.org/x/crypto v0.58.0 // indirect
 	golang.org/x/net v0.61.0 // indirect
-	golang.org/x/time v0.16.0 // indirect
 )
 
 replace github.com/ikemen-engine/ggpo => ./third_party/ggpo
