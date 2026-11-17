@@ -94,7 +94,6 @@ jobs:
         shell: bash
         env:
           CGO_ENABLED: "1"
-          GOEXPERIMENT: "arenas"
           APP_VERSION: checks
         run: ./build/build.sh Linux
 
@@ -105,7 +104,6 @@ jobs:
         shell: bash
         env:
           CGO_ENABLED: "1"
-          GOEXPERIMENT: "arenas"
         run: |
           export PKG_CONFIG_PATH="$PWD/build/ffmpeg/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
           export LD_LIBRARY_PATH="$PWD/build/ffmpeg/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
