@@ -2067,7 +2067,7 @@ func SetAnim(obj interface{}, fVal, structVal, parent reflect.Value, sffOverride
 	}
 	if fv, ok := get("Window"); ok && fv.Kind() == reflect.Array && fv.Len() == 4 {
 		for k := 0; k < 4; k++ {
-			window[k] = float32(fv.Index(k).Int())
+			window[k] = numberAsFloat32(fv.Index(k))
 		}
 	}
 	if fv, ok := get("Localcoord"); ok && fv.Kind() == reflect.Array && fv.Len() == 2 {
@@ -2291,13 +2291,13 @@ func SetTextSprite(obj interface{}, fVal, structVal, parent reflect.Value) {
 	}
 	if fv, ok := get("Window"); ok && fv.Kind() == reflect.Array && fv.Len() == 4 {
 		for k := 0; k < 4; k++ {
-			window[k] = float32(fv.Index(k).Int())
+			window[k] = numberAsFloat32(fv.Index(k))
 		}
 	}
 	// Some callers use a dedicated TextWindow field; let it override Window.
 	if fv, ok := get("TextWindow"); ok && fv.Kind() == reflect.Array && fv.Len() == 4 {
 		for k := 0; k < 4; k++ {
-			window[k] = float32(fv.Index(k).Int())
+			window[k] = numberAsFloat32(fv.Index(k))
 		}
 	}
 	if fv, ok := get("Localcoord"); ok && fv.Kind() == reflect.Array && fv.Len() == 2 {
@@ -2541,7 +2541,7 @@ func SetRect(obj interface{}, fVal, structVal, parent reflect.Value) {
 	}
 	if fv, ok := get("Window"); ok && fv.Kind() == reflect.Array && fv.Len() == 4 {
 		for k := 0; k < 4; k++ {
-			window[k] = float32(fv.Index(k).Int())
+			window[k] = numberAsFloat32(fv.Index(k))
 		}
 	}
 	for _, name := range []string{"Col", "ClearColor", "BgClearColor"} {
@@ -3177,4 +3177,18 @@ func resolveInlineFonts(iniFile *ini.File, baseDef string, fnt map[int]*Fnt, ind
 			_ = setValueUpdate(secPath+"."+keyPath, newVal)
 		}
 	}
+}
+
+// numberAsFloat32 reads an integer or float reflect value (a screenpack
+// array may hold either); Int() alone panics on a float.
+func numberAsFloat32(v reflect.Value) float32 {
+	switch {
+	case v.CanInt():
+		return float32(v.Int())
+	case v.CanUint():
+		return float32(v.Uint())
+	case v.CanFloat():
+		return float32(v.Float())
+	}
+	return 0
 }
