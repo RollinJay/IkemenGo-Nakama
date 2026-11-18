@@ -2293,7 +2293,9 @@ func (s *System) synchronizeNetplayConfig(nc *NetConnection) (*ReplayHeader, err
 		}
 		// Only the localhost guest uses an automatic port: the host retains
 		// its configured port, and remote peers retain their forwarding setup.
-		remoteIP := nc.conn.RemoteAddr().(*net.TCPAddr).IP
+		// The fork's online sessions run over the Nakama P2P link, whose
+		// address is a *net.UDPAddr: a direct connection's is a *net.TCPAddr.
+		remoteIP := addrIP(nc.conn.RemoteAddr())
 		if remoteIP.To4() != nil && remoteIP.IsLoopback() && localRollbackPort == hostPayload.RollbackPort {
 			localRollbackPort, err = pickLoopbackRollbackPort(hostPayload.RollbackPort)
 			if err != nil {
@@ -2339,4 +2341,21 @@ func (s *System) beginReplaySession(rf *ReplayFile) error {
 	}
 	log.Printf("Replay strict compatibility check: OK")
 	return s.beginSessionOverride("replay", rf.strictSettings, rf.hostSettings, rf.contentFingerprint)
+}
+
+// addrIP is the IP of a connection's address, whatever kind it is (TCP for
+// a direct connection, UDP for the Nakama P2P link); nil when it has none.
+func addrIP(addr net.Addr) net.IP {
+	switch a := addr.(type) {
+	case *net.TCPAddr:
+		return a.IP
+	case *net.UDPAddr:
+		return a.IP
+	case nil:
+		return nil
+	}
+	if host, _, err := net.SplitHostPort(addr.String()); err == nil {
+		return net.ParseIP(host)
+	}
+	return nil
 }
