@@ -1,15 +1,19 @@
 #!/bin/sh
-# Keeps a DuckDNS name pointing at this network's public IP address, so the
-# community's games still find the server after your ISP changes the address.
+# Keeps DuckDNS names pointing at this network's public IP address, so the
+# community's games still find the servers after your ISP changes the address.
 #
-# Put the name (without .duckdns.org) and your token from https://www.duckdns.org
-# in ddns/duckdns.env next to this script, and make it readable only by you
+# The names are every server's public name that ends in .duckdns.org
+# (PUBLIC_HOST in servers/<id>.env, which set-public-host.sh saves), and any
+# more in DUCKDNS_DOMAIN. Put your token from https://www.duckdns.org in
+# ddns/duckdns.env next to this script, and make it readable only by you
 # (chmod 600 ddns/duckdns.env):
-#   DUCKDNS_DOMAIN=mygame
 #   DUCKDNS_TOKEN=<your token>
-# Then run this script once; the <id>-duckdns timer (install-services.sh) runs it every 5 minutes.
+#   DUCKDNS_DOMAIN=othername,another     (optional, without .duckdns.org)
+# Then run this script once; the <KIT_ID>-duckdns timer (install-services.sh)
+# runs it every 5 minutes. All the names go in one request.
 set -e
 HERE=$(CDPATH= cd -- "$(dirname -- "$(readlink -f -- "$0")")" && pwd)
+KIT=$(dirname -- "$HERE")
 ENV_FILE="$HERE/duckdns.env"
 if [ ! -r "$ENV_FILE" ]; then
 	echo "missing $ENV_FILE (see the top of this script)" >&2
@@ -17,19 +21,32 @@ if [ ! -r "$ENV_FILE" ]; then
 fi
 # The last line for each name wins; surrounding quotes and spaces are dropped.
 value() {
-	sed -n "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*//p" "$ENV_FILE" | tail -n 1 |
+	sed -n "s/^[[:space:]]*$2[[:space:]]*=[[:space:]]*//p" "$1" | tail -n 1 |
 		tr -d '\r' | sed -e 's/[[:space:]]*$//' -e "s/^['\"]//" -e "s/['\"]\$//"
 }
-DUCKDNS_DOMAIN=$(value DUCKDNS_DOMAIN)
-DUCKDNS_TOKEN=$(value DUCKDNS_TOKEN)
-DUCKDNS_DOMAIN=${DUCKDNS_DOMAIN%.duckdns.org}
-if [ -z "$DUCKDNS_DOMAIN" ] || [ -z "$DUCKDNS_TOKEN" ]; then
-	echo "$ENV_FILE needs DUCKDNS_DOMAIN and DUCKDNS_TOKEN" >&2
+DUCKDNS_TOKEN=$(value "$ENV_FILE" DUCKDNS_TOKEN)
+
+# DuckDNS updates its own names: the label just before .duckdns.org
+# (play.mygame.duckdns.org is mygame's).
+names=$(
+	{
+		value "$ENV_FILE" DUCKDNS_DOMAIN | tr ', ' '\n\n' | sed -e '/^$/d' -e '/\.duckdns\.org$/!s/$/.duckdns.org/'
+		for file in "$KIT"/servers/*.env; do
+			if [ -f "$file" ]; then
+				value "$file" PUBLIC_HOST
+				echo
+			fi
+		done
+	} | tr 'A-Z' 'a-z' | sed -n 's/^\(.*\.\)\{0,1\}\([^.][^.]*\)\.duckdns\.org$/\2/p' | LC_ALL=C sort -u
+)
+domains=$(printf '%s' "$names" | tr '\n' ',')
+if [ -z "$domains" ] || [ -z "$DUCKDNS_TOKEN" ]; then
+	echo "$ENV_FILE needs DUCKDNS_TOKEN, and a name: a server's public name ending in .duckdns.org, or DUCKDNS_DOMAIN" >&2
 	exit 2
 fi
-case $DUCKDNS_DOMAIN$DUCKDNS_TOKEN in
-	*[!A-Za-z0-9.-]*)
-		echo "$ENV_FILE: the name and token are letters, digits, dots and dashes only" >&2
+case $domains$DUCKDNS_TOKEN in
+	*[!A-Za-z0-9,-]*)
+		echo "$ENV_FILE: the names and token are letters, digits and dashes only (names: $domains)" >&2
 		exit 2
 		;;
 esac
@@ -38,9 +55,9 @@ esac
 # input, so the token does not show in the process list. An empty ip= lets
 # DuckDNS use the address the request comes from.
 answer=$(printf 'url = "https://www.duckdns.org/update?domains=%s&token=%s&ip="\n' \
-	"$DUCKDNS_DOMAIN" "$DUCKDNS_TOKEN" | curl -fsS --max-time 30 --config -)
+	"$domains" "$DUCKDNS_TOKEN" | curl -fsS --max-time 30 --config -)
 if [ "$answer" != OK ]; then
-	echo "DuckDNS did not update $DUCKDNS_DOMAIN.duckdns.org (answer: $answer)" >&2
+	echo "DuckDNS did not update $domains (answer: $answer)" >&2
 	exit 1
 fi
-echo "$DUCKDNS_DOMAIN.duckdns.org points at this network's address"
+echo "$(printf '%s\n' "$names" | sed 's/$/.duckdns.org/' | tr '\n' ' ')point at this network's address"

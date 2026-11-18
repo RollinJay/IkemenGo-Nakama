@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """Builds the zip you share with your players from the game folder.
 
-    python3 package-game-zip.py [game folder] [zip file]
-    python3 package-game-zip.py --android <ikemen-go.apk> [game folder] [zip file]
+    python3 package-game-zip.py [--server <id>] [game folder] [zip file]
+    python3 package-game-zip.py [--server <id>] --android <ikemen-go.apk> [game folder] [zip file]
 
-The game folder is settings.env's GAME_DIR unless given. Without --android:
-dist/<build>.zip, the game for Windows, Linux and macOS, which unpacks to a
-folder named after the build in the folder's data/online/servers.json.
+The server is the one --server names (servers/<id>.env), which may be left
+out with a single server; the game folder is that server's GAME_DIR unless
+given. Without --android: dist/<build>.zip, the game for Windows, Linux and
+macOS, which unpacks to a folder named after the build of the server's
+profile in the folder's data/online/servers.json.
 
 With --android: dist/<build>-Android.zip, holding the fork's Android app (the
 APK given), the game folder without the desktop programs and libraries (whose
@@ -17,7 +19,8 @@ folder's, so the zip is refused for an app whose scripts, or engine, are not
 the game folder's.
 
 Both leave out this PC's own online account and other per-PC data, and refuse
-to build while the server profile does not name the public server:
+to build while the server's profile, or the default one, does not name a
+public server:
 - save/nakama_device_id is the sign-in of this copy of the game. Shared, every
   player would sign in as the same account (yours).
 - save/ranked_pending.json, save/stats.json, logs, replays, the CBR AI's
@@ -31,6 +34,7 @@ import fnmatch
 import json
 import os
 import re
+import subprocess
 import sys
 import time
 import zipfile
@@ -100,26 +104,69 @@ def extra_excludes():
         return []
 
 
-def default_server(game_dir):
+def server_ids():
+    folder = os.path.join(HERE, "servers")
+    try:
+        names = os.listdir(folder)
+    except OSError:
+        return []
+    return sorted(n[:-4] for n in names if n.endswith(".env")
+                  and re.fullmatch(r"[a-z0-9][a-z0-9-]*", n[:-4])
+                  and os.path.isfile(os.path.join(folder, n)))
+
+
+def upgrade_kit():
+    """A folder set up for a single server becomes the one for several first,
+    as the scripts do it (settings.sh)."""
+    if read_env(os.path.join(HERE, "settings.env")).get("SERVER_ID"):
+        if subprocess.run([os.path.join(HERE, "upgrade-kit.sh")], stdout=sys.stderr).returncode:
+            sys.exit("upgrade-kit.sh failed")
+
+
+def pick_server(wanted):
+    ids = server_ids()
+    if wanted:
+        if wanted not in ids:
+            sys.exit(f"there is no server {wanted!r} here; the servers: {' '.join(ids) or 'none'}")
+        return wanted
+    if len(ids) == 1:
+        return ids[0]
+    if not ids:
+        sys.exit("there is no server yet: ./add-server.sh <id> creates one")
+    sys.exit(f"name the server with --server, one of: {' '.join(ids)}")
+
+
+def is_public(host):
+    return not (not host or host.endswith(".invalid") or host.endswith("example.com")
+                or host.endswith("example.org") or host in ("localhost", "127.0.0.1", "::1"))
+
+
+def server_profile(game_dir, server_id, public_host, strict):
+    """The server's profile in the game folder (by its id), or the default one."""
     path = os.path.join(game_dir, "data", "online", "servers.json")
     with open(path, encoding="utf-8") as f:
         profiles = json.load(f)
     default = profiles.get("default")
     servers = {s.get("id"): s for s in profiles.get("servers", [])}
-    server = servers.get(default)
-    if server is None:
+    if servers.get(default) is None:
         sys.exit(f"{path}: no profile named by default ({default!r})")
-    host = str(server.get("host", "")).strip().lower()
-    if (not host or host.endswith(".invalid") or host.endswith("example.com")
-            or host.endswith("example.org") or host in ("localhost", "127.0.0.1", "::1")):
-        sys.exit(f"{path}: the server profile names {host!r}, not the public "
+    host = str(servers[default].get("host", "")).strip().lower()
+    if not is_public(host):
+        sys.exit(f"{path}: the default profile ({default}) names {host!r}, not a public "
                  "server; run set-public-host.sh first")
-    # The name Caddy serves, when this folder's Caddy is set up.
-    served = [v.strip() for k, v in read_env(os.path.join(HERE, "caddy", "public-host.env")).items()
-              if k == "PUBLIC_HOST" or k.endswith("_PUBLIC_HOST")]
-    if served and served[-1].lower() != host:
-        sys.exit(f"{path} names {host!r} but Caddy serves {served[-1]!r}: "
-                 "run set-public-host.sh again")
+    server = servers.get(server_id or default)
+    if server is None and not strict:
+        server_id, public_host, server = None, None, servers[default]
+    if server is None:
+        sys.exit(f"{path} has no profile {server_id}: run ./set-public-host.sh {server_id} <public name> first")
+    host = str(server.get("host", "")).strip().lower()
+    if not is_public(host):
+        sys.exit(f"{path}: the profile {server.get('id')} names {host!r}, not the public "
+                 "server; run set-public-host.sh first")
+    # The name Caddy serves, when this folder's Caddy is set up for it.
+    if public_host and public_host.lower() != host:
+        sys.exit(f"{path} names {host!r} for {server.get('id')}, but Caddy serves "
+                 f"{public_host!r}: run set-public-host.sh again")
     build = str(server.get("build", ""))
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", build):
         sys.exit(f"{path}: the build {build!r} cannot name the zip")
@@ -186,12 +233,33 @@ def main():
             sys.exit("--android needs the APK: --android <ikemen-go.apk>")
         apk = os.path.realpath(args[i + 1])
         del args[i:i + 2]
+    wanted = None
+    if "--server" in args:
+        i = args.index("--server")
+        if i + 1 >= len(args):
+            sys.exit("--server needs the server's id: --server <id>")
+        wanted = args[i + 1]
+        del args[i:i + 2]
+    upgrade_kit()
     settings = read_env(os.path.join(HERE, "settings.env"))
-    game_dir = args[0] if args else settings.get("GAME_DIR", "")
+    server_id = pick_server(wanted) if (wanted or not args) else (
+        server_ids()[0] if len(server_ids()) == 1 else None)
+    mine = read_env(os.path.join(HERE, "servers", f"{server_id}.env")) if server_id else {}
+    game_dir = args[0] if args else mine.get("GAME_DIR", "")
     if not game_dir:
-        sys.exit("no game folder: set GAME_DIR= in settings.env, or give it as the argument")
+        sys.exit(f"no game folder: set GAME_DIR= in servers/{server_id}.env, "
+                 "or give it as the argument")
     game_dir = os.path.realpath(game_dir)
-    server = default_server(game_dir)
+    # The name Caddy serves for the server: its site's first word.
+    public_host = None
+    try:
+        if not server_id:
+            raise OSError
+        with open(os.path.join(HERE, "caddy", "sites", f"{server_id}.caddy"), encoding="utf-8") as f:
+            public_host = (f.readline().split() or [None])[0]
+    except OSError:
+        pass
+    server = server_profile(game_dir, server_id, public_host, strict=bool(wanted or not args))
     check_config(game_dir)
     android = apk is not None
     if android:
@@ -258,7 +326,8 @@ def main():
                 z.write(apk, f"{name}/ikemen-go.apk")
                 readme = zipfile.ZipInfo(f"{name}/READ ME - ANDROID.txt", time.localtime()[:6])
                 readme.external_attr = 0o644 << 16
-                title = settings.get("TITLE", "").strip() or build
+                title = (mine.get("TITLE", "").strip() or settings.get("TITLE", "").strip()
+                         or build)
                 z.writestr(readme, ANDROID_README.format(title=title, build=build)
                            .replace("\n", "\r\n"))
                 count += 2

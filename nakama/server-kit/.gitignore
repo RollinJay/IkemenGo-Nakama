@@ -2,11 +2,17 @@
 # DuckDNS token, the certificates' keys, the database, your settings and the
 # programs.
 /settings.env
+/settings.env.before-upgrade
+/servers/
 /config/
-/host-profile.json
-/caddy/public-host.env
+/host-profiles/
+/caddy/sites/
 /caddy/data/
 /ddns/duckdns.env
 /programs/
 /downloads/
 /dist/
+/.set-public-host.*
+# Older copies of the kit (one server) wrote these; upgrade-kit.sh moves them.
+/host-profile.json
+/caddy/public-host.env

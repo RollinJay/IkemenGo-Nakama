@@ -1,13 +1,18 @@
-# HTTPS in front of the Nakama server.
+# HTTPS in front of the Nakama servers.
 #
-# Players' games connect to https://PUBLIC_HOST:443. The router forwards
+# Players' games connect to https://<public name>:443. The router forwards
 # public port 443 to this PC's port 8443, so Caddy runs without root. Caddy
-# gets the certificate from Let's Encrypt through that same port (its
+# gets each name's certificate from Let's Encrypt through that same port (its
 # TLS-ALPN check) and passes the requests, and the game's WebSocket, on to
-# Nakama, which listens on 127.0.0.1:7350 only.
+# that server's Nakama, which listens on 127.0.0.1 only. One Caddy serves
+# every server of this folder, each under its own name.
 #
-# PUBLIC_HOST comes from public-host.env (set-public-host.sh writes it), and
-# SERVER_KIT is this folder (run-caddy.sh sets both).
+# set-public-host.sh writes one site per server, sites/<id>.caddy:
+#   mygame.duckdns.org {
+#   	import nakama
+#   	reverse_proxy 127.0.0.1:7350
+#   }
+# SERVER_KIT is this folder (run-caddy.sh sets it).
 {
 	http_port 8080
 	https_port 8443
@@ -28,9 +33,10 @@
 	}
 }
 
-{$PUBLIC_HOST} {
+# What every site does before passing a request on.
+(nakama) {
 	# Nakama's http_key lets a caller act as the server (the moderators'
-	# RPCs). Only programs on this PC use it, and they call 127.0.0.1:7350
+	# RPCs). Only programs on this PC use it, and they call 127.0.0.1
 	# directly, so refuse it from the internet even if it ever leaks. Nakama
 	# reads it from the query string, parsed as leniently as {query.*} parses
 	# it, and from Basic auth on RPC calls; the game signs in with Basic auth
@@ -42,6 +48,6 @@
 		header_regexp Authorization (?i)^\s*basic\s
 	}
 	respond @rpc_basic 403
-
-	reverse_proxy 127.0.0.1:7350
 }
+
+import sites/*.caddy
