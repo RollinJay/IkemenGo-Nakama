@@ -163,7 +163,10 @@ var rp = replayManager{
 
 // check if conditions are valid for extended replay features
 func replayMatchValid() bool {
-	return sys.replayFile != nil && sys.replayFile.file != nil &&
+	// Replays played from files only: a live watched stream (liveBuffer) only
+	// has the frames published so far, and replay_live.go's catch-up and stall
+	// handling own its playback.
+	return sys.replayFile != nil && sys.replayFile.file != nil && sys.replayFile.liveBuffer == nil &&
 		sys.gameRunning && !sys.postMatchFlg && !sys.fightLoopEnd &&
 		!sys.endMatch && !sys.matchOver() &&
 		sys.stage != nil && sys.rollback.session == nil && sys.netConnection == nil &&
