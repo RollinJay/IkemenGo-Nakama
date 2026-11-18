@@ -3153,6 +3153,11 @@ func (s *System) runIntroSkip() {
 		return
 	}
 
+	// Training mode can skip intros right away, without waiting for a button or the shutter
+	if s.gameMode == "training" && s.cfg.Config.TrainingSkipIntros {
+		s.introSkipCall = true
+	}
+
 	// Start shutter effect on button press
 	if s.fightScreen.round.shutterTimer == 0 && s.anyButton() {
 		s.fightScreen.round.shutterTimer = s.fightScreen.round.shutter_time * 2 // Open + close time

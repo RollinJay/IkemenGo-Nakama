@@ -129,6 +129,9 @@ type Config struct {
 
 		// Save local versus matches as match replays (external/script/replay.lua).
 		LocalVersusReplays bool `ini:"LocalVersusReplays"`
+
+		// Skip character intros automatically in training mode.
+		TrainingSkipIntros bool `ini:"TrainingSkipIntros"`
 	} `ini:"Config"`
 	Debug struct {
 		AllowDebugMode      bool    `ini:"AllowDebugMode"`
