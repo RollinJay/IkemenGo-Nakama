@@ -3235,6 +3235,29 @@ func (p *Projectile) tick() {
 			p.freezeflag = true // This flag makes projectiles halt in place between multiple hits
 		}
 	}
+
+}
+
+// Step the projectile's animation. Chars and explods do this in game logic too.
+// It used to happen in cueDraw, which rollback re-simulation and frame skipping don't run,
+// so after a rollback a projectile's animation (its Clsn boxes and AnimTime) fell behind
+// and hits could differ between peers. System.action calls this after globalTick,
+// where cueDraw used to run, so the timing is unchanged.
+func (p *Projectile) stepAnim() {
+	if p.anim == nil || p.root().scf(SCF_disabled) {
+		return
+	}
+	if p.hitpause > 0 || p.pauseBool {
+		return
+	}
+	// TODO: Gating UpdateSprite() during pauses makes it go out of sync with the animation data
+	// In the case of projectiles this can be seen with Clsn display
+	if sys.tickFrame() {
+		p.anim.UpdateSprite()
+	}
+	if sys.tickNextFrame() {
+		p.anim.Action()
+	}
 }
 
 func (p *Projectile) cueDraw() {
@@ -3247,12 +3270,6 @@ func (p *Projectile) cueDraw() {
 	}
 
 	isPaused := p.hitpause > 0 || p.pauseBool
-
-	// TODO: Gating UpdateSprite() during pauses makes it go out of sync with the animation data
-	// In the case of projectiles this can be seen with Clsn display
-	if !isPaused && sys.tickFrame() {
-		p.anim.UpdateSprite()
-	}
 
 	// Projectile Clsn display
 	if sys.clsnDisplay {
@@ -3268,10 +3285,6 @@ func (p *Projectile) cueDraw() {
 				sys.debugc2hb.Add(boxes2, p.pos[0]*p.localscl, p.pos[1]*p.localscl, p.facing)
 			}
 		}
-	}
-
-	if sys.tickNextFrame() && !isPaused {
-		p.anim.Action() // TODO: Placing this in cueDraw is a bit unusual. Confirm if it's right
 	}
 
 	// Set position

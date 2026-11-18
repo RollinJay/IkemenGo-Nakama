@@ -3339,6 +3339,12 @@ func (s *System) action() {
 		cbrFrame()
 	}
 
+	for i := range s.projs {
+		for _, p := range s.projs[i] {
+			p.stepAnim()
+		}
+	}
+
 	// Run camera
 	x, y, scl = s.cam.action(x, y, scl, s.supertime > 0 || s.pausetime > 0)
 
