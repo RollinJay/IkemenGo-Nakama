@@ -21,11 +21,10 @@ require (
 	github.com/veandco/go-sdl2 v0.5.0-alpha.7.0.20250220045537-7f43f67a3a12
 	github.com/xtaci/kcp-go/v5 v5.7.2
 	github.com/yuin/gopher-lua v1.1.2
-	golang.org/x/exp v0.0.0-20220609121020-a51bd0440498
-	golang.org/x/image v0.47.0
-	golang.org/x/mobile v0.0.0-20221110043201-43a038452099
-	golang.org/x/sys v0.49.0
-	golang.org/x/text v0.43.0
+	golang.org/x/image v0.48.0
+	golang.org/x/mobile v0.0.0-20261117202452-47699113848a
+	golang.org/x/sys v0.50.0
+	golang.org/x/text v0.44.0
 	gopkg.in/ini.v1 v1.67.3
 )
 
@@ -46,6 +45,7 @@ require (
 	github.com/tidwall/pretty v1.2.0 // indirect
 	github.com/tjfoc/gmsm v1.4.1 // indirect
 	golang.org/x/crypto v0.58.0 // indirect
+	golang.org/x/exp v0.0.0-20261117202309-7a49493bfd90 // indirect
 	golang.org/x/net v0.61.0 // indirect
 	golang.org/x/time v0.16.0 // indirect
 )
