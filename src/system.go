@@ -1023,7 +1023,7 @@ func (s *System) renderFrame() {
 			return
 		}
 		x, y, scl := s.cam.Pos[0], s.cam.Pos[1], s.cam.Scale/s.cam.BaseScale()
-		dx, dy, dscl := s.zoom.computeCamera(x, y, scl)
+		dx, dy, dscl := s.zoom.drawCamera(x, y, scl)
 		s.draw(dx, dy, dscl)
 		s.luaFlushDrawQueue()
 		s.fightScreen.drawFade()
@@ -1062,7 +1062,7 @@ func (s *System) renderFrame() {
 		s.drawNakamaSpectatorLoading()
 	} else {
 		x, y, scl := s.cam.Pos[0], s.cam.Pos[1], s.cam.Scale/s.cam.BaseScale()
-		dx, dy, dscl := s.zoom.computeCamera(x, y, scl)
+		dx, dy, dscl := s.zoom.drawCamera(x, y, scl)
 		s.draw(dx, dy, dscl)
 		s.luaFlushDrawQueue()
 		s.fightScreen.drawFade()
@@ -3363,6 +3363,10 @@ func (s *System) action() {
 		x = float32(math.Ceil(float64(x)*4-0.5) / 4)
 	}
 	s.cam.Update(scl, x, y)
+	// The zoomed camera is game state: ScreenPos triggers read it, and its smoothing carries
+	// over between frames. Compute it here, in logic, so rollback re-simulation (which doesn't
+	// draw) gets the same values. Drawing reads the result with drawCamera.
+	s.zoom.computeCamera(s.cam.Pos[0], s.cam.Pos[1], s.cam.Scale/s.cam.BaseScale())
 	s.xmin = s.cam.ScreenPos[0] + s.cam.Offset[0] + s.screenleft()
 	s.xmax = s.cam.ScreenPos[0] + s.cam.Offset[0] + float32(s.gameWidth)/s.cam.Scale - s.screenright()
 	if s.xmin > s.xmax {
@@ -7454,7 +7458,16 @@ func (z *ZoomEffect) update() {
 	}
 }
 
-// Compute the camera position and scale used for sys.draw()
+// The camera position and scale for sys.draw(). An active zoom uses what System.action
+// computed this frame: recomputing here would step the zoom's smoothing again outside game logic.
+func (z *ZoomEffect) drawCamera(x, y, scl float32) (dx, dy, dscl float32) {
+	if !z.active {
+		return x, y, scl
+	}
+	return z.resultPos[0], z.resultPos[1], z.resultScale
+}
+
+// Compute the camera position and scale used for sys.draw(). Called from System.action.
 func (z *ZoomEffect) computeCamera(x, y, scl float32) (dx, dy, dscl float32) {
 	dx, dy, dscl = x, y, scl
 
