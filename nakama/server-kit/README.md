@@ -15,16 +15,19 @@ libadwaita. On Windows, the fork's own launcher is the way for now
 
 | File | What it does |
 |---|---|
-| `settings.env.example` | copy it to `settings.env`: the server's id, the game folder, the game id, build and region, where the programs are |
+| `settings.env.example` | copy it to `settings.env`: the folder's id (`KIT_ID`, the name of the shared services), the window's title, where the programs are |
+| `add-server.sh` | adds a server: its own ports, database and `servers/<id>.env` (title, game folder, game id, build, region) |
+| `remove-server.sh` | removes a server, its service, its public name and its profile in the game folder; `--delete-data` also deletes its database |
 | `server.sh` | runs Nakama Matchmaker's `nakama-matchmaker-server` with this folder's `config/` |
-| `set-public-host.sh` | sets the public name in the game folder's `data/online/servers.json`, in `host-profile.json`, in the server and in Caddy |
-| `run-caddy.sh`, `caddy/Caddyfile` | HTTPS in front of the server, with a free Let's Encrypt certificate |
-| `ddns/duckdns-update.sh` | points a DuckDNS name at your home's address (with your name and token in `ddns/duckdns.env`) |
-| `install-services.sh` | installs the services `<id>-server`, `<id>-caddy` and `<id>-duckdns`, and the window in the app menu; `--remove` removes them |
-| `server-control.py` | the window: the services, the public name, build and DuckDNS, playing on this PC, the logs |
-| `play-on-this-pc.sh` | starts the game signed in to the server directly (127.0.0.1:7350), with `host-profile.json` |
-| `package-game-zip.py` | builds the zip you share, without your own account and other per-PC files; `--android <apk>` builds the Android one |
-| `settings.sh` | how the scripts read `settings.env` |
+| `set-public-host.sh` | sets a server's public name in its game folder's `data/online/servers.json`, in `host-profiles/<id>.json`, in the server and in Caddy |
+| `run-caddy.sh`, `caddy/Caddyfile` | HTTPS in front of every server, with free Let's Encrypt certificates; each server's site is `caddy/sites/<id>.caddy` |
+| `ddns/duckdns-update.sh` | points every server's DuckDNS name at your home's address (token in `ddns/duckdns.env`) |
+| `install-services.sh` | installs a service `<id>-server` per server, the shared `<KIT_ID>-caddy` and `<KIT_ID>-duckdns`, and the window in the app menu; `--remove` removes them |
+| `server-control.py` | the window: every server, its public name, build and region, DuckDNS, playing on this PC, the logs |
+| `play-on-this-pc.sh` | starts the game signed in to a server directly (127.0.0.1), with `host-profiles/<id>.json` |
+| `package-game-zip.py` | builds the zip you share, without your own account and other per-PC files; `--server <id>` picks the server, `--android <apk>` builds the Android one |
+| `upgrade-kit.sh` | turns a folder from the one-server kit into this layout; the other scripts run it when they need to |
+| `settings.sh` | how the scripts read `settings.env` and `servers/*.env` |
 
 ## Setting it up
 
@@ -45,18 +48,19 @@ Run everything as an ordinary user, not root.
    `programs/` here (`programs/matchmaker/bin/nakama-matchmaker-server`,
    `programs/caddy/caddy`), or name them in `settings.env` (`MATCHMAKER=`,
    `CADDY=`).
-4. Make `settings.env` from `settings.env.example`, and fill it in:
+4. Make `settings.env` from `settings.env.example` (it can stay as it is):
    ```bash
    cp settings.env.example settings.env
    ```
-5. Tell the server program where Nakama is, then create the server, with
-   your `SERVER_ID` as its id. Keep Nakama's port 7350: the Caddyfile and
-   `set-public-host.sh` use it.
+5. Tell the server program where Nakama is, then add the server. Its id is
+   lowercase letters, digits and dashes; the first server's id also names the
+   shared services unless `settings.env` sets `KIT_ID`. The ports are picked
+   for you (7350, then 7360, 7370… for more servers).
    ```bash
    ./server.sh programs --nakama ~/server/nakama/nakama
    ```
    ```bash
-   ./server.sh add mygame --kinds ikemen --title "My Game Online" --bind 127.0.0.1 --public-port 443 --client-tls yes
+   ./add-server.sh mygame --title "My Game Online" --game-dir ~/MyGame --build 1.0
    ```
 6. Install the services and the window, and start the server:
    ```bash
@@ -69,12 +73,13 @@ Run everything as an ordinary user, not root.
    ```
 7. Give the server its public name: on the window's **Public name** page, or
    ```bash
-   ./set-public-host.sh mygame.example.org
+   ./set-public-host.sh mygame mygame.example.org
    ```
    It writes the game folder's `data/online/servers.json` and starts Caddy,
    which gets the certificate.
-8. With a DuckDNS name, save its name and token on the same page (or in
+8. With a DuckDNS name, save your token on the same page (or in
    `ddns/duckdns.env`, readable by you alone; see `ddns/duckdns-update.sh`).
+   Every server's public name ending in `.duckdns.org` is updated.
 9. Test it ([hosting.md](../hosting.md), step 9), then build the zip you
    share:
    ```bash
@@ -88,12 +93,15 @@ Run everything as an ordinary user, not root.
 Python 3 with PyGObject, GTK 4 and libadwaita 1.5 or newer; on Debian and
 Ubuntu, `sudo apt install python3-gi gir1.2-gtk-4.0 gir1.2-adw-1`.
 
+The menu at the top left picks the server the pages show; the ☰ menu adds and
+removes servers.
+
 - **Server**: whether the server, Caddy and the DuckDNS updater run and
   answer, with start, stop and restart buttons, and whether they start with
   this PC; what players' games use; Nakama's console (**Password** copies its
   password, **Open** opens it in the browser).
 - **Public name**: the public name, build, game id, region and game folder.
-  **Apply** saves them in `settings.env` and runs `set-public-host.sh`. The
+  **Apply** saves them in `servers/<id>.env` and runs `set-public-host.sh`. The
   DuckDNS name and token go into `ddns/duckdns.env`; the token is never shown.
 - **Play on this PC**: runs `play-on-this-pc.sh`. Many home routers cannot
   reach their own public address from inside the network, so the server's PC
@@ -104,11 +112,30 @@ Ubuntu, `sudo apt install python3-gi gir1.2-gtk-4.0 gir1.2-adw-1`.
 Closing the window leaves the server running. A change on the Public name page
 reaches players only in a new copy of the game: build and share the zip again.
 
+## More than one server
+
+One folder runs as many servers as you like: servers for different games, or
+several for the same game (another build, a test server, another community).
+Each has its own service, ports, database, accounts and ratings.
+
+- Add one with `./add-server.sh <id> ...` or the window's ☰ menu, then give it
+  a public name of its own. Two servers cannot share a name: one Caddy on
+  port 8443 tells them apart by name, so the router still forwards only 443.
+  A free DuckDNS account has five names, all pointing at the same PC.
+- Servers for the same game folder each add their profile to its
+  `data/online/servers.json`; the first one stays the default. Games use the
+  default server unless started with `-nakama-server <id>`.
+- Changing a public name restarts the shared Caddy, which briefly drops every
+  server's connections from the internet.
+- A folder from the one-server kit (`SERVER_ID=` in `settings.env`) is
+  upgraded the first time a script or the window runs; its services keep
+  their names. `settings.env.before-upgrade` keeps the old settings.
+
 ## Day to day
 
 - **A new release** that cannot play the one before it: change the build on
-  the Public name page and Apply (or `BUILD=` in `settings.env`, then
-  `./set-public-host.sh` again), then build and share a new zip. Keep the game
+  the Public name page and Apply (or `BUILD=` in `servers/<id>.env`, then
+  `./set-public-host.sh <id> <name>` again), then build and share a new zip. Keep the game
   id: ratings and leaderboards are kept per game id.
 - **Logs**: the window's Logs page, `journalctl --user -u mygame-server`, or
   `config/servers/mygame/server.log`.

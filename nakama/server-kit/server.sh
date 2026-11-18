@@ -1,10 +1,10 @@
 #!/bin/sh
 # Runs Nakama Matchmaker's server program with this folder's configuration
 # (config/), for example:
-#   ./server.sh add mygame --kinds ikemen ...   create the server (README.md)
-#   ./server.sh show mygame                      what players enter
-#   ./server.sh run mygame                       run it in this terminal
-# The <id>-server service runs "run <id>" through it.
+#   ./server.sh list             the servers (add-server.sh adds them)
+#   ./server.sh show mygame      what players enter
+#   ./server.sh run mygame       run one in this terminal
+# Each server's <id>-server service runs "run <id>" through it.
 HERE=$(CDPATH= cd -- "$(dirname -- "$(readlink -f -- "$0")")" && pwd)
 . "$HERE/settings.sh"
 
