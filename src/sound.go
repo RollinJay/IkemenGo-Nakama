@@ -901,6 +901,12 @@ func (s *Snd) Get(gn [2]int32) *Sound {
 }
 
 func (s *Snd) play(gn [2]int32, volumescale int32, pan float32, loopstart, loopend, startposition int, keepOnMatchEnd ...bool) bool {
+	// A match watched in the lobby's window plays at the window's volume
+	// (watch_window.go); the scripts' own sounds use playUnscaled.
+	return s.playUnscaled(gn, sys.scaleWatchVolume(volumescale), pan, loopstart, loopend, startposition, keepOnMatchEnd...)
+}
+
+func (s *Snd) playUnscaled(gn [2]int32, volumescale int32, pan float32, loopstart, loopend, startposition int, keepOnMatchEnd ...bool) bool {
 	sound := s.Get(gn)
 	if s.restart {
 		sys.soundChannels.Stop(sound)

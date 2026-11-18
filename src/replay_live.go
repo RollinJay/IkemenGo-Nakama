@@ -112,7 +112,7 @@ func (rf *ReplayFile) liveStallLimit() time.Duration {
 func (rf *ReplayFile) liveFail(format string, args ...any) {
 	message := fmt.Sprintf(format, args...)
 	log.Print(message)
-	if sys.esc {
+	if sys.esc || sys.watchStopRequested() {
 		rf.viewerLeft = true
 	} else if rf.failure == "" {
 		rf.failure = message
@@ -191,12 +191,25 @@ func (rf *ReplayFile) waitNextLiveSegment() *NakamaReplayBuffer {
 		if next := sys.nakama.NextReplayBuffer(rf.liveBuffer); next != nil {
 			return next
 		}
-		time.Sleep(50 * time.Millisecond)
-		if !sys.eventUpdate() || sys.esc {
+		if !rf.liveWaitFrame(50 * time.Millisecond) {
 			return nil
 		}
 	}
 	return nil
+}
+
+// liveWaitFrame lets a frame pass while the stream is waited for: the
+// lobby's watch window keeps running and drawn (a frame), a full-screen
+// replay only keeps the window responsive (sleep). It returns false when
+// watching should stop (Esc, stopWatching or the engine closing).
+func (rf *ReplayFile) liveWaitFrame(sleep time.Duration) bool {
+	if sys.watchWindow.active {
+		return sys.watchIdleFrame() && !sys.watchStopRequested()
+	}
+	if sleep > 0 {
+		time.Sleep(sleep)
+	}
+	return sys.eventUpdate() && !sys.esc
 }
 
 func (rf *ReplayFile) liveUpdate() bool {
@@ -204,7 +217,13 @@ func (rf *ReplayFile) liveUpdate() bool {
 		return !sys.gameEnd
 	}
 	deadline := time.Now().Add(rf.liveStallLimit())
-	for !rf.liveBuffer.WaitForFrame(rf.liveFrame, 100*time.Millisecond) {
+	// The watch window draws a frame of the lobby per wait (liveWaitFrame),
+	// so it waits a frame at a time.
+	wait := 100 * time.Millisecond
+	if sys.watchWindow.active {
+		wait = time.Second / replayStreamFPS
+	}
+	for !rf.liveBuffer.WaitForFrame(rf.liveFrame, wait) {
 		if finalFrame, ended := rf.liveBuffer.FinalFrame(); ended && rf.liveFrame >= finalFrame {
 			// The runMatch loop stops here (exhausted); a Turns match
 			// continues with the next stream at the next Synchronize.
@@ -219,7 +238,7 @@ func (rf *ReplayFile) liveUpdate() bool {
 			rf.liveFail("Live replay stalled waiting for input frame %d", rf.liveFrame)
 			return !sys.gameEnd
 		}
-		if !sys.eventUpdate() || sys.esc {
+		if !rf.liveWaitFrame(0) {
 			rf.liveFail("Live replay stopped at frame %d", rf.liveFrame)
 			return !sys.gameEnd
 		}

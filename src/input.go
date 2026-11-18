@@ -138,10 +138,18 @@ func OnKeyPressed(key Key, mk ModifierKey) {
 		sys.keyInputFresh = true
 		sys.keyInputReleased = false
 		escPressed := key == KeyEscape && (mk&ModCtrlAlt) == 0
-		sys.esc = sys.esc || escPressed
-		sys.escPending = sys.escPending || (sys.gameRunning && escPressed)
+		// The lobby's watch window takes Esc for its menus and chat: it
+		// neither opens the pause menu nor ends the watched match.
+		watching := sys.watchCapturesEsc()
+		if watching {
+			sys.watchWindow.escLatch = sys.watchWindow.escLatch || escPressed
+		} else {
+			sys.esc = sys.esc || escPressed
+			sys.escPending = sys.escPending || (sys.gameRunning && escPressed)
+		}
 		for k, v := range sys.shortcutScripts {
-			if !sys.motif.me.active && sys.netConnection == nil && (sys.replayFile == nil || !v.DebugKey) &&
+			// Keys typed in the watch window's chat are not shortcuts.
+			if !watching && !sys.motif.me.active && sys.netConnection == nil && (sys.replayFile == nil || !v.DebugKey) &&
 				//(!sys.paused || sys.frameStepFlag || v.Pause) &&
 				(sys.cfg.Debug.AllowDebugKeys || !v.DebugKey) {
 				v.Activate = v.Activate || k.Test(key, mk)
@@ -150,7 +158,7 @@ func OnKeyPressed(key Key, mk ModifierKey) {
 		if key == KeyF12 {
 			sys.isTakingScreenshot = true
 		}
-		if !sys.netplay() && key == StringToKeyLUT[sys.motif.AttractMode.Credits.KeyCode] && sys.credits != -1 {
+		if !watching && !sys.netplay() && key == StringToKeyLUT[sys.motif.AttractMode.Credits.KeyCode] && sys.credits != -1 {
 			sys.credits += 1
 			sys.motif.Snd.play(sys.motif.AttractMode.Credits.Snd, 100, 0, 0, 0, 0)
 		}
@@ -2989,6 +2997,42 @@ func (cl *CommandList) InputUpdate(char *Char, controller int) bool {
 	}
 
 	return true
+}
+
+// localUIInputUpdate reads local controller in (keyboard and joystick, no
+// remap: a watched replay remaps the players' slots, not the viewer's) into a
+// UI command list, whatever replay or session runs: the lobby's watch window
+// menus (watch_window.go). Like InputUpdate for a UI list, it returns whether
+// the buffer had stepped.
+func (cl *CommandList) localUIInputUpdate(in int) bool {
+	if cl.Buffer == nil {
+		return false
+	}
+	hadStepped := cl.Buffer.Ub != 0 || cl.Buffer.Db != 0 || cl.Buffer.Lb != 0 || cl.Buffer.Rb != 0
+	buttons := cl.Buffer.InputReader.LocalInput(in)
+	var axes [6]float32
+	if in >= 0 && in < len(sys.joystickConfig) &&
+		sys.joystickConfig[in].Joy >= 0 &&
+		sys.joystickConfig[in].Joy < input.GetMaxJoystickCount() &&
+		input.IsJoystickPresent(sys.joystickConfig[in].Joy) {
+		axes = input.GetJoystickAxes(sys.joystickConfig[in].Joy)
+	}
+	U, D, L, R := buttons[0], buttons[1], buttons[2], buttons[3]
+	// The left stick drives the menus too, as in InputUpdate.
+	thr := sys.cfg.Input.ControllerStickSensitivity
+	if axes[1] > thr {
+		D = true
+	} else if axes[1] < -thr {
+		U = true
+	}
+	if axes[0] > thr {
+		R = true
+	} else if axes[0] < -thr {
+		L = true
+	}
+	cl.Buffer.updateInputTime(U, D, L, R, L, R, buttons[4], buttons[5], buttons[6],
+		buttons[7], buttons[8], buttons[9], buttons[10], buttons[11], buttons[12], buttons[13])
+	return hadStepped
 }
 
 // Normalize from [-32768,32767] to [-1.0,1.0]
