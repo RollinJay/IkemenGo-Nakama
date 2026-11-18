@@ -86,6 +86,13 @@ type P2PSignal struct {
 	// the relayed match, so the two games use the server's relay only when
 	// both signals say so.
 	ServerRelay bool `json:"server_relay,omitempty"`
+	// Purpose says which of a client's sessions the signal is for: "" is the
+	// pairing's session (n.p2p), which games from before purposes send, and
+	// p2pPurposeWatch a watch link between a match's host and a lobby
+	// member who watches it (nakama_watch_p2p.go). A client hands each
+	// signal to the session of its purpose only (deliverSignal), and a
+	// session takes no signal of another purpose (HandleSignal).
+	Purpose string `json:"purpose,omitempty"`
 }
 
 // p2PPacket is a handshake packet: a hello, which checks a route, or the ack
@@ -139,6 +146,7 @@ type NakamaP2P struct {
 	remote      []P2PCandidate
 	selfID      string
 	peerID      string
+	purpose     string // P2PSignal.Purpose of this session's signals
 	mux         *p2pMux
 	readMu      sync.Mutex // held by whichever code is reading conn
 	ready       chan struct{}
@@ -205,6 +213,14 @@ func (p *NakamaP2P) SetPeer(selfID, peerID string) {
 	p.mu.Unlock()
 }
 
+// SetPurpose sets the purpose the session's signals carry and the only one it
+// takes signals of (P2PSignal.Purpose); "" for the pairing's session.
+func (p *NakamaP2P) SetPurpose(purpose string) {
+	p.mu.Lock()
+	p.purpose = purpose
+	p.mu.Unlock()
+}
+
 // SetRelay gives the session the relay it falls back to when no UDP path
 // works. Without one, the handshake tries the UDP paths only.
 func (p *NakamaP2P) SetRelay(r p2pRelayer) {
@@ -217,7 +233,7 @@ func (p *NakamaP2P) localSignal() P2PSignal {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return P2PSignal{Magic: p2pMagic, MatchID: p.matchID, Token: p.token, Key: p.publicKey(),
-		Candidates: append([]P2PCandidate(nil), p.local...), From: p.selfID, To: p.peerID, ServerRelay: true}
+		Candidates: append([]P2PCandidate(nil), p.local...), From: p.selfID, To: p.peerID, ServerRelay: true, Purpose: p.purpose}
 }
 
 // publicKey is this side's half of the key exchange, as signals carry it.
@@ -312,6 +328,12 @@ func (p *NakamaP2P) HandleSignal(signal P2PSignal) error {
 		return errors.New("p2p signal has no peer token")
 	}
 	p.mu.Lock()
+	if signal.Purpose != p.purpose {
+		p.mu.Unlock()
+		// Meant for another of the client's sessions: a watch link's signal
+		// never changes the pairing's session, nor the other way round.
+		return nil
+	}
 	if signal.Token == p.token {
 		p.mu.Unlock()
 		// Nakama match broadcasts may be delivered to the sender as well.

@@ -108,6 +108,9 @@ func (n *NakamaClient) SendLobbyCommand(kind string, fields map[string]any) erro
 		body[k] = v
 	}
 	body["kind"] = kind
+	if kind == "watch" {
+		n.watchP2P.noteWatchCommand(fields)
+	}
 	data, err := json.Marshal(body)
 	if err != nil {
 		return err
