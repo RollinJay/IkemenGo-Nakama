@@ -141,6 +141,47 @@ type LobbySlotProperties struct {
 	Record TextProperties                  `ini:"record"` // %d, %d: wins, losses
 }
 
+// LobbyMenuBarProperties is a menu drawn as one row: each item as wide as its
+// text, spacing apart. The keys that confirm and cancel are those of the
+// menu it shows.
+type LobbyMenuBarProperties struct {
+	Pos     [2]float32         `ini:"pos"`
+	Spacing float32            `ini:"spacing" default:"8"`
+	Box     LobbyBoxProperties `ini:"box"` // behind the bar; coords relative to pos
+	Item    TextProperties     `ini:"item"`
+	Active  TextProperties     `ini:"active"` // the highlighted item
+	// Behind the highlighted item; coords relative to the item's position,
+	// x2 widened by the item's width.
+	Cursor LobbyBoxProperties `ini:"cursor"`
+	Next   struct {
+		Key []string `ini:"key"`
+	} `ini:"next"`
+	Previous struct {
+		Key []string `ini:"key"`
+	} `ini:"previous"`
+}
+
+// LobbyWatchProperties is the window in which a member who does not play
+// watches the match while the room goes on around it.
+type LobbyWatchProperties struct {
+	// x, y, width, height in lobby coordinates. 0, 0, 0, 0: no window; the
+	// room's WATCH item then watches full screen.
+	Window [4]float32 `ini:"window"`
+	// Drawn behind the window, frame first; coords relative to the window's
+	// x, y.
+	Frame LobbyBoxProperties `ini:"frame"`
+	Bg    LobbyBoxProperties `ini:"bg"`
+	// text.waiting until the match's stream can play, text.loading while
+	// the match loads (%s, %s: the players); offset from the window's x, y.
+	Text TextMapProperties `ini:"text"`
+	// How the stream arrives while it plays: text.p2p (straight from the
+	// host) or text.server (relayed by the lobby); offset from the window's
+	// x, y.
+	Transport TextMapProperties `ini:"transport"`
+	// Volume of the watched match's music and sounds, percent.
+	Volume int32 `ini:"volume" default:"50"`
+}
+
 type LobbyRoomProperties struct {
 	Panel   map[string]*LobbyBoxProperties `ini:"panel"`
 	Title   TextProperties                 `ini:"title"`   // %s: lobby name
@@ -148,7 +189,8 @@ type LobbyRoomProperties struct {
 	Code    TextProperties                 `ini:"code"`    // %s: room ID
 	Rules   TextProperties                 `ini:"rules"`   // %s: rules summary
 	Count   TextProperties                 `ini:"count"`   // %d, %d: members, size
-	// Menu items: ready, chat, settings, start, watch, players, leave.
+	// Menu items: ready, chat, settings, start, autowatch, watch, players,
+	// leave. autowatch shows valuename.watchauto or valuename.watchoff.
 	Menu MenuProperties `ini:"menu"`
 	// Actions on a chosen member: mute, kick, host, back.
 	PlayerMenu MenuProperties      `ini:"playermenu"`
@@ -194,6 +236,14 @@ type LobbyRoomProperties struct {
 			Box            LobbyBoxProperties `ini:"box"`
 		} `ini:"input"`
 	} `ini:"chat"`
+	Watch LobbyWatchProperties `ini:"watch"`
+	// The room's layout while the window shows the match or waits for it:
+	// the members (keys as slot) and the menu as a bar. The rest of the
+	// room keeps its usual layout.
+	Watching struct {
+		Slots LobbySlotProperties    `ini:"slots"`
+		Menu  LobbyMenuBarProperties `ini:"menu"`
+	} `ini:"watching"`
 }
 
 type LobbyInfoProperties struct {
