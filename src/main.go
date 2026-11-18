@@ -160,6 +160,9 @@ func realMain() {
 	os.MkdirAll(filepath.Join(sys.baseDir, "save/logs"), permission)
 
 	processCommandLine()
+	if dir, ok := sys.cmdFlags["-profile"]; ok {
+		startProfiling(dir)
+	}
 
 	// Optional dedicated-server tools stay outside SDL/game initialization.
 	if _, ok := sys.cmdFlags["-server-wizard"]; ok {
@@ -366,7 +369,8 @@ Debug Options:
 -speed <speed>          Changes game speed setting to <speed> (-9 to 9)
 -framerate              Changes game framerate setting to <framerate>
 -stresstest <frameskip> Stability test (AI matches at speed increased by <frameskip>)
--speedtest              Speed test (match speed x100)`
+-speedtest              Speed test (match speed x100)
+-profile <folder>       Writes CPU, memory, trace and per-frame time profiles into <folder>`
 					//ShowInfoDialog(text, "I.K.E.M.E.N Command line options")
 					fmt.Printf("I.K.E.M.E.N Command line options\n\n" + text + "\nPress ENTER to exit")
 					var s string
@@ -399,12 +403,14 @@ Debug Options:
 
 // Exit program without any errors
 func handleExit() {
+	stopProfiling()
 	sys.shutdown()
 	os.Exit(0)
 }
 
 // Always attempt to show and log error messages when crashing
 func handlePanic(r interface{}) {
+	stopProfiling()
 	// System snapshot
 	now := time.Now()
 	var mem runtime.MemStats

@@ -909,6 +909,7 @@ func (s *System) keepAlive() {
 }
 
 func (s *System) await(fps int) bool {
+	profileFrame()
 	if !s.frameSkip && !s.window.renderingPaused {
 		// Render the finished frame
 		gfx.EndFrame()
