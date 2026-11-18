@@ -1,8 +1,6 @@
 package main
 
-import (
-	"golang.org/x/exp/maps"
-)
+import ()
 
 type Copyable[T any] interface {
 	Clone() T
@@ -145,7 +143,7 @@ func (sp StringPool) Clone(gsp *GameStatePool) (result StringPool) {
 	result.List = make([]string, len(sp.List), len(sp.List))
 	copy(result.List, sp.List)
 	result.Map = *gsp.Get(sp.Map).(*map[string]int)
-	maps.Clear(result.Map)
+	clear(result.Map)
 
 	for k, v := range sp.Map {
 		result.Map[k] = v
@@ -332,14 +330,14 @@ func cloneRemapPreset(src RemapPreset, gsp *GameStatePool) RemapPreset {
 		return nil
 	}
 	result := *gsp.Get(src).(*RemapPreset)
-	maps.Clear(result)
+	clear(result)
 	for group, table := range src {
 		if table == nil {
 			result[group] = nil
 			continue
 		}
 		tableCopy := *gsp.Get(table).(*RemapTable)
-		maps.Clear(tableCopy)
+		clear(tableCopy)
 		for number, remap := range table {
 			tableCopy[number] = remap
 		}
@@ -460,29 +458,29 @@ func (c *Char) Clone(gsp *GameStatePool) (result Char) {
 	result.ss = c.ss.Clone()
 
 	result.cnsvar = *gsp.Get(c.cnsvar).(*map[int32]int32)
-	maps.Clear(result.cnsvar)
+	clear(result.cnsvar)
 	for k, v := range c.cnsvar {
 		result.cnsvar[k] = v
 	}
 	result.cnsfvar = *gsp.Get(c.cnsfvar).(*map[int32]float32)
-	maps.Clear(result.cnsfvar)
+	clear(result.cnsfvar)
 	for k, v := range c.cnsfvar {
 		result.cnsfvar[k] = v
 	}
 
 	result.cnssysvar = *gsp.Get(c.cnssysvar).(*map[int32]int32)
-	maps.Clear(result.cnssysvar)
+	clear(result.cnssysvar)
 	for k, v := range c.cnssysvar {
 		result.cnssysvar[k] = v
 	}
 	result.cnssysfvar = *gsp.Get(c.cnssysfvar).(*map[int32]float32)
-	maps.Clear(result.cnssysfvar)
+	clear(result.cnssysfvar)
 	for k, v := range c.cnssysfvar {
 		result.cnssysfvar[k] = v
 	}
 
 	result.mapArray = *gsp.Get(c.mapArray).(*map[string]TypedValue)
-	maps.Clear(result.mapArray)
+	clear(result.mapArray)
 	for k, v := range c.mapArray {
 		result.mapArray[k] = v
 	}
@@ -500,7 +498,7 @@ func (cl *CharList) Clone(gsp *GameStatePool) (result CharList) {
 	copy(result.runOrder, cl.runOrder)
 
 	result.idMap = *gsp.Get(cl.idMap).(*map[int32]*Char)
-	maps.Clear(result.idMap)
+	clear(result.idMap)
 	for k, v := range cl.idMap {
 		result.idMap[k] = v
 	}
