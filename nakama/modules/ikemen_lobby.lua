@@ -660,6 +660,7 @@ local function start_match(state, pair, tick)
     state.backfill = {}
     for _, p in pairs(state.players) do
         p.watching = false
+        p.watch_p2p = false
     end
     set_phase(state, "playing", tick)
     state.pairing_dirty = true
@@ -1266,6 +1267,18 @@ local function handle_command(dispatcher, state, tick, sender_id, command)
             return
         end
         state.backfill[sender_id] = 1
+    elseif kind == "watch_p2p" then
+        -- The member receives the current match's stream from its host
+        -- directly (a watch link, see nakama/README.md), so the stream is
+        -- not relayed to it until it says the link ended. A new match
+        -- clears this (start_match): the member says it again at the new
+        -- match's first message over the link.
+        local on = command.on == true
+        local current = state.current_match
+        if on and (current == nil or sender_id == current.player1 or sender_id == current.player2) then
+            return
+        end
+        member.watch_p2p = on
     elseif kind == "chat" then
         local text = clean_text(command.text, CHAT_LIMIT)
         if text == nil or text == "" then
@@ -1486,6 +1499,8 @@ local function match_join(context, dispatcher, tick, state, presences)
             -- The same account joined again (a new session replaces the old one).
             existing.session_id = presence.session_id
             existing.presence = presence
+            -- The new session has no watch link yet: relay it the stream.
+            existing.watch_p2p = nil
             existing.display_name = display_name
             existing.name = name
             state.names[user_id] = name
@@ -1537,6 +1552,7 @@ local function match_leave(context, dispatcher, tick, state, presences)
             queue_remove(state, presence.user_id)
             forget_links(state, presence.user_id)
             state.backfill[presence.user_id] = nil
+            p.watch_p2p = nil
             if state.kicked[presence.user_id] then
                 -- The "kicked" notice has already been sent.
                 state.kicked[presence.user_id] = nil
@@ -1636,8 +1652,8 @@ end
 -- continue the match's stored messages, so a late watcher gets the match
 -- from its first stream on. The messages are kept for late watchers (within
 -- a message and a byte limit) and relayed to every member but the two
--- players. Oversized messages are dropped. Nothing is relayed while the
--- lobby does not allow watching.
+-- players and those who receive it over a watch link. Oversized messages
+-- are dropped. Nothing is relayed while the lobby does not allow watching.
 local function relay_stream(dispatcher, state, message, sender_id)
     if (state.settings.watch or 0) <= 0 then
         return
@@ -1677,9 +1693,12 @@ local function relay_stream(dispatcher, state, message, sender_id)
         -- match; the relay to the others goes on.
         stream.truncated = true
     end
+    -- Members whose watch link carries the stream (the "watch_p2p"
+    -- command) get it from the host instead.
     local targets = {}
     for user_id, player in pairs(state.players) do
-        if user_id ~= stream.player1 and user_id ~= stream.player2 and player.presence ~= nil then
+        if user_id ~= stream.player1 and user_id ~= stream.player2 and player.presence ~= nil and
+            player.watch_p2p ~= true then
             targets[#targets + 1] = player.presence
         end
     end

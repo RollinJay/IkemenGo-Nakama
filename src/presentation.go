@@ -9,7 +9,18 @@ type presentationGeometry struct {
 	origin [2]int32 // current top-left render origin in canvas coordinates
 }
 
+// presentationEnabled reports whether the game renders into its own viewport
+// inside the canvas: a configured border, or the lobby's watch window
+// (watch_window.go), which reuses the border path at runtime.
 func (s *System) presentationEnabled() bool {
+	if s == nil {
+		return false
+	}
+	return s.borderConfigured() || s.watchWindow.active
+}
+
+// borderConfigured reports whether the config sets a border canvas.
+func (s *System) borderConfigured() bool {
 	if s == nil {
 		return false
 	}
@@ -17,7 +28,7 @@ func (s *System) presentationEnabled() bool {
 }
 
 func (s *System) presentationCanvasSize(gameW, gameH int32) (int32, int32) {
-	if s.presentationEnabled() {
+	if s.borderConfigured() {
 		return Max(1, s.cfg.Video.Border.Width), Max(1, s.cfg.Video.Border.Height)
 	}
 	return Max(1, gameW), Max(1, gameH)

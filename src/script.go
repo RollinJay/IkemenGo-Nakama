@@ -2575,11 +2575,59 @@ func systemScriptInit(l *lua.LState) {
 		@function esc
 		@tparam[opt] boolean value If provided, sets the escape flag.
 		@treturn boolean esc Current value of the escape flag.*/
+		// While the lobby's watch window is set, this is the lobby's Esc,
+		// which does not end the watched match (watch_window.go).
 		if !nilArg(l, 1) {
-			sys.esc = boolArg(l, 1)
+			sys.setLuaEsc(boolArg(l, 1))
 		}
-		l.Push(lua.LBool(sys.esc))
+		l.Push(lua.LBool(sys.luaEsc()))
 		return 1
+	})
+	luaRegister(l, "setWatchWindow", func(l *lua.LState) int {
+		/*Watch the next match in a window of the current screen (the lobby's
+		watch window). Call it before the match starts; clearWatchWindow ends it.
+		While it is set the fight draws inside the window, the screenpack border
+		is not drawn, draws from the 'game.border_bg' and 'game.border' hooks
+		cover the whole screen, 'game.watch_tick' runs once per frame (also while
+		loading and waiting for the stream), Esc and the menus' input are the
+		local player's (esc() reports Esc without ending the match) and holding a
+		button does not fast-forward.
+		@function setWatchWindow
+		@tparam float32 x Left edge, in the screenpack's localcoord units.
+		@tparam float32 y Top edge, in the screenpack's localcoord units.
+		@tparam float32 width Width, in the screenpack's localcoord units.
+		@tparam float32 height Height, in the screenpack's localcoord units.
+		@tparam[opt=50] int32 volume The watched match's music and sound volume, percent.*/
+		rect := [4]float32{float32(numArg(l, 1)), float32(numArg(l, 2)), float32(numArg(l, 3)), float32(numArg(l, 4))}
+		if rect[2] <= 0 || rect[3] <= 0 {
+			l.RaiseError("setWatchWindow: width and height must be positive")
+		}
+		volume := int32(50)
+		if !nilArg(l, 5) {
+			volume = int32(numArg(l, 5))
+		}
+		sys.setWatchWindow(rect, volume)
+		return 0
+	})
+	luaRegister(l, "clearWatchWindow", func(*lua.LState) int {
+		/*End the watch window (setWatchWindow), after its match.
+		@function clearWatchWindow*/
+		sys.clearWatchWindow()
+		return 0
+	})
+	luaRegister(l, "watchWindowActive", func(l *lua.LState) int {
+		/*Check whether the watch window is set.
+		@function watchWindowActive
+		@treturn boolean active*/
+		l.Push(lua.LBool(sys.watchWindow.active))
+		return 1
+	})
+	luaRegister(l, "stopWatching", func(*lua.LState) int {
+		/*End the watched match at its next frame: the viewer left it
+		(replayStopped), as Esc does in a full-screen replay.
+		@function stopWatching*/
+		sys.requestWatchStop()
+		return 0
 	})
 	luaRegister(l, "exitNetPlay", func(*lua.LState) int {
 		/*Exit netplay mode and close any active netplay connection.
@@ -2997,6 +3045,8 @@ func systemScriptInit(l *lua.LState) {
 		sys.keyString = ""
 		sys.keyInput = KeyUnknown
 		sys.luaDiscardDrawQueue()
+		// A netplay match never runs in the lobby's watch window.
+		sys.watchSessionBackstop()
 		sys.gameRunning = true
 		sys.escPending = false
 		sys.motif.fadeIn.reset()
@@ -3022,7 +3072,19 @@ func systemScriptInit(l *lua.LState) {
 				} else if sys.loader.state == LS_Cancel {
 					return nil
 				}
-				sys.await(sys.gameRenderSpeed())
+				// The lobby stopped watching while the match loaded
+				// (cancelWatchedLoad). The loader is left LS_NotYet, so
+				// fight() checks watchStopRequested.
+				if sys.watchStopRequested() {
+					sys.cancelWatchedLoad()
+					return nil
+				}
+				// The lobby around a watch window keeps running and drawn.
+				if sys.watchWindow.active {
+					sys.watchIdleFrame()
+				} else {
+					sys.await(sys.gameRenderSpeed())
+				}
 			}
 			runtime.GC()
 			return nil
@@ -3058,7 +3120,7 @@ func systemScriptInit(l *lua.LState) {
 				if err := load(true); err != nil {
 					return -1, err
 				}
-				if sys.loader.state == LS_Cancel {
+				if sys.loader.state == LS_Cancel || sys.watchStopRequested() {
 					return -1, nil
 				}
 
@@ -3250,6 +3312,13 @@ func systemScriptInit(l *lua.LState) {
 							l.RaiseError(err.Error())
 						}
 					}
+					// The lobby stopped watching while the next member
+					// loaded (the load was cancelled): nothing to promote,
+					// and the watched match ends as the viewer left it.
+					if sys.watchStopRequested() {
+						winp = -1
+						break
+					}
 					sys.activateNextTurnsFighters()
 				} else {
 					// Legacy Turns behavior: reload the next fighter between rounds.
@@ -3261,6 +3330,8 @@ func systemScriptInit(l *lua.LState) {
 			if winp != -2 {
 				sys.esc = false
 				sys.escPending = false
+				// A stop is for this match only.
+				sys.watchWindow.stop = false
 				sys.keyInput = KeyUnknown
 				if sys.gameMode == "challenger" {
 					sys.statsLog.discardCurrentMatch()
@@ -3703,7 +3774,8 @@ func systemScriptInit(l *lua.LState) {
 				default:
 					continue
 				}
-				if len(btns) > 0 && sys.uiRawInput(btns, controllerIdx) {
+				// The lobby's watch window reads the local controllers.
+				if len(btns) > 0 && sys.luaUIRawInput(btns, controllerIdx) {
 					l.Push(lua.LBool(true))
 					return 1
 				}
@@ -3748,11 +3820,19 @@ func systemScriptInit(l *lua.LState) {
 			return 1
 		}
 		// Helper to compute the hold time for a key token on a given controller index.
-		keyTime := func(controllerIdx int, key string) int32 {
+		var keyTimeIn func(controllerIdx int, key string) int32
+		// The lobby's watch window reads the local controllers, with its own
+		// last-input state (withLuaUIInput).
+		keyTime := func(controllerIdx int, key string) (v int32) {
+			sys.withLuaUIInput(func() { v = keyTimeIn(controllerIdx, key) })
+			return v
+		}
+		keyTimeIn = func(controllerIdx int, key string) int32 {
+			lists := sys.uiInputLists()
 			if controllerIdx == -2 && sys.lastInputController >= 0 {
 				want := sys.lastInputController
 				controllerIdx = -1
-				for i := 0; i < len(sys.commandLists); i++ {
+				for i := 0; i < len(lists); i++ {
 					if sys.uiControllerKey(i) == want {
 						controllerIdx = i
 						break
@@ -3762,12 +3842,12 @@ func systemScriptInit(l *lua.LState) {
 					return 0
 				}
 			}
-			if controllerIdx < 0 || controllerIdx >= len(sys.commandLists) ||
-				sys.commandLists[controllerIdx] == nil || sys.commandLists[controllerIdx].Buffer == nil {
+			if controllerIdx < 0 || controllerIdx >= len(lists) ||
+				lists[controllerIdx] == nil || lists[controllerIdx].Buffer == nil {
 				return 0
 			}
-			cl := sys.commandLists[controllerIdx]
-			ib := sys.commandLists[controllerIdx].Buffer
+			cl := lists[controllerIdx]
+			ib := lists[controllerIdx].Buffer
 			var v int32
 			// Treat LS direction tokens as aliases for D/U/B/F.
 			switch key {
@@ -4923,7 +5003,8 @@ func systemScriptInit(l *lua.LState) {
 		/*Validate selection and start asynchronous loading of characters and stage.
 		@function loadStart
 		@tparam[opt] string params Optional comma-separated parameter string (from launchFight and quickvs options)*/
-		if !sys.cfg.Config.VsScreenLoading {
+		// Off while the lobby's watch window is set (vsScreenLoading).
+		if !sys.vsScreenLoading() {
 			sys.selMutex.RLock()
 			for k, v := range sys.sel.selected {
 				expected := int(sys.numSimul[k])
@@ -5914,6 +5995,7 @@ func systemScriptInit(l *lua.LState) {
 			sys.motif.fadeIn.step()
 		}
 		sys.stepCommandLists()
+		sys.watchRefreshFrame()
 		sys.uiFrameCounter++
 		if !sys.update() {
 			l.RaiseError("<game end>")
@@ -6048,7 +6130,8 @@ func systemScriptInit(l *lua.LState) {
 	luaRegister(l, "resetTokenGuard", func(*lua.LState) int {
 		/*Reset the UI input token guard.
 		@function resetTokenGuard*/
-		sys.uiResetTokenGuard()
+		// From the lobby around a watch window, its own guard only.
+		sys.luaResetTokenGuard()
 		return 0
 	})
 	luaRegister(l, "roundOver", func(*lua.LState) int {
@@ -6986,7 +7069,9 @@ func systemScriptInit(l *lua.LState) {
 		if !nilArg(l, 9) {
 			keepOnMatchEnd = boolArg(l, 9)
 		}
-		s.play([...]int32{int32(numArg(l, 2)), int32(numArg(l, 3))}, volumescale, pan, loopstart, loopend, startposition, keepOnMatchEnd)
+		// The scripts' sounds (the lobby's, around a watch window) keep their
+		// volume; the watched match's are scaled (Snd.play).
+		s.playUnscaled([...]int32{int32(numArg(l, 2)), int32(numArg(l, 3))}, volumescale, pan, loopstart, loopend, startposition, keepOnMatchEnd)
 		return 0
 	})
 	luaRegister(l, "sndPlaying", func(*lua.LState) int {
@@ -8843,7 +8928,9 @@ func triggerFunctions(l *lua.LState) {
 		return 1
 	})
 	luaRegister(l, "borderEnabled", func(*lua.LState) int {
-		l.Push(lua.LBool(sys.presentationEnabled()))
+		// The configured border only: the lobby's watch window uses the
+		// border path too, but its canvas is the lobby's, not a border's.
+		l.Push(lua.LBool(sys.borderConfigured()))
 		return 1
 	})
 	luaRegister(l, "borderWidth", func(*lua.LState) int {
@@ -8880,6 +8967,11 @@ func triggerFunctions(l *lua.LState) {
 	})
 	luaRegister(l, "gameOption", func(l *lua.LState) int {
 		value, err := sys.cfg.GetValue(strArg(l, 1))
+		// The lobby's watch window loads on the engine's side: the scripts
+		// see VS screen loading off while it is set (watch_window.go).
+		if err == nil && strings.EqualFold(strArg(l, 1), "Config.VsScreenLoading") {
+			value = sys.vsScreenLoading()
+		}
 		if err == nil {
 			lv := toLValue(l, value)
 			l.Push(lv)

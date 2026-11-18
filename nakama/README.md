@@ -292,8 +292,15 @@ nakama.setReplayPublish({enabled = true, delay = 3, info = {kind = "lobby", seq 
 nakama.setReplayInfo({kind = "lobby", seq = 4, selection = selection})
 -- The stream a spectator would start from: stream, segment, stage, match_info,
 -- delay_frames, frame_rate, buffered_through, ready, ended, final_frame,
--- reset_reason.
+-- reset_reason, and transport: "p2p" while a watch link carries it,
+-- "server" while the lobby relays it ("" before a header arrives).
 local st = nakama.replayStatus()
+-- Opens a direct watch link to the host of the lobby match this member
+-- watches (current.player1; see Watching a lobby match). Returns at once
+-- (true, or false and why); the stream keeps coming through the lobby until
+-- the link carries it. stopWatchLink closes it.
+nakama.startWatchLink(host_user_id)
+nakama.stopWatchLink()
 -- Starts the live replay of that stream: true when it started, false while
 -- the stream is not ready yet (the engine then shows its spectator loading
 -- screen and starts the replay once it is, unless wait is false). The caller
@@ -447,6 +454,7 @@ local st = nakama.status()
 -- st.host and st.peer once the pairing is known; st.error, st.netplay_error
 -- st.rtt_ms: last server round trip measured by nakama.ping() (see Lobbies), -1 until known
 -- st.region, st.game, st.build: from the server profile
+-- st.watch_links: lobby members this client, as a match's host, sends the stream to directly
 
 nakama.setPairing(peer_user_id, is_host) -- a lobby pairing, before startP2P
 nakama.enterNetPlay()                    -- or enterNetPlay(is_host)
@@ -888,6 +896,14 @@ The lobby keeps the current match's stream messages, all streams of a Turns matc
 
 A spectator needs the same game content as the players, or the replay would not reproduce the match. The stream header carries the content fingerprint (see [Game compatibility](#game-compatibility)), and a spectator whose fingerprint differs cannot start watching. Lobbies already refuse members of another game or build, so the fingerprint catches differences within one game and build, such as another screenpack, roster or engine version.
 
+#### Direct watch links
+
+A member who watches a match can take its stream straight from the match's host (the pairing's player 1) instead of through the server: `nakama.startWatchLink(player1)` opens a watch link, a P2P session of its own between the two (signals with `purpose = "watch"`, which never reach the players' own session). It uses the direct rungs of the connection ladder only: IPv4, IPv6 and a router port; the server relay stays for the two players, and a watcher with no direct way keeps the lobby's relay. On the link's reliable stream the host sends, out of what it kept of the current match (the lobby's limits: 2500 messages, 8 MB), its segment headers and its newest messages (about 32 KB), paced at about 48 KB/s and one new link at a time so the host's own netplay traffic never waits behind them, and then every message it publishes, each one framed as a 4-byte length, the message's 4-byte op code and its JSON. The older messages the watcher already has: the lobby relays everything to it until the link carries the stream. The watcher stores them as it stores the lobby's copies, one copy per stream and frame, so receiving both changes nothing.
+
+The lobby screens start the link as soon as the match's stream starts, which may be before the host publishes: the host ignores the link's signals until it hosts the current match and publishes, and the watcher keeps signalling, starting a new session after each one gives up, for up to 90 seconds; a link that never connects ends quietly, and the stream keeps coming through the lobby.
+
+Once a header arrives over the link, the watcher sends `watch_p2p` (`on = true`), and the lobby stops relaying the stream to it. When the link ends, whether it dropped or `nakama.stopWatchLink()` closed it, the watcher sends `watch_p2p` (`on = false`) and, while the match the link carried is still the current one, `watch` with the match's seq: the lobby relays the stream again and sends the kept messages from the first header on, which fills what neither path delivered in between. A new match and leaving the lobby clear the flag. A host serves at most 8 watch links at a time, about 6 KB/s of upload each; more watchers watch through the lobby. A host closes a link 30 seconds after its match ended, at once when the watcher plays the current match or left the lobby, or when the watcher fell more than about 10 MB behind. `nakama.status().watch_links` counts the host's open links, and `nakama.replayStatus().transport` says how the watched stream arrives.
+
 The lobby screens' spectator loads the fight from the stream: the characters, palettes and team modes from the match description, and the stage from the header. It applies the players' synchronized settings and the lobby's rules, as the players' games did, and plays the match without the victory and results screens. [lobby-screenpack.md](lobby-screenpack.md) describes the screens.
 
 ### Lobby Lua API
@@ -965,6 +981,7 @@ Commands (`nakama.lobbySend(kind, fields)`):
 | `link` | `peer`, `rtt` (milliseconds) | The engine of a player of the current match, while its P2P path to `peer`, the other player, is open |
 | `watching` | `watching` | Any member |
 | `watch` | `seq` (optional: the pairing to watch) | A member who is not playing |
+| `watch_p2p` | `on` | The engine of a member who is not playing, when its watch link starts (`true`) or stops (`false`) carrying the stream |
 | `chat` | `text` | Any member |
 | `settings` | `settings` | Host |
 | `start` | | Host |

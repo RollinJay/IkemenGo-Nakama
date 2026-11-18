@@ -335,6 +335,38 @@ func nakamaScriptInit(l *lua.LState) {
 		return 0
 	}))
 
+	// startWatchLink(hostUserId) opens a direct watch link to the host of the
+	// lobby match this member watches (the pairing's player 1): the host
+	// then sends the match's stream peer to peer, and the lobby stops
+	// relaying it to this member (see nakama_watch_p2p.go). It returns at
+	// once and connects in the background; until it does, or when it cannot,
+	// the stream keeps coming through the lobby. It returns true, or false
+	// and why when the link cannot start. A link to the same host that is
+	// still open is kept.
+	api.RawSetString("startWatchLink", l.NewFunction(func(l *lua.LState) int {
+		if sys.nakama == nil {
+			l.Push(lua.LFalse)
+			l.Push(lua.LString("nakama is not connected"))
+			return 2
+		}
+		if err := sys.nakama.watchP2P.StartWatchLink(strings.TrimSpace(l.OptString(1, ""))); err != nil {
+			l.Push(lua.LFalse)
+			l.Push(lua.LString(err.Error()))
+			return 2
+		}
+		l.Push(lua.LTrue)
+		return 1
+	}))
+
+	// stopWatchLink() closes the watch link; the lobby relays the stream to
+	// this member again.
+	api.RawSetString("stopWatchLink", l.NewFunction(func(l *lua.LState) int {
+		if sys.nakama != nil {
+			sys.nakama.watchP2P.StopWatchLink()
+		}
+		return 0
+	}))
+
 	// status returns a snapshot for UI polling: connected, matchmaking,
 	// match_id, p2p (none, connecting, ready, failed, closed), host and peer
 	// when the pairing is known, and the last reported error.
@@ -345,6 +377,7 @@ func nakamaScriptInit(l *lua.LState) {
 			t.RawSetString("matchmaking", lua.LFalse)
 			t.RawSetString("match_id", lua.LString(""))
 			t.RawSetString("p2p", lua.LString("none"))
+			t.RawSetString("watch_links", lua.LNumber(0))
 			l.Push(t)
 			return 1
 		}
@@ -402,6 +435,9 @@ func nakamaScriptInit(l *lua.LState) {
 			}
 		}
 		t.RawSetString("netplay", lua.LString(netplay))
+		// watch_links: the lobby members this client, as the host of a
+		// match, sends its stream to directly (startWatchLink).
+		t.RawSetString("watch_links", lua.LNumber(st.WatchLinks))
 		l.Push(t)
 		return 1
 	}))
@@ -480,14 +516,17 @@ func nakamaScriptInit(l *lua.LState) {
 	// stream id, segment, stage (the stage's definition file) and match_info
 	// (the publisher's match description, decoded), buffered_through (frames
 	// received without gaps), ready (enough is buffered to start watching),
-	// ended and final_frame, reset_reason. Without a header, only
-	// buffered_through and ended are set.
+	// ended and final_frame, reset_reason, and transport: how the stream
+	// arrives, "p2p" (the watch link, startWatchLink) or "server" (the
+	// lobby's relay). Without a header, only buffered_through, ended and
+	// transport ("") are set.
 	api.RawSetString("replayStatus", l.NewFunction(func(l *lua.LState) int {
 		if sys.nakama == nil {
 			l.RaiseError("nakama is not connected")
 		}
 		buffer := sys.nakama.WatchReplayBuffer()
 		t := l.NewTable()
+		t.RawSetString("transport", lua.LString(""))
 		t.RawSetString("buffered_through", lua.LNumber(buffer.BufferedThrough()))
 		if header := buffer.Header(); header != nil {
 			t.RawSetString("delay_frames", lua.LNumber(header.DelayFrames))
@@ -497,6 +536,8 @@ func nakamaScriptInit(l *lua.LState) {
 			t.RawSetString("stream", lua.LString(header.Stream))
 			t.RawSetString("segment", lua.LNumber(header.Segment))
 			t.RawSetString("stage", lua.LString(header.Stage))
+			t.RawSetString("transport", lua.LString(sys.nakama.watchP2P.ViewerTransport()))
+			t.RawSetString("hole_seq", lua.LNumber(sys.nakama.watchP2P.HoleSeq()))
 			if len(header.MatchInfo) > 0 {
 				var info any
 				if json.Unmarshal(header.MatchInfo, &info) == nil {

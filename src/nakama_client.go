@@ -373,6 +373,10 @@ type NakamaClient struct {
 	// (OpenP2PStream); losing the server's connection then keeps the path
 	// and the match (connectionLost).
 	p2pStream bool
+	// watchP2P runs the direct watch links of lobby matches: as a match's
+	// host, to the members who watch it; as a member, to the host of the
+	// match it watches (nakama_watch_p2p.go). It has its own lock.
+	watchP2P *nakamaWatchP2P
 
 	eventMu sync.RWMutex
 	eventFn func(NakamaEvent)
@@ -385,7 +389,9 @@ func NewNakamaClient(cfg NakamaConfig) *NakamaClient {
 	if cfg.RequestTTL <= 0 {
 		cfg.RequestTTL = 10 * time.Second
 	}
-	return &NakamaClient{cfg: cfg, closed: make(chan struct{})}
+	n := &NakamaClient{cfg: cfg, closed: make(chan struct{})}
+	n.watchP2P = newNakamaWatchP2P(n)
+	return n
 }
 
 func (n *NakamaClient) SetSTUNServers(servers []string) {
@@ -649,6 +655,10 @@ func (n *NakamaClient) disconnect(keepSession bool) {
 	if p != nil {
 		p.Close()
 	}
+	// Watch links go with the connection: without it, the lobby that tells
+	// who hosts and who watches is gone. A kept match keeps what the host
+	// kept of its stream, for the links after a reconnect.
+	n.watchP2P.closeAll(keep)
 	if keep {
 		log.Printf("Nakama: the connection to the server ended; the netplay session's P2P path and match are kept")
 	}
@@ -834,6 +844,9 @@ type NakamaStatus struct {
 	P2PStage string
 	P2PRoute string
 	P2PError string
+	// WatchLinks is the number of lobby members this client, as the host
+	// of a match, sends the match's stream to directly (nakama_watch_p2p.go).
+	WatchLinks int
 }
 
 func (n *NakamaClient) Status() NakamaStatus {
@@ -863,6 +876,7 @@ func (n *NakamaClient) Status() NakamaStatus {
 			st.P2PRTT = rtt
 		}
 	}
+	st.WatchLinks = n.watchP2P.HostLinks()
 	return st
 }
 
@@ -1071,6 +1085,7 @@ func (n *NakamaClient) LeaveMatch() error {
 	n.resetLobbyLocked()
 	n.clearReplaysLocked()
 	n.mu.Unlock()
+	n.watchP2P.closeAll(false)
 	return nil
 }
 
@@ -1671,50 +1686,14 @@ func (n *NakamaClient) handleJSON(data []byte) {
 			}
 			p.BinaryData = decoded
 		}
-		switch uint32(p.OpCode) {
-		case nakamaReplayHeaderOp:
-			var header ReplayStreamHeader
-			if err := json.Unmarshal(p.BinaryData, &header); err != nil {
-				n.emit(NakamaEvent{Type: "error", Error: fmt.Errorf("decode replay header: %w", err), Raw: raw})
+		switch op := uint32(p.OpCode); op {
+		case nakamaReplayHeaderOp, nakamaReplayChunkOp, nakamaReplayEndOp, nakamaReplayResetOp:
+			payload, err := n.applyReplayMessage(op, p.BinaryData)
+			if err != nil {
+				n.emit(NakamaEvent{Type: "error", Error: err, Raw: raw})
 				return
 			}
-			n.applyReplayHeader(header)
-			n.emit(NakamaEvent{Type: "replay_header", MatchID: p.MatchID, Payload: header, MatchData: &p, Raw: raw})
-			return
-		case nakamaReplayChunkOp:
-			var chunk ReplayStreamChunk
-			if err := json.Unmarshal(p.BinaryData, &chunk); err != nil {
-				n.emit(NakamaEvent{Type: "error", Error: fmt.Errorf("decode replay chunk: %w", err), Raw: raw})
-				return
-			}
-			// Data of a stream whose header has not arrived is dropped; a lobby
-			// sends a late watcher the whole stream again.
-			if buffer := n.replayBufferFor(chunk.Stream); buffer != nil {
-				if err := buffer.ApplyChunk(chunk); err != nil {
-					n.emit(NakamaEvent{Type: "error", Error: fmt.Errorf("store replay chunk: %w", err), Raw: raw})
-					return
-				}
-			}
-			n.emit(NakamaEvent{Type: "replay_chunk", MatchID: p.MatchID, Payload: chunk, MatchData: &p, Raw: raw})
-			return
-		case nakamaReplayEndOp:
-			var end ReplayStreamEnd
-			if err := json.Unmarshal(p.BinaryData, &end); err != nil {
-				n.emit(NakamaEvent{Type: "error", Error: fmt.Errorf("decode replay end: %w", err), Raw: raw})
-				return
-			}
-			if buffer := n.replayBufferFor(end.Stream); buffer != nil {
-				buffer.ApplyEnd(end)
-			}
-			n.emit(NakamaEvent{Type: "replay_end", MatchID: p.MatchID, Payload: end, MatchData: &p, Raw: raw})
-			return
-		case nakamaReplayResetOp:
-			var reset ReplayStreamReset
-			_ = json.Unmarshal(p.BinaryData, &reset)
-			if buffer := n.replayBufferFor(reset.Stream); buffer != nil {
-				buffer.ApplyReset(reset)
-			}
-			n.emit(NakamaEvent{Type: "replay_reset", MatchID: p.MatchID, Payload: reset, MatchData: &p, Raw: raw})
+			n.emit(NakamaEvent{Type: replayEventType(op), MatchID: p.MatchID, Payload: payload, MatchData: &p, Raw: raw})
 			return
 		case nakamaSignalOp:
 			// Applied here, off the Lua thread, so the handshake does not wait on
@@ -1810,11 +1789,82 @@ func (n *NakamaClient) handleJSON(data []byte) {
 	n.emit(NakamaEvent{Type: "realtime", Raw: raw})
 }
 
+// applyReplayMessage stores a replay stream message (op is its op code, body
+// its JSON) in the buffer of its stream, whether the lobby relayed it or the
+// match's host sent it over a watch link (nakama_watch_p2p.go): the buffers
+// keep one copy of each stream and frame, so a message that comes both ways
+// changes nothing the second time. It returns the decoded message.
+func (n *NakamaClient) applyReplayMessage(op uint32, body []byte) (any, error) {
+	switch op {
+	case nakamaReplayHeaderOp:
+		var header ReplayStreamHeader
+		if err := json.Unmarshal(body, &header); err != nil {
+			return nil, fmt.Errorf("decode replay header: %w", err)
+		}
+		n.applyReplayHeader(header)
+		return header, nil
+	case nakamaReplayChunkOp:
+		var chunk ReplayStreamChunk
+		if err := json.Unmarshal(body, &chunk); err != nil {
+			return nil, fmt.Errorf("decode replay chunk: %w", err)
+		}
+		// Data of a stream whose header has not arrived is dropped; a lobby
+		// sends a late watcher the whole stream again.
+		if buffer := n.replayBufferFor(chunk.Stream); buffer != nil {
+			if err := buffer.ApplyChunk(chunk); err != nil {
+				return nil, fmt.Errorf("store replay chunk: %w", err)
+			}
+		}
+		return chunk, nil
+	case nakamaReplayEndOp:
+		var end ReplayStreamEnd
+		if err := json.Unmarshal(body, &end); err != nil {
+			return nil, fmt.Errorf("decode replay end: %w", err)
+		}
+		if buffer := n.replayBufferFor(end.Stream); buffer != nil {
+			buffer.ApplyEnd(end)
+		}
+		return end, nil
+	case nakamaReplayResetOp:
+		var reset ReplayStreamReset
+		_ = json.Unmarshal(body, &reset)
+		if buffer := n.replayBufferFor(reset.Stream); buffer != nil {
+			buffer.ApplyReset(reset)
+		}
+		return reset, nil
+	}
+	return nil, fmt.Errorf("op code %#x is not a replay stream message", op)
+}
+
+// replayEventType names the event of a replay stream message's op code.
+func replayEventType(op uint32) string {
+	switch op {
+	case nakamaReplayHeaderOp:
+		return "replay_header"
+	case nakamaReplayChunkOp:
+		return "replay_chunk"
+	case nakamaReplayEndOp:
+		return "replay_end"
+	case nakamaReplayResetOp:
+		return "replay_reset"
+	}
+	return ""
+}
+
 func (n *NakamaClient) deliverSignal(signal P2PSignal) {
 	if signal.To != "" {
 		if session := n.Session(); session != nil && session.UserID != "" && signal.To != session.UserID {
 			return // addressed to another member of the match
 		}
+	}
+	if signal.Purpose != "" {
+		// A watch link's signal (or one of a purpose this game does not
+		// know, which nothing takes): never the pairing's session, nor the
+		// slot that keeps the pairing peer's early signal.
+		if signal.Purpose == p2pPurposeWatch {
+			n.watchP2P.handleSignal(signal)
+		}
+		return
 	}
 	n.mu.Lock()
 	p := n.p2p
@@ -1875,6 +1925,9 @@ func (s *nakamaReplaySink) PublishReplayHeader(h ReplayStreamHeader) {
 		log.Printf("Nakama replay header encode failed: %v", err)
 		return
 	}
+	// The match's direct watchers get it too (nakama_watch_p2p.go); the
+	// lobby keeps relaying it to the others and storing it for late ones.
+	s.client.watchP2P.publish(nakamaReplayHeaderOp, body, h.Segment <= 0)
 	if err := s.client.SendMatchData(nakamaReplayHeaderOp, body, true); err != nil {
 		log.Printf("Nakama replay header send failed: %v", err)
 	}
@@ -1889,6 +1942,7 @@ func (s *nakamaReplaySink) PublishReplayChunk(c ReplayStreamChunk) {
 		log.Printf("Nakama replay chunk encode failed: %v", err)
 		return
 	}
+	s.client.watchP2P.publish(nakamaReplayChunkOp, body, false)
 	if err := s.client.SendMatchData(nakamaReplayChunkOp, body, false); err != nil {
 		log.Printf("Nakama replay chunk send failed: %v", err)
 	}
@@ -1902,6 +1956,7 @@ func (s *nakamaReplaySink) PublishReplayEnd(e ReplayStreamEnd) {
 	if err != nil {
 		return
 	}
+	s.client.watchP2P.publish(nakamaReplayEndOp, body, false)
 	if err := s.client.SendMatchData(nakamaReplayEndOp, body, true); err != nil {
 		log.Printf("Nakama replay end send failed: %v", err)
 	}
@@ -1912,6 +1967,7 @@ func (s *nakamaReplaySink) ReplayStreamReset(reset ReplayStreamReset) {
 		return
 	}
 	body, _ := json.Marshal(reset)
+	s.client.watchP2P.publish(nakamaReplayResetOp, body, false)
 	if err := s.client.SendMatchData(nakamaReplayResetOp, body, true); err != nil {
 		log.Printf("Nakama replay reset send failed: %v", err)
 	}

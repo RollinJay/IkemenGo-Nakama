@@ -9,12 +9,16 @@
 --   * the room shows the members. When this player's match starts, the
 --     script plays it over a P2P netplay session (online.lua), reports the
 --     result and returns to the room. The other members can watch the match
---     from the players' replay stream while it is played.
+--     from the players' replay stream while it is played: in a window of
+--     the room, which keeps working around it (automatically with WATCH
+--     AUTO), or full screen when the screenpack has no window.
 -- Every element comes from [Lobby Info] and [LobbyBgDef] in the screenpack.
 
 local lobby = {}
 
--- Timings in frames (60 per second).
+-- Timings in frames (60 per second). The ping and report intervals, and the
+-- match clock and results countdown, run on the wall clock (os.clock): while
+-- a watched match catches up, the room ticks faster than 60 times a second.
 lobby.requestFrames = 60 * 12
 lobby.pingInterval = 60 * 3
 lobby.reportInterval = 60 * 15
@@ -86,15 +90,15 @@ lobby.defaultSettings = {
 local L = {
 	state = nil,
 	version = -1,
-	stateFrame = 0,
+	stateTime = 0, -- os.clock() when the state arrived
 	byId = {},
 	me = nil,
 	chat = {},
 	muted = {},
 	handledSeq = -1,
 	kicked = false,
-	pingTimer = 0,
-	reportTimer = 0,
+	pingAt = 0, -- os.clock() of the next ping
+	reportAt = 0, -- os.clock() from which a small ping change is reported
 	reportedPing = nil,
 	frame = 0,
 	reportedConnection = nil,
@@ -420,24 +424,36 @@ end
 -- ---------------------------------------------------------------------------
 -- Text entry
 
+-- Ends a text entry's key: the token guard keeps the key's press as a
+-- player's button (Return is Start in the default key configuration), which
+-- shows one frame later, from also working the screen that follows, such as
+-- closing a message about the entry.
+--
+-- Not while a match plays in the room's window: editText then runs inside
+-- the engine's frame (game.watch_tick), and the engine's token guard would
+-- also drop the watched match's own reads of the players' inputs on the next
+-- frame. The room's own guard (rs.guard) covers the frames that follow
+-- instead.
+local function guardEntryEnd()
+	if watchWindowActive ~= nil and watchWindowActive() then
+		return
+	end
+	resetTokenGuard()
+end
+
 -- Edits entry.text from the keyboard for one frame. Returns true when
 -- confirmed, false when cancelled, nil while typing.
---
--- The entry ends on a key event. When that key is also a player's button
--- (Return is Start in the default key configuration), the button's press
--- shows one frame later; the token guard keeps it from also working the
--- screen that follows, such as closing a message about the entry.
 local function editText(entry, limit)
 	local ti = info().textinput
 	if esc() then
 		esc(false)
 		resetKey()
-		resetTokenGuard()
+		guardEntryEnd()
 		return false
 	end
 	if getKey(ti.confirm.keycode) then
 		resetKey()
-		resetTokenGuard()
+		guardEntryEnd()
 		return true
 	elseif getKey(ti.truncate.keycode) then
 		entry.text = dropLastChar(entry.text)
@@ -570,7 +586,7 @@ function lobby.f_poll()
 	local s, version = nakama.lobbyState(L.version)
 	if s ~= nil then
 		L.state = s
-		L.stateFrame = L.frame
+		L.stateTime = os.clock()
 		L.byId = {}
 		for _, m in ipairs(s.members or {}) do
 			L.byId[m.user_id] = m
@@ -611,7 +627,7 @@ local function phaseRemaining()
 	if L.state == nil then
 		return 0
 	end
-	local left = (L.state.phase_remaining or 0) - (L.frame - L.stateFrame) / 60
+	local left = (L.state.phase_remaining or 0) - (os.clock() - L.stateTime)
 	return math.max(0, math.ceil(left))
 end
 
@@ -620,7 +636,7 @@ local function matchElapsed()
 	if cur == nil then
 		return 0
 	end
-	return math.floor((cur.elapsed or 0) + (L.frame - L.stateFrame) / 60)
+	return math.floor((cur.elapsed or 0) + (os.clock() - L.stateTime))
 end
 
 local function isHost()
@@ -663,12 +679,11 @@ end
 -- this client plays is measured and reported by the engine while their
 -- direct connection is open.
 function lobby.f_tickPing()
-	L.pingTimer = L.pingTimer - 1
-	if L.pingTimer <= 0 then
-		L.pingTimer = lobby.pingInterval
+	local now = os.clock()
+	if now >= L.pingAt then
+		L.pingAt = now + lobby.pingInterval / 60
 		pcall(nakama.ping)
 	end
-	L.reportTimer = L.reportTimer - 1
 	local st = status()
 	local rtt = st.rtt_ms
 	local connection = st.connection or ''
@@ -680,10 +695,10 @@ function lobby.f_tickPing()
 		return
 	end
 	local changed = L.reportedPing == nil or pingLevel(rtt) ~= pingLevel(L.reportedPing)
-	if changed or (L.reportTimer <= 0 and math.abs(rtt - L.reportedPing) >= 20) then
+	if changed or (now >= L.reportAt and math.abs(rtt - L.reportedPing) >= 20) then
 		pcall(nakama.lobbySend, 'member', {ping = rtt, region = st.region or '', connection = connection})
 		L.reportedPing = rtt
-		L.reportTimer = lobby.reportInterval
+		L.reportAt = now + lobby.reportInterval / 60
 	end
 end
 
@@ -810,8 +825,8 @@ function lobby.f_join(matchId, code)
 	L.muted = {}
 	L.handledSeq = L.state.current ~= nil and L.state.current.seq or -1
 	L.reportedPing = nil
-	L.pingTimer = 0
-	L.reportTimer = 0
+	L.pingAt = 0
+	L.reportAt = 0
 	L.reportedConnection = status().connection or ''
 	pcall(nakama.lobbySend, 'member', {region = status().region or '', ping = -1, connection = L.reportedConnection})
 	return true
@@ -1474,8 +1489,10 @@ end
 -- ---------------------------------------------------------------------------
 -- Lobby room
 
-local function slotPos(i)
-	local sl = info().room.slot
+-- sl: the slot properties in use (room.slot, or room.watching.slots while
+-- the room shows a match in its window).
+local function slotPos(i, sl)
+	sl = sl or info().room.slot
 	local cols = math.max(1, sl.columns or 1)
 	local col = (i - 1) % cols
 	local row = math.floor((i - 1) / cols)
@@ -1513,15 +1530,15 @@ local function drawPing(p, x, y, ping, direct)
 	end
 end
 
-local function drawSlots(cursorIndex)
-	local sl = info().room.slot
+local function drawSlots(cursorIndex, sl)
+	sl = sl or info().room.slot
 	local s = L.state
 	local members = s and s.members or {}
 	local size = s and s.settings and s.settings.size or 8
 	local me = nakama.userId()
 	local count = math.max(8, #members)
 	for i = 1, count do
-		local x, y = slotPos(i)
+		local x, y = slotPos(i, sl)
 		local m = members[i]
 		local kind = 'member'
 		if m == nil then
@@ -1722,7 +1739,10 @@ local function drawChat(entry)
 end
 
 -- The status line, the in-game panel or the between-matches panel.
-local function drawPhase()
+-- watching: this player is still watching the match in the room's window,
+-- a few seconds behind the players; the between-matches panel would tell the
+-- result before the window shows it, so only the status line is drawn.
+local function drawPhase(watching)
 	local r = info().room
 	local s = L.state
 	if s == nil then
@@ -1750,32 +1770,36 @@ local function drawPhase()
 	end
 	local finished = s.phase == 'finished' or (s.tournament ~= nil and s.tournament.finished == true)
 	if s.phase == 'results' and s.last_result ~= nil then
-		local rs = r.results
-		local res = s.last_result
-		local x, y = rs.pos[1], rs.pos[2]
-		drawElement(rs.bg, x, y)
-		local titles = rs.title.text or {}
-		if res.no_contest then
-			drawText(rs.title, titles.nocontest or '', x, y)
-			local reasons = rs.reason.text or {}
-			local text = reasons[res.reason or ''] or reasons.default or ''
-			drawText(rs.reason, fmt(text, res.player1_name or '', res.player2_name or ''), x, y)
-		else
-			-- The final of a tournament is titled text.finished.
-			local title = titles.win or ''
-			if finished and (titles.finished or '') ~= '' then
-				title = titles.finished
+		if not watching then
+			local rs = r.results
+			local res = s.last_result
+			local x, y = rs.pos[1], rs.pos[2]
+			drawElement(rs.bg, x, y)
+			local titles = rs.title.text or {}
+			if res.no_contest then
+				drawText(rs.title, titles.nocontest or '', x, y)
+				local reasons = rs.reason.text or {}
+				local text = reasons[res.reason or ''] or reasons.default or ''
+				drawText(rs.reason, fmt(text, res.player1_name or '', res.player2_name or ''), x, y)
+			else
+				-- The final of a tournament is titled text.finished.
+				local title = titles.win or ''
+				if finished and (titles.finished or '') ~= '' then
+					title = titles.finished
+				end
+				drawText(rs.title, title, x, y)
+				drawText(rs.winner, fmt(rs.winner.text, res.winner_name or ''), x, y)
+				drawText(rs.loser, fmt(rs.loser.text, res.loser_name or ''), x, y)
+				if (res.streak or 0) > 1 then
+					drawText(rs.streak, fmt(rs.streak.text, res.streak), x, y)
+				end
 			end
-			drawText(rs.title, title, x, y)
-			drawText(rs.winner, fmt(rs.winner.text, res.winner_name or ''), x, y)
-			drawText(rs.loser, fmt(rs.loser.text, res.loser_name or ''), x, y)
-			if (res.streak or 0) > 1 then
-				drawText(rs.streak, fmt(rs.streak.text, res.streak), x, y)
+			drawText(rs.timer, fmt(rs.timer.text, phaseRemaining()), x, y)
+			if s.next ~= nil then
+				drawText(rs.next, fmt(rs.next.text, s.next.player1_name or '', s.next.player2_name or ''), x, y)
 			end
 		end
-		drawText(rs.timer, fmt(rs.timer.text, phaseRemaining()), x, y)
 		if s.next ~= nil then
-			drawText(rs.next, fmt(rs.next.text, s.next.player1_name or '', s.next.player2_name or ''), x, y)
 			drawText(r.status, fmt(texts.results, phaseRemaining()))
 			return
 		end
@@ -1823,7 +1847,51 @@ local function drawPhase()
 	end
 end
 
-local function drawRoom(m, focus, cursorIndex, entry)
+-- The room menu as a bar (room.watching.menu) while the room shows a match
+-- in its window: the items side by side, each as wide as its text, so a
+-- long value such as WATCH AUTO takes the room it needs.
+local function barDraw(m, inactive)
+	local bar = info().room.watching.menu
+	if #m.items == 0 then
+		return
+	end
+	local x, y = bar.pos[1], bar.pos[2]
+	drawBox(bar.box, x, y)
+	for i, it in ipairs(m.items) do
+		local text = it.displayname or ''
+		local w = textWidth(bar.item, text)
+		if i == m.item and not inactive then
+			drawBox(bar.cursor, x, y, w)
+			drawText(bar.active, text, x, y)
+		else
+			drawText(bar.item, text, x, y)
+		end
+		x = x + w + (bar.spacing or 0)
+	end
+end
+
+-- Moves along the bar with its own keys (left and right by default; up and
+-- down stay with the member list).
+local function barMove(m)
+	local bar = info().room.watching.menu
+	local n = #m.items
+	if n == 0 then
+		return
+	end
+	if pressed(bar.next.key) then
+		m.item = m.item % n + 1
+		snd(info().cursor.move.snd)
+	elseif pressed(bar.previous.key) then
+		m.item = (m.item - 2) % n + 1
+		snd(info().cursor.move.snd)
+	end
+end
+
+-- layout: nil for the usual room, or {watching = bool} while the room keeps
+-- the match window (room.watch.window) on screen: the members in their
+-- column (room.watching.slots) and the menu as a bar (room.watching.menu).
+-- watching is true while the match plays in the window.
+local function drawRoom(m, focus, cursorIndex, entry, layout)
 	local r = info().room
 	local s = L.state
 	if s == nil then
@@ -1837,10 +1905,19 @@ local function drawRoom(m, focus, cursorIndex, entry)
 	drawText(r.count, fmt(r.count.text, #(s.members or {}), set.size or 8))
 	local v = info().valuename or {}
 	drawText(r.rules, fmt(r.rules.text, lobby.f_rules(set, (v.separator or ',') .. ' ')))
-	drawSlots(cursorIndex)
-	drawPhase()
+	if layout ~= nil then
+		drawSlots(cursorIndex, r.watching.slots)
+	else
+		drawSlots(cursorIndex)
+	end
+	drawPhase(layout ~= nil and layout.watching)
 	if m ~= nil then
-		menuDraw(m, focus == 'players' or focus == 'chat')
+		local inactive = focus == 'players' or focus == 'chat'
+		if layout ~= nil then
+			barDraw(m, inactive)
+		else
+			menuDraw(m, inactive)
+		end
 	end
 	drawChat(entry)
 end
@@ -2048,6 +2125,14 @@ local function streamOf(seq)
 	return st
 end
 
+-- Whether this client should ask the lobby for match seq from its start: it
+-- missed the stream's start, or a direct link it stopped on purpose left a
+-- gap in it (replayStatus().hole_seq).
+local function needsBackfill(seq)
+	local st = streamOf(seq)
+	return st == nil or tonumber(st.hole_seq) == seq
+end
+
 -- Watches the current match: waits until its stream can play (asking the
 -- lobby for it from the start when this client missed its beginning),
 -- loads the same fight and plays it from the players' inputs. Esc stops
@@ -2058,11 +2143,19 @@ function lobby.f_watchMatch()
 		return
 	end
 	local seq = cur.seq
-	if streamOf(seq) == nil then
+	if needsBackfill(seq) then
 		pcall(nakama.lobbySend, 'watch', {seq = seq})
 	end
 	pcall(nakama.lobbySend, 'watching', {watching = true})
+	-- The stream straight from the host where a direct connection can be
+	-- made, from the start of the wait; the lobby's relay is the fallback.
+	if nakama.startWatchLink ~= nil then
+		pcall(nakama.startWatchLink, cur.player1)
+	end
 	local function stop(key)
+		if nakama.stopWatchLink ~= nil then
+			pcall(nakama.stopWatchLink)
+		end
 		pcall(nakama.lobbySend, 'watching', {watching = false})
 		if key ~= nil then
 			warn(message(key))
@@ -2174,7 +2267,231 @@ function lobby.f_watchMatch()
 	playMusic(true)
 end
 
-local function roomMenuItems(m)
+-- ---------------------------------------------------------------------------
+-- Watching from the room
+--
+-- A member who does not play watches the match in a window of the room
+-- (room.watch.window) while the room goes on around it: chat, the menus and
+-- the member list keep working. WATCH AUTO (the default, kept per player)
+-- starts it on its own once the players' stream can play; WATCH watches a
+-- match this player skipped, or, when the screenpack has no window, watches
+-- it full screen (lobby.f_watchMatch). The engine draws the fight inside
+-- the window (setWatchWindow) and runs the room from its hooks meanwhile:
+--   * game.watch_tick: lobby.roomTick, once per engine frame;
+--   * game.border_bg and game.border: lobby.roomDraw, behind and around the
+--     window.
+-- Nothing that waits on the player (a message, lobby settings, this player's
+-- own match) may run inside those hooks: lobby.roomTick leaves it in
+-- rs.request and ends the watch (stopWatching), and the room loop runs it
+-- once launchFight has returned.
+
+-- Where WATCH AUTO / OFF is kept.
+lobby.prefsPath = 'save/lobby.json'
+local prefs = nil
+
+local function loadPrefs()
+	if prefs == nil then
+		prefs = {}
+		local ok, t = pcall(jsonDecode, lobby.prefsPath)
+		if ok and type(t) == 'table' then
+			prefs = t
+		end
+	end
+	return prefs
+end
+
+-- True when matches are watched automatically (WATCH AUTO, the default).
+function lobby.f_autoWatch()
+	return loadPrefs().autowatch ~= 'off'
+end
+
+function lobby.f_setAutoWatch(on)
+	loadPrefs().autowatch = on and 'auto' or 'off'
+	local ok, err = pcall(jsonEncode, prefs, lobby.prefsPath)
+	if not ok then
+		print('Lobby: ' .. tostring(err))
+	end
+end
+
+-- The match window in [Lobby Info] coordinates (x, y, width, height), or
+-- nil when the screenpack has none (room.watch.window = 0, 0, 0, 0).
+local function watchWindow()
+	local w = info().room.watch
+	local win = w and w.window
+	if type(win) ~= 'table' then
+		return nil
+	end
+	local x, y = tonumber(win[1]) or 0, tonumber(win[2]) or 0
+	local width, height = tonumber(win[3]) or 0, tonumber(win[4]) or 0
+	if width <= 0 or height <= 0 then
+		return nil
+	end
+	return x, y, width, height
+end
+
+-- True when this game and the screenpack can show a match in the room.
+function lobby.f_watchWindowAvailable()
+	return setWatchWindow ~= nil and clearWatchWindow ~= nil and stopWatching ~= nil and watchWindow() ~= nil
+end
+
+-- A localcoord as the engine maps it onto its 320 units wide 4:3 space
+-- (Rect.SetLocalcoord): the size of one game unit and the left edge.
+local function localSpace(lc)
+	local lx, ly = 320, 240
+	if type(lc) == 'table' and (tonumber(lc[1]) or 0) > 0 and (tonumber(lc[2]) or 0) > 0 then
+		lx, ly = tonumber(lc[1]), tonumber(lc[2])
+	end
+	local v = lx
+	if lx * 3 > ly * 4 then
+		v = ly * 4 / 3
+	end
+	return v / 320, -(lx * 320 / v - 320) / 2
+end
+
+-- A rectangle in [Lobby Info] coordinates converted to the screenpack's
+-- ([Info] localcoord), the units setWatchWindow takes. The two differ when
+-- [Lobby Info] sets its own localcoord.
+function lobby.f_toMotifRect(x, y, w, h)
+	local ls, lo = localSpace(info().localcoord)
+	local ms, mo = localSpace(motif.info and motif.info.localcoord)
+	return (x / ls + lo - mo) * ms, y / ls * ms, w / ls * ms, h / ls * ms
+end
+
+-- The pairing the room's window shows or waits for, or nil: the match
+-- being played when this player is not in it, the lobby allows watching,
+-- the screenpack has a window, and WATCH is AUTO and the match was not
+-- watched or skipped already, or WATCH asked for this match.
+function lobby.f_watchSeq(rs)
+	local s = L.state
+	local cur = s and s.current
+	if s == nil or s.phase ~= 'playing' or cur == nil then
+		return nil
+	end
+	if (tonumber(s.settings and s.settings.watch) or 0) <= 0 then
+		return nil
+	end
+	local me = nakama.userId()
+	if cur.player1 == me or cur.player2 == me or not lobby.f_watchWindowAvailable() then
+		return nil
+	end
+	if rs.watch.manual == cur.seq then
+		return cur.seq
+	end
+	if not lobby.f_autoWatch() or rs.watch.done[cur.seq] then
+		return nil
+	end
+	return cur.seq
+end
+
+-- The room's state from one frame to the next (lobby.roomTick,
+-- lobby.roomDraw).
+function lobby.newRoomState()
+	local r = info().room
+	return {
+		m = newMenu(r.menu),
+		pm = newMenu(r.playermenu),
+		focus = 'menu', -- 'menu', 'chat', 'players' or 'playermenu'
+		cursorIndex = 1,
+		target = nil,
+		entry = nil,
+		guard = lobby.inputGuardFrames,
+		signature = nil,
+		-- What the room loop runs next: {kind = 'closed' (reason), 'leave',
+		-- 'play', 'settings', 'watch' (full screen) or 'window' (seq)}.
+		request = nil,
+		-- The match plays in the window (lobby.roomTick runs from the engine).
+		watching = false,
+		watch = {
+			seq = nil, -- the pairing the window shows or waits for
+			ready = false, -- its stream can play
+			done = {}, -- pairings watched or skipped: WATCH AUTO leaves them
+			asked = {}, -- pairings whose stream was asked for from its start
+			manual = nil, -- the pairing WATCH asked for
+			transport = nil, -- how the stream arrives: 'p2p' or 'server'
+			link = nil, -- the pairing the direct link to its host was started for
+		},
+	}
+end
+
+-- Leaves req for the room loop. While the match plays in the window, the
+-- watch ends first: req runs once launchFight has returned.
+local function roomRequest(rs, req, opts)
+	if rs.request == nil then
+		rs.request = req
+	end
+	if opts.watching and stopWatching ~= nil then
+		stopWatching()
+	end
+end
+
+-- The direct link to the host of pairing seq (nakama.startWatchLink), the
+-- stream's first choice: started once per pairing, as soon as the window
+-- waits for it, so the stream comes straight from the host where it can and
+-- the lobby's relay is only the fallback.
+function lobby.f_startWatchLink(w, seq, host)
+	if w.link == seq or host == nil then
+		return
+	end
+	if w.link ~= nil then
+		lobby.f_stopWatchLink(w)
+	end
+	w.link = seq
+	if nakama.startWatchLink ~= nil then
+		pcall(nakama.startWatchLink, host)
+	end
+end
+
+-- Closes the direct link, when one was started.
+function lobby.f_stopWatchLink(w)
+	if w.link == nil then
+		return
+	end
+	w.link = nil
+	if nakama.stopWatchLink ~= nil then
+		pcall(nakama.stopWatchLink)
+	end
+end
+
+-- Follows the pairing the window waits for (not while it plays).
+local function updateWatch(rs)
+	local w = rs.watch
+	local cur = L.state and L.state.current
+	if w.manual ~= nil and (cur == nil or cur.seq ~= w.manual) then
+		w.manual = nil
+	end
+	w.seq = lobby.f_watchSeq(rs)
+	w.ready = false
+	if w.seq == nil then
+		-- WATCH OFF, the match ended or this player plays next.
+		lobby.f_stopWatchLink(w)
+		return
+	end
+	-- The players' stream has started: connect to the host now.
+	if cur.watch then
+		lobby.f_startWatchLink(w, w.seq, cur.player1)
+	end
+	local st = streamOf(w.seq)
+	-- A member who missed the start of the stream (joined the lobby during
+	-- the match) asks the lobby to send it from its start.
+	if st == nil and cur.watch and not w.asked[w.seq] then
+		w.asked[w.seq] = true
+		pcall(nakama.lobbySend, 'watch', {seq = w.seq})
+	elseif cur.watch and needsBackfill(w.seq) then
+		-- A gap left by a link stopped earlier: sending the command clears it.
+		pcall(nakama.lobbySend, 'watch', {seq = w.seq})
+	end
+	if st ~= nil and st.reset_reason ~= nil then
+		-- The players withdrew the stream: nothing to watch.
+		w.done[w.seq] = true
+		w.seq = nil
+		lobby.f_stopWatchLink(w)
+	elseif st ~= nil and st.ready then
+		w.ready = true
+	end
+end
+
+local function roomMenuItems(rs)
+	local m = rs.m
 	local s = L.state
 	local set = s and s.settings or {}
 	local host = isHost()
@@ -2198,12 +2515,23 @@ local function roomMenuItems(m)
 			local t = s.tournament or {}
 			return not t.started or t.finished
 		elseif name == 'watch' then
-			return lobby.f_canWatch()
+			-- Not while the window shows the match or waits for it.
+			return lobby.f_canWatch() and rs.watch.seq == nil and not rs.watching
+		elseif name == 'autowatch' then
+			return lobby.f_watchWindowAvailable()
 		end
 		return true
 	end, function(name, text)
 		if name == 'ready' and L.me ~= nil and L.me.ready and (v.unready or '') ~= '' then
 			return v.unready
+		elseif name == 'autowatch' then
+			local shown = v.watchoff
+			if lobby.f_autoWatch() then
+				shown = v.watchauto
+			end
+			if (shown or '') ~= '' then
+				return shown
+			end
 		end
 	end))
 end
@@ -2241,186 +2569,518 @@ local function playerMenuItems(pm, target)
 	end))
 end
 
+-- One frame of the room: the lobby state, this player's input and what
+-- follows from them. It never waits: what does is left in rs.request for
+-- the room loop. opts.watching: run by the engine (game.watch_tick) while
+-- the match plays in the window.
+function lobby.roomTick(rs, opts)
+	opts = opts or {}
+	local watching = opts.watching == true
+	if rs.request ~= nil then
+		-- On the way out of the watch, or the room loop runs it next.
+		return
+	end
+	local r = info().room
+	lobby.f_poll()
+	local closed = roomClosed()
+	if closed ~= nil then
+		roomRequest(rs, {kind = 'closed', reason = closed}, opts)
+		return
+	end
+	lobby.f_tickPing()
+	-- This player's match comes first, even over the match being watched.
+	if myPairingPending() then
+		roomRequest(rs, {kind = 'play'}, opts)
+		return
+	end
+	local w = rs.watch
+	if watching then
+		if L.frame % 30 == 0 then
+			local st = streamOf(w.seq)
+			w.transport = st and st.transport or nil
+		end
+	else
+		updateWatch(rs)
+	end
+	local layout = watching or w.seq ~= nil
+	local m, pm = rs.m, rs.pm
+	-- Rebuild the menus when what they depend on changes.
+	local s = L.state
+	local sig = table.concat({tostring(isHost()), s.phase, tostring(s.started), tostring(L.me and L.me.ready),
+		tostring(s.settings and s.settings.start), tostring(s.tournament and s.tournament.started),
+		tostring(s.tournament and s.tournament.finished), tostring(s.settings and s.settings.format),
+		tostring(lobby.f_canWatch()), tostring(layout), tostring(rs.watching), tostring(w.seq),
+		tostring(lobby.f_autoWatch())}, '|')
+	if sig ~= rs.signature then
+		rs.signature = sig
+		roomMenuItems(rs)
+		if rs.focus == 'playermenu' then
+			playerMenuItems(pm, rs.target)
+		end
+	end
+	local move = menuMove
+	local keys = r.menu
+	if layout then
+		move = barMove
+	end
+	local members = s.members or {}
+	if rs.focus == 'players' and rs.cursorIndex > #members then
+		rs.cursorIndex = math.max(1, #members)
+	end
+	if rs.guard > 0 then
+		rs.guard = rs.guard - 1
+	elseif rs.focus == 'chat' then
+		local done = editText(rs.entry, lobby.chatLimit)
+		if done ~= nil then
+			if done and rs.entry.text ~= '' then
+				pcall(nakama.lobbySend, 'chat', {text = rs.entry.text})
+			end
+			rs.entry = nil
+			rs.focus = 'menu'
+			rs.guard = lobby.inputGuardFrames
+		end
+	elseif not watching and fadeActive() then
+		-- (While watching, the fade is the fight's.)
+		if esc() or pressed(keys.cancel.key) then
+			fadeSkip()
+		end
+	elseif rs.focus == 'players' then
+		if cancelPressed(keys) then
+			snd(info().cancel.snd)
+			rs.focus = 'menu'
+		elseif pressed(keys.next.key) then
+			if rs.cursorIndex < #members then
+				rs.cursorIndex = rs.cursorIndex + 1
+				snd(info().cursor.move.snd)
+			end
+		elseif pressed(keys.previous.key) then
+			if rs.cursorIndex > 1 then
+				rs.cursorIndex = rs.cursorIndex - 1
+				snd(info().cursor.move.snd)
+			end
+		elseif pressed(keys.done.key) and members[rs.cursorIndex] ~= nil then
+			snd(info().cursor.done.snd)
+			rs.target = members[rs.cursorIndex].user_id
+			playerMenuItems(pm, rs.target)
+			pm.item, pm.cursorPosY = 1, 1
+			rs.focus = 'playermenu'
+		end
+	elseif rs.focus == 'playermenu' then
+		if cancelPressed(r.playermenu) then
+			snd(info().cancel.snd)
+			rs.focus = 'players'
+		elseif pressed(r.playermenu.done.key) then
+			local name = pm.items[pm.item] and pm.items[pm.item].itemname or ''
+			snd(info().cursor.done.snd)
+			if name == 'mute' then
+				L.muted[rs.target] = not L.muted[rs.target] or nil
+			elseif name == 'kick' then
+				pcall(nakama.lobbySend, 'kick', {user_id = rs.target})
+			elseif name == 'host' then
+				pcall(nakama.lobbySend, 'host', {user_id = rs.target})
+			end
+			rs.focus = 'players'
+		else
+			move(pm)
+		end
+	else
+		if cancelPressed(keys) then
+			local name = m.items[m.item] and m.items[m.item].itemname or ''
+			snd(info().cancel.snd)
+			-- Cancel moves the cursor to LEAVE, and leaves from there. A
+			-- screenpack that hides LEAVE leaves on the first cancel.
+			local hasLeave = false
+			for _, it in ipairs(m.items) do
+				if it.itemname == 'leave' then
+					hasLeave = true
+				end
+			end
+			if name == 'leave' or not hasLeave then
+				roomRequest(rs, {kind = 'leave'}, opts)
+				return
+			end
+			selectMenuItem(m, 'leave')
+		elseif pressed(keys.done.key) then
+			local name = m.items[m.item] and m.items[m.item].itemname or ''
+			if name == 'leave' then
+				snd(info().cancel.snd)
+				roomRequest(rs, {kind = 'leave'}, opts)
+				return
+			end
+			snd(info().cursor.done.snd)
+			if name == 'ready' then
+				local ready = not (L.me ~= nil and L.me.ready)
+				pcall(nakama.lobbySend, 'ready', {ready = ready})
+				if ready then
+					eventSnd('ready')
+				end
+			elseif name == 'chat' then
+				rs.entry = {text = ''}
+				rs.focus = 'chat'
+				resetKey()
+			elseif name == 'settings' then
+				roomRequest(rs, {kind = 'settings'}, opts)
+				return
+			elseif name == 'start' then
+				pcall(nakama.lobbySend, 'start')
+			elseif name == 'watch' and s.current ~= nil then
+				if lobby.f_watchWindowAvailable() then
+					-- In the window, also when WATCH is OFF or this match
+					-- was skipped.
+					w.manual = s.current.seq
+					w.done[s.current.seq] = nil
+					rs.signature = nil
+				else
+					roomRequest(rs, {kind = 'watch'}, opts)
+					return
+				end
+			elseif name == 'autowatch' then
+				local on = not lobby.f_autoWatch()
+				lobby.f_setAutoWatch(on)
+				if not on and w.seq ~= nil then
+					-- OFF ends the watch, and WATCH AUTO does not start this
+					-- match again.
+					w.done[w.seq] = true
+					w.manual = nil
+					if watching then
+						stopWatching()
+					else
+						w.seq = nil
+						w.ready = false
+						lobby.f_stopWatchLink(w)
+					end
+				end
+				rs.signature = nil
+			elseif name == 'players' then
+				rs.focus = 'players'
+				rs.cursorIndex = 1
+				for i, member in ipairs(members) do
+					if member.user_id == nakama.userId() then
+						rs.cursorIndex = i
+					end
+				end
+			end
+		else
+			move(m)
+		end
+	end
+	if not watching and w.ready and w.seq ~= nil then
+		roomRequest(rs, {kind = 'window', seq = w.seq}, opts)
+	end
+end
+
+-- The match window's frame and background, and its text (room.watch.text,
+-- %s, %s: the players): text.waiting until the stream can play,
+-- text.loading behind the fight while it loads (the fight covers it).
+local function drawWatchWindow(watching)
+	local w = info().room.watch
+	local x, y = watchWindow()
+	if x == nil then
+		return
+	end
+	drawBox(w.frame, x, y)
+	drawBox(w.bg, x, y)
+	local cur = L.state and L.state.current
+	local p1, p2 = '', ''
+	if cur ~= nil then
+		p1 = cur.player1_name or nameOf(cur.player1)
+		p2 = cur.player2_name or nameOf(cur.player2)
+	end
+	local texts = w.text and w.text.text or {}
+	drawText(w.text, fmt(texts[watching and 'loading' or 'waiting'], p1, p2), x, y)
+end
+
+-- How the watched stream arrives (room.watch.transport.text.p2p or
+-- .server), next to the window.
+local function drawWatchTransport(rs)
+	local tr = rs.watch.transport
+	local w = info().room.watch
+	local x, y = watchWindow()
+	if x == nil or tr == nil or tr == '' or w.transport == nil then
+		return
+	end
+	local texts = w.transport.text or {}
+	drawText(w.transport, texts[tr] or '', x, y)
+end
+
+-- Draws the room. opts.watching: the match plays in the window. opts.layer:
+-- 'bg' draws what lies behind the window (game.border_bg), 'fg' the rest
+-- (game.border), nil both.
+function lobby.roomDraw(rs, opts)
+	opts = opts or {}
+	local layout = nil
+	if opts.watching or rs.watch.seq ~= nil then
+		layout = {watching = opts.watching == true}
+	end
+	if opts.layer ~= 'fg' then
+		drawBackground()
+		if layout ~= nil then
+			drawWatchWindow(layout.watching)
+		end
+	end
+	if opts.layer ~= 'bg' then
+		local shown = rs.m
+		if rs.focus == 'playermenu' then
+			shown = rs.pm
+		end
+		local cursor = nil
+		if rs.focus == 'players' or rs.focus == 'playermenu' then
+			cursor = rs.cursorIndex
+		end
+		drawRoom(shown, rs.focus, cursor, rs.entry, layout)
+		if layout ~= nil and layout.watching then
+			drawWatchTransport(rs)
+		end
+		drawForeground()
+	end
+end
+
+-- Loading while a match plays in the room's window goes through the engine
+-- (whose loading runs the room's hooks) instead of the select screen's own
+-- full-screen loop, which Config.VsScreenLoading picks. The Lua side reads
+-- the option as off for the watch; the option itself (and config.ini) is
+-- never changed.
+local engineLoading = false
+local loadingShim = false
+function lobby.f_forceEngineLoading(on)
+	engineLoading = on == true
+	if engineLoading and not loadingShim and gameOption ~= nil then
+		loadingShim = true
+		local orig = gameOption
+		gameOption = function(name, ...)
+			if engineLoading and name == 'Config.VsScreenLoading' then
+				return false
+			end
+			return orig(name, ...)
+		end
+	end
+end
+
+-- Watches the pairing seq in the room's window, whose stream is ready
+-- (lobby.roomTick checked). Returns when the match, or watching, ends.
+local function watchInRoom(rs, seq)
+	local w = rs.watch
+	w.ready = false
+	local cur = L.state and L.state.current
+	local stream = streamOf(seq)
+	if cur == nil or cur.seq ~= seq or stream == nil or not stream.ready then
+		-- Gone or not ready after all: the next tick looks again.
+		w.seq = nil
+		return
+	end
+	-- One go per match: when it ends, fails or is stopped, WATCH AUTO does
+	-- not start it again.
+	w.done[seq] = true
+	w.manual = nil
+	local selection = stream.match_info.selection
+	if type(selection) ~= 'table' or type(selection.p1) ~= 'table' or type(selection.p2) ~= 'table' or
+		#selection.p1 == 0 or #selection.p2 == 0 or (stream.stage or '') == '' then
+		addChat({kind = 'error', text = message('watchfailed', 'This match cannot be watched.')})
+		w.seq = nil
+		lobby.f_stopWatchLink(w)
+		return
+	end
+	-- As lobby.f_watchMatch: the players' settings from the stream header,
+	-- then the lobby's rules on top.
+	local ok, started = pcall(nakama.startSpectatorReplay, {wait = false})
+	if not ok or started ~= true then
+		exitReplay()
+		print('Lobby watch: ' .. tostring(started))
+		local key = 'watchfailed'
+		if not ok and tostring(started):find('mismatch', 1, true) then
+			key = 'watchcontent'
+		end
+		addChat({kind = 'error', text = message(key, 'This match cannot be watched.')})
+		w.seq = nil
+		lobby.f_stopWatchLink(w)
+		return
+	end
+	local winner = nil
+	local game = start.f_game
+	-- Undoes everything from here on, also when the setup below fails
+	-- halfway.
+	local function cleanup()
+		start.f_game = game
+		lobby.f_forceEngineLoading(false)
+		pcall(clearWatchWindow)
+		-- (hook.stop raises for a list nothing was ever added to: the
+		-- setup can fail before the hooks are added.)
+		pcall(hook.stop, 'game.watch_tick', 'lobbywatch')
+		pcall(hook.stop, 'game.border_bg', 'lobbywatch')
+		pcall(hook.stop, 'game.border', 'lobbywatch')
+		rs.watching = false
+		w.seq = nil
+		w.transport = nil
+		rs.signature = nil
+		lobby.f_stopWatchLink(w)
+		online.f_clearMatchNames()
+		exitReplay()
+		setMatchNo(-1)
+		main.f_default()
+		pcall(nakama.lobbySend, 'watching', {watching = false})
+		esc(false)
+		-- The room stayed on screen: no fade, and keys typed into the chat
+		-- meanwhile are kept. The fight's music gives way to the room's.
+		playMusic(true)
+	end
+	local okSetup, errSetup = pcall(function()
+		pcall(nakama.lobbySend, 'watching', {watching = true})
+		-- Normally already open since the wait began (updateWatch).
+		lobby.f_startWatchLink(w, seq, cur.player1)
+		local names = stream.match_info.names
+		online.f_clearMatchNames()
+		if type(names) == 'table' then
+			pcall(nakama.setMatchNames, tostring(names[1] or ''), tostring(names[2] or ''))
+		end
+		lobby.f_setupMatch(copy(L.state and L.state.settings or {}))
+		start.f_selectReset(true)
+		main.t_availableChars = main.f_tableCopy(start.f_getOrderChars())
+		start.t_roster = {}
+		-- Replay inputs are read per side: controller 1 is player 1.
+		resetRemapInput()
+		main.f_saveBaseRemapInput()
+		start.f_game = function(common)
+			winner = game(common)
+			return winner
+		end
+		lobby.f_forceEngineLoading(true)
+		local x, y, width, height = lobby.f_toMotifRect(watchWindow())
+		setWatchWindow(x, y, width, height, tonumber(info().room.watch.volume) or 50)
+		rs.watching = true
+		w.seq = seq
+		w.transport = stream.transport
+		rs.signature = nil
+		-- The hooks run inside the engine's frame: an error must not leave
+		-- the player stuck in a room that no longer answers.
+		local reported = {}
+		local function guarded(what, fn, ...)
+			local okRun, errRun = pcall(fn, ...)
+			if not okRun then
+				if not reported[what] then
+					reported[what] = true
+					print('Lobby watch ' .. what .. ': ' .. tostring(errRun))
+				end
+				if what == 'tick' then
+					stopWatching()
+				end
+			end
+		end
+		hook.add('game.watch_tick', 'lobbywatch', function()
+			guarded('tick', lobby.roomTick, rs, {watching = true})
+		end)
+		hook.add('game.border_bg', 'lobbywatch', function()
+			guarded('draw', lobby.roomDraw, rs, {watching = true, layer = 'bg'})
+		end)
+		hook.add('game.border', 'lobbywatch', function()
+			guarded('draw', lobby.roomDraw, rs, {watching = true, layer = 'fg'})
+		end)
+	end)
+	if not okSetup then
+		print('Lobby watch: ' .. tostring(errSetup))
+		cleanup()
+		addChat({kind = 'error', text = message('watchfailed', 'This match cannot be watched.')})
+		return
+	end
+	local okFight, err = pcall(launchFight, {
+		p1char = selection.p1,
+		p2char = selection.p2,
+		p1teammode = selection.p1teammode,
+		p2teammode = selection.p2teammode,
+		p1numchars = #selection.p1,
+		p2numchars = #selection.p2,
+		stage = stream.stage,
+		forceStage = true,
+		vsscreen = false,
+		p1orderselect = false,
+		p2orderselect = false,
+		continue = false,
+		quickcontinue = true,
+		victoryscreen = false,
+		winscreen = false,
+	})
+	if not okFight then
+		print('Lobby watch: ' .. tostring(err))
+	end
+	print('Lobby watch: match ' .. tostring(seq) .. ' winner ' .. tostring(winner))
+	cleanup()
+end
+
+-- Runs what lobby.roomTick left in rs.request. Returns true and the room's
+-- result when the player leaves the room.
+local function runRoomRequest(rs, req)
+	local r = info().room
+	if req.kind == 'closed' or req.kind == 'leave' or req.kind == 'play' then
+		-- No longer waiting to watch: leaving, or this player's own match.
+		lobby.f_stopWatchLink(rs.watch)
+	end
+	if req.kind == 'closed' then
+		if req.reason == 'kicked' then
+			warn(r.status.text ~= nil and r.status.text.kicked or 'You were removed from the lobby.')
+		elseif req.reason == 'service' then
+			warn(online.f_reasonText('service'))
+		else
+			warn(r.status.text ~= nil and r.status.text.closed or 'The lobby has closed.')
+		end
+		return true, req.reason
+	elseif req.kind == 'leave' then
+		return true, nil
+	elseif req.kind == 'play' then
+		-- Still pending: the watch that ended first took a moment.
+		if myPairingPending() then
+			rs.entry = nil
+			rs.focus = 'menu'
+			lobby.f_playMatch()
+			rs.guard = lobby.afterMatchGuardFrames
+		end
+	elseif req.kind == 'settings' then
+		if isHost() and L.state ~= nil and roomClosed() == nil then
+			local new = lobby.f_settings('edit', L.state.settings, function()
+				lobby.f_poll()
+				lobby.f_tickPing()
+				return roomClosed() ~= nil or myPairingPending()
+			end)
+			if new ~= nil and roomClosed() == nil then
+				pcall(nakama.lobbySend, 'settings', {settings = new})
+			end
+		end
+		rs.guard = lobby.inputGuardFrames
+	elseif req.kind == 'watch' then
+		-- f_watchMatch starts the link to the same host again, which keeps
+		-- the open one (startWatchLink), and closes it when it is done.
+		rs.watch.link = nil
+		lobby.f_watchMatch()
+		rs.guard = lobby.afterMatchGuardFrames
+	elseif req.kind == 'window' then
+		watchInRoom(rs, req.seq)
+	end
+	rs.signature = nil
+	return false
+end
+
 -- The lobby room. Returns when the player leaves or the lobby ends: nil,
 -- or the roomClosed() reason ('kicked', 'service', 'gone').
 function lobby.f_room()
-	local r = info().room
-	local m = newMenu(r.menu)
-	local pm = newMenu(r.playermenu)
-	local focus = 'menu'
-	local cursorIndex = 1
-	local target = nil
-	local entry = nil
-	local guard = lobby.inputGuardFrames
-	local signature = nil
+	local rs = lobby.newRoomState()
+	lobby.room = rs
 	bgReset(motif.lobbybgdef.BGDef)
 	fadeInInit(info().fadein.FadeData)
 	playMusic(false)
 	resetKey()
-	local function tick()
-		lobby.f_poll()
-		lobby.f_tickPing()
-		return roomClosed() ~= nil or myPairingPending()
-	end
 	while true do
-		lobby.f_poll()
-		local closed = roomClosed()
-		if closed ~= nil then
-			if closed == 'kicked' then
-				warn(r.status.text ~= nil and r.status.text.kicked or 'You were removed from the lobby.')
-			elseif closed == 'service' then
-				warn(online.f_reasonText('service'))
-			else
-				warn(r.status.text ~= nil and r.status.text.closed or 'The lobby has closed.')
-			end
-			return closed
+		if rs.request == nil then
+			lobby.roomTick(rs)
 		end
-		lobby.f_tickPing()
-		if myPairingPending() then
-			entry = nil
-			focus = 'menu'
-			lobby.f_playMatch()
-			guard = lobby.afterMatchGuardFrames
-			signature = nil
+		local req = rs.request
+		if req ~= nil then
+			rs.request = nil
+			local done, result = runRoomRequest(rs, req)
+			if done then
+				lobby.f_stopWatchLink(rs.watch)
+				lobby.room = nil
+				return result
+			end
 		else
-			-- Rebuild the menus when what they depend on changes.
-			local s = L.state
-			local sig = table.concat({tostring(isHost()), s.phase, tostring(s.started), tostring(L.me and L.me.ready),
-				tostring(s.settings and s.settings.start), tostring(s.tournament and s.tournament.started),
-				tostring(s.tournament and s.tournament.finished), tostring(s.settings and s.settings.format),
-				tostring(lobby.f_canWatch())}, '|')
-			if sig ~= signature then
-				signature = sig
-				roomMenuItems(m)
-				if focus == 'playermenu' then
-					playerMenuItems(pm, target)
-				end
-			end
-			local members = s.members or {}
-			if focus == 'players' and cursorIndex > #members then
-				cursorIndex = math.max(1, #members)
-			end
-			if guard > 0 then
-				guard = guard - 1
-			elseif focus == 'chat' then
-				local done = editText(entry, lobby.chatLimit)
-				if done ~= nil then
-					if done and entry.text ~= '' then
-						pcall(nakama.lobbySend, 'chat', {text = entry.text})
-					end
-					entry = nil
-					focus = 'menu'
-					guard = lobby.inputGuardFrames
-				end
-			elseif fadeActive() then
-				if esc() or pressed(r.menu.cancel.key) then
-					fadeSkip()
-				end
-			elseif focus == 'players' then
-				if cancelPressed(r.menu) then
-					snd(info().cancel.snd)
-					focus = 'menu'
-				elseif pressed(r.menu.next.key) then
-					if cursorIndex < #members then
-						cursorIndex = cursorIndex + 1
-						snd(info().cursor.move.snd)
-					end
-				elseif pressed(r.menu.previous.key) then
-					if cursorIndex > 1 then
-						cursorIndex = cursorIndex - 1
-						snd(info().cursor.move.snd)
-					end
-				elseif pressed(r.menu.done.key) and members[cursorIndex] ~= nil then
-					snd(info().cursor.done.snd)
-					target = members[cursorIndex].user_id
-					playerMenuItems(pm, target)
-					pm.item, pm.cursorPosY = 1, 1
-					focus = 'playermenu'
-				end
-			elseif focus == 'playermenu' then
-				if cancelPressed(r.playermenu) then
-					snd(info().cancel.snd)
-					focus = 'players'
-				elseif pressed(r.playermenu.done.key) then
-					local name = pm.items[pm.item] and pm.items[pm.item].itemname or ''
-					snd(info().cursor.done.snd)
-					if name == 'mute' then
-						L.muted[target] = not L.muted[target] or nil
-					elseif name == 'kick' then
-						pcall(nakama.lobbySend, 'kick', {user_id = target})
-					elseif name == 'host' then
-						pcall(nakama.lobbySend, 'host', {user_id = target})
-					end
-					focus = 'players'
-				else
-					menuMove(pm)
-				end
-			else
-				if cancelPressed(r.menu) then
-					local name = m.items[m.item] and m.items[m.item].itemname or ''
-					snd(info().cancel.snd)
-					-- Cancel moves the cursor to LEAVE, and leaves from there. A
-					-- screenpack that hides LEAVE leaves on the first cancel.
-					local hasLeave = false
-					for _, it in ipairs(m.items) do
-						if it.itemname == 'leave' then
-							hasLeave = true
-						end
-					end
-					if name == 'leave' or not hasLeave then
-						return
-					end
-					selectMenuItem(m, 'leave')
-				elseif pressed(r.menu.done.key) then
-					local name = m.items[m.item] and m.items[m.item].itemname or ''
-					if name == 'leave' then
-						snd(info().cancel.snd)
-						return
-					end
-					snd(info().cursor.done.snd)
-					if name == 'ready' then
-						local ready = not (L.me ~= nil and L.me.ready)
-						pcall(nakama.lobbySend, 'ready', {ready = ready})
-						if ready then
-							eventSnd('ready')
-						end
-					elseif name == 'chat' then
-						entry = {text = ''}
-						focus = 'chat'
-						resetKey()
-					elseif name == 'settings' then
-						local new = lobby.f_settings('edit', s.settings, tick)
-						if new ~= nil and roomClosed() == nil then
-							pcall(nakama.lobbySend, 'settings', {settings = new})
-						end
-						guard = lobby.inputGuardFrames
-						signature = nil
-					elseif name == 'start' then
-						pcall(nakama.lobbySend, 'start')
-					elseif name == 'watch' then
-						lobby.f_watchMatch()
-						guard = lobby.afterMatchGuardFrames
-						signature = nil
-					elseif name == 'players' then
-						focus = 'players'
-						cursorIndex = 1
-						for i, member in ipairs(members) do
-							if member.user_id == nakama.userId() then
-								cursorIndex = i
-							end
-						end
-					end
-				else
-					menuMove(m)
-				end
-			end
-			drawBackground()
-			local shown = m
-			if focus == 'playermenu' then
-				shown = pm
-			end
-			drawRoom(shown, focus, (focus == 'players' or focus == 'playermenu') and cursorIndex or nil, entry)
-			drawForeground()
+			lobby.roomDraw(rs)
 			refresh()
 		end
 	end
@@ -2446,5 +3106,14 @@ function lobby.f_menu(t, item)
 		playBgm({source = 'motif.title', interrupt = true})
 	end
 end
+
+-- The room's internals, for the unit tests (src/motif_lobby_test.go).
+lobby.internal = {
+	editText = editText,
+	phaseRemaining = phaseRemaining,
+	matchElapsed = matchElapsed,
+	updateWatch = updateWatch,
+	watchInRoom = watchInRoom,
+}
 
 return lobby

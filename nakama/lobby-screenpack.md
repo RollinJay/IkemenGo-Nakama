@@ -98,7 +98,8 @@ The room shows:
 - eight member slots, in the order the members first joined: filled slots for members, open slots up to the lobby size, and closed slots beyond it;
 - the room menu;
 - the status line, or the in-game panel while a match is played, or the results panel between matches;
-- the chat log.
+- the chat log;
+- while a match is played, a window in which the members who do not play watch it (see [Watching a match](#watching-a-match)).
 
 Each member slot shows the member's number, name, a host marker, a marker for this player's own slot, region (the `region` of the member's server profile, as text or a flag sprite), connection type, connection bars, record in this lobby (wins and losses), and a state badge:
 
@@ -122,7 +123,8 @@ The room menu:
 | `chat` | Opens chat entry at the bottom of the room. |
 | `settings` | Host only: lobby settings (see above for when it is offered). |
 | `start` | Host only. In the queue formats with the start setting host, begins pairing; offered until the host has used it. In the tournament formats, starts a tournament with the members who are ready; offered whenever no tournament is running, also when the start setting is auto. |
-| `watch` | Watches the match being played (see [Watching a match](#watching-a-match)). Offered to members who are not playing, once the match's fight has started, when the lobby's spectators setting is not off. |
+| `autowatch` | Switches between WATCH AUTO (`room.menu.valuename.watchauto`) and WATCH OFF (`valuename.watchoff`); see [Watching a match](#watching-a-match). The choice is kept on this machine (`save/lobby.json`) and starts as AUTO. Offered when the screenpack has a match window. |
+| `watch` | Watches the match being played (see [Watching a match](#watching-a-match)): in the room's window when the screenpack has one (also with WATCH OFF, or for a match this player stopped watching), full screen otherwise. Offered to members who are not playing, once the match's fight has started, when the lobby's spectators setting is not off and the window does not show or wait for the match already. |
 | `players` | Moves a cursor over the member slots; confirm opens the player menu for that member. |
 | `leave` | Leaves the lobby. Cancel first moves the cursor to this item, and leaves when pressed on it. |
 
@@ -141,7 +143,15 @@ The two players of a pairing leave the room for their match. A full-screen messa
 
 #### Watching a match
 
-WATCH plays the match being played on this machine, from the players' own inputs, as the players see it but a few seconds behind them (the lobby's spectators setting). The full-screen message `status.text.watching` shows the two players' names while the match's first seconds arrive; Esc or the lobby search menu's cancel key (`browser.menu.cancel.key`) stops waiting. Then the fight loads with the players' characters, palettes, team modes and stage, and plays; the other members see this player as watching. A member who starts watching after the match began receives the match from its start and plays it at four times the speed until it has caught up with what has arrived. The fight ends without the victory and results screens, and the room returns. If the players' inputs stop arriving for 20 seconds plus the spectators setting (a stalled connection), watching ends the same way. A member who is ready keeps their turn while watching: when their match comes up, it starts once they are back in the room.
+Members who do not play watch the match being played on their own machine, from the players' own inputs, as the players see it but a few seconds behind them (the lobby's spectators setting).
+
+**In the room's window.** When the screenpack has a match window (`room.watch.window`, on by default), the match plays inside it while the room goes on around it: the chat, the room menu, the player menu and the member list keep working, and the room keeps showing the lobby's state. While the window shows a match or waits for one, the room uses its watching layout: the members in `room.watching.slots` (by default one column left of the window) and the room menu as a bar (`room.watching.menu`, moved with its own `next` and `previous` keys, left and right by default; confirm and cancel are `room.menu`'s). With WATCH AUTO (the default) this starts on its own: as soon as a match is played that this player is not in and the lobby's spectators setting is not off, the window shows `room.watch.text.text.waiting` with the players' names until the match's first seconds have arrived, then the fight loads (`text.loading`) and plays in the window, at `room.watch.volume` percent of the usual volume for its music and sounds. Nothing else of the fight changes: the players' characters, palettes, team modes and stage, without the versus, victory and results screens. The members' badges show this player as watching. While the match plays, the window can show how it arrives (`room.watch.transport`): `P2P` when it comes straight from the host over a direct connection, which the game tries first, or `SERVER` when the lobby relays it. Holding a button does not fast-forward the match, and Esc does not stop it (Esc cancels chat entry, as in the room).
+
+Watching in the window ends when the match ends, when WATCH is switched to OFF, when this player's own match comes up (it starts at once), and before anything that leaves the room's screen (lobby settings, LEAVE, a message that the lobby closed); that then follows. A match that ended, was stopped or could not be watched is not started again by WATCH AUTO; WATCH starts it again in the window. With WATCH OFF, matches are only watched with WATCH. The results panel is not drawn while this player still watches the match that produced it, so it does not tell the result before the window shows it.
+
+**Full screen.** With no window (`room.watch.window = 0, 0, 0, 0`), WATCH plays the match full screen. The full-screen message `status.text.watching` shows the two players' names while the match's first seconds arrive; Esc or the lobby search menu's cancel key (`browser.menu.cancel.key`) stops waiting. Then the fight loads and plays; Esc stops watching. The fight ends without the victory and results screens, and the room returns.
+
+In both cases, the game opens a direct connection to the match's host as soon as it waits for the match (in the window, from the moment the players' stream starts), so the match comes straight from the host where a direct connection can be made, and the lobby's relay is the fallback; the connection closes when watching or waiting ends. A member who starts watching after the match began receives the match from its start and plays it at four times the speed until it has caught up with what has arrived; the room's clocks (the match time, the results countdown) keep to real time meanwhile. If the players' inputs stop arriving for 20 seconds plus the spectators setting (a stalled connection), watching ends. A member who is ready keeps their turn while watching: when their match comes up, watching ends and the match starts.
 
 Watching needs the same game content as the players': the same engine version, screenpack, fight screen and roster. A member whose content or settings differ from the players' gets `message.watchcontent`; a match that cannot be watched for another reason (it ended, or its stream was withdrawn, before watching could start) gets `message.watchfailed`.
 
@@ -259,7 +269,7 @@ The rules summary is the format's name (with `streak_rule` added for winner stay
 | `room.code` | text | Room ID (%s). |
 | `room.count` | text | Members and size (%d, %d). |
 | `room.rules` | text | Rules summary (%s). |
-| `room.menu` | menu | Items `ready`, `chat`, `settings`, `start`, `watch`, `players`, `leave`; `valuename.unready`. |
+| `room.menu` | menu | Items `ready`, `chat`, `settings`, `start`, `autowatch`, `watch`, `players`, `leave`; `valuename.unready`, `valuename.watchauto`, `valuename.watchoff` (what `autowatch` shows). |
 | `room.playermenu` | menu | Items `mute`, `kick`, `host`, `back`; `valuename.unmute`. Drawn in place of the room menu. |
 
 ### Lobby room: member slots
@@ -330,6 +340,26 @@ Connection bars:
 | `room.chat.error` | text | Errors from the server and failed connections. |
 | `room.chat.input` | text | Chat entry (%s: the text typed so far), relative to `room.chat.pos`. |
 | `room.chat.input.box` | box | Behind the chat entry, relative to its offset. |
+
+### Lobby room: match window and watching layout
+
+The match window and the room's layout while the window shows a match or waits for one (see [Watching a match](#watching-a-match)). The window is in `[Lobby Info]` coordinates like everything else; the game converts it to screen pixels, so the same screenpack gives a bigger window on a bigger game resolution: the default (160 by 120 units in a 320x240 lobby) is half the screen, 320x240 pixels at 640x480. A window with the screen's aspect ratio shows a 4:3 stage without bars. The engine draws only the fight inside the window, not the screenpack's border (`[Video] Border`).
+
+| Key | Type | Meaning |
+|---|---|---|
+| `room.watch.window` | | x, y, width, height of the window. `0, 0, 0, 0`: no window; WATCH then watches full screen and `autowatch` is not offered. |
+| `room.watch.frame`, `room.watch.bg` | box | Drawn behind the window, frame first, relative to its x, y. |
+| `room.watch.text.text.<key>` | text map | Shown in the window, offset from its x, y: `waiting` (%s, %s: the players) until the match's stream can play, `loading` (%s, %s) behind the fight while it loads. |
+| `room.watch.transport.text.<key>` | text map | How the watched match arrives, offset from the window's x, y, while it plays: `p2p` (straight from the host) or `server` (relayed by the lobby). |
+| `room.watch.volume` | | Volume of the watched match's music and sounds, percent (default 50). |
+| `room.watching.slots.*` | | The member slots while the window shows a match or waits for one: every key of `room.slot` (`pos`, `spacing`, `columns`, `bg`, `cursor`, `name`, `badge`, `ping`, ...). Keys it does not set are not taken from `room.slot`. |
+| `room.watching.menu.pos`, `room.watching.menu.spacing` | | The room menu as a bar: the first item's position, and the gap between items. Each item is as wide as its text. |
+| `room.watching.menu.box` | box | Behind the bar, relative to its pos. |
+| `room.watching.menu.item`, `room.watching.menu.active` | text | Items, and the highlighted item. |
+| `room.watching.menu.cursor` | box | Behind the highlighted item, relative to its position; its right edge is widened by the item's width. |
+| `room.watching.menu.next.key`, `room.watching.menu.previous.key` | | Keys that move along the bar (default `R` and `L`). |
+
+The rest of the room (header, panels, status line, in-game panel, chat) keeps its usual layout, so a screenpack places those around the window too. While the match plays, the room is drawn behind the window (the background, the window's frame and its texts) and around it (everything else): elements that overlap the window are drawn over the match.
 
 ## Background, music and related screens
 
@@ -447,7 +477,8 @@ room.slot.ping.level.4.spr = 720, 4
 | `lobby.chatLimit` | 80 | Longest chat message. |
 | `lobby.nameLength` | `{2, 16}` | Shortest and longest online name, checked before the name is sent; the server checks the same. The lifebar's name fonts decide which characters a name can have. |
 | `lobby.accountFrames` | 2100 | Frames to wait for the server to save a new online name. |
-| `lobby.watchFrames` | 1800 | Frames watching waits for the match's stream to become playable. |
+| `lobby.watchFrames` | 1800 | Frames full-screen watching waits for the match's stream to become playable. |
+| `lobby.prefsPath` | `save/lobby.json` | Where this machine keeps WATCH AUTO / OFF. |
 
 The hook list `lobby.f_setupMatch` runs after the lobby has set up a match's rules, with the lobby's settings table as its argument:
 
@@ -459,6 +490,8 @@ end)
 
 Both players' games run it before the same match, and a netplay session only stays in sync if both make the same changes; a hook must therefore depend only on the settings table and on data that is the same on both machines.
 
+The room is split into `lobby.newRoomState()` (its state from one frame to the next), `lobby.roomTick(rs, opts)` (one frame of input and lobby state; it never waits) and `lobby.roomDraw(rs, opts)` (draws the room without presenting the frame); `lobby.f_room()` loops over them. While a match plays in the window, the engine runs them from the hooks `game.watch_tick` (`roomTick` with `opts.watching`), `game.border_bg` and `game.border` (`roomDraw` with `opts.watching` and `opts.layer` `'bg'` or `'fg'`). A mod that draws over the room can add its own functions to those hooks while `watchWindowActive()` is true; it must not call `refresh()` from them. `lobby.f_autoWatch()` and `lobby.f_setAutoWatch(on)` read and set WATCH AUTO. The fight in the window loads through the engine (so the room keeps running around it): for that fight the lobby reads `Config.VsScreenLoading` as off through `gameOption`, without changing the option or config.ini.
+
 `lobby.f_rules(settings, separator)` returns the rules summary described under [Value names](#value-names), for screenpacks that draw their own lobby elements.
 
 ## Limits
@@ -466,6 +499,7 @@ Both players' games run it before the same match, and a netplay session only sta
 - For members who have not played each other, the connection bars show the round trip to the online server, which only approximates the connection between them.
 - The connection type is reported by each member's game and is not verified; it describes only the link from the member's machine to the next device.
 - A spectator sees the match at least one second after the players (the spectators setting), needs the players' game content, and does not see the victory and results screens.
+- The match window has a fixed size in the screenpack; a widescreen stage is fitted inside it with bars. The watched match's music replaces the room's while it plays.
 - The default fonts other than the chat's are small bitmap fonts that draw printable ASCII only, and `f-4x6` draws most lowercase letters as capitals. The chat's M PLUS 1 draws Latin and Japanese, not other scripts. [Fonts](#fonts) lists what the fonts that show names must cover.
 - Text entry (lobby name, comment, room ID, chat) needs a keyboard.
 - A tag is four digits taken from the account ID: two accounts share one about once in 10,000 pairs, and since new accounts are cheap, a tag identifies an account without proving who plays it.

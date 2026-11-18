@@ -336,6 +336,7 @@ type System struct {
 	nakamaSpectatorLoadingProgress *TextSprite
 	nakamaSpectatorLoadingDetail   *TextSprite
 	presentation                   presentationGeometry
+	watchWindow                    watchWindowState
 	rankedSet                      RankedSet
 
 	msaa                int32
@@ -735,6 +736,11 @@ func (s *System) applyFightAspect() {
 
 	// Scale to the physical game viewport when a separate presentation canvas is active.
 	viewport := s.presentationGameRect()
+	if s.watchWindow.active {
+		// The lobby's watch window is fixed; the fight keeps its own aspect
+		// inside it (letterboxed) instead of being stretched to fill it.
+		viewport = s.fitWatchGameRect(aspectGame)
+	}
 	if s.presentationEnabled() {
 		s.widthScale = float32(viewport[2]) / float32(s.gameWidth)
 		s.heightScale = float32(viewport[3]) / float32(s.gameHeight)
@@ -866,6 +872,7 @@ func (s *System) eventUpdate() bool {
 	touchControlsUpdate()
 	s.window.pollEvents()
 	s.gameEnd = s.window.shouldClose()
+	s.captureWatchEsc()
 	return !s.gameEnd
 }
 
@@ -985,6 +992,9 @@ func (s *System) await(fps int) bool {
 	}
 
 	s.eventUpdate()
+	// Each await is one engine frame: the watch window's per-frame hook runs
+	// once per frame however many places reach it (runWatchTick).
+	s.watchWindow.frame++
 
 	return !s.gameEnd
 }
@@ -1042,14 +1052,25 @@ func (s *System) renderFrame() {
 	// Border mode uses an outer presentation canvas and a separate game render
 	// surface. The outer surface remains intact while the game is rendered into
 	// its own viewport, so border pixels are never part of gameplay state.
+	// While the lobby's watch window is set, the canvas is the lobby's: the
+	// screenpack border is not drawn, and draws queued for the fight (the
+	// per-frame Lua) are kept for the game surface instead of being flushed
+	// on the canvas with the lobby's.
+	watching := s.watchWindow.active
 	outer := s.captureRenderSurfaceState()
 	s.beginRenderSurface(s.presentation.canvas, s.outerRenderState())
-	s.motif.drawBorderBackground()
+	var fightDraws luaDrawQueue
+	if watching {
+		fightDraws = s.takeLuaDrawQueue()
+	} else {
+		s.motif.drawBorderBackground()
+	}
 	if s.luaLState != nil {
-		if err := s.luaLState.DoString("hook.run('game.border_bg')"); err != nil {
-			s.luaLState.RaiseError("Error executing Lua hook: %s\n%v", "game.border_bg", err)
-		}
+		s.runRenderHook("game.border_bg")
 		s.luaFlushDrawQueue()
+	}
+	if watching {
+		s.restoreLuaDrawQueue(fightDraws)
 	}
 
 	gameRect := s.presentationGameRect()
@@ -1074,11 +1095,11 @@ func (s *System) renderFrame() {
 	// The foreground is authored in canvas space: re-enter the canvas surface with
 	// the canvas aspect state (outer holds the fight's logical aspect).
 	s.beginRenderSurface(s.presentation.canvas, s.outerRenderState())
-	s.motif.drawBorderForeground()
+	if !watching {
+		s.motif.drawBorderForeground()
+	}
 	if s.luaLState != nil {
-		if err := s.luaLState.DoString("hook.run('game.border')"); err != nil {
-			s.luaLState.RaiseError("Error executing Lua hook: %s\n%v", "game.border", err)
-		}
+		s.runRenderHook("game.border")
 		s.luaFlushDrawQueue()
 	}
 	s.restoreRenderSurface(outer)
@@ -1278,6 +1299,11 @@ func (s *System) update() bool {
 	s.frameCounter++
 
 	if s.nakamaSpectatorLoading {
+		// The lobby around a watch window keeps running while the stream
+		// buffers inside a match (outside one, the lobby's own loop runs).
+		if s.gameRunning {
+			s.runWatchTick()
+		}
 		if !s.updateNakamaSpectatorLoading() {
 			return s.replayFile.Update()
 		}
@@ -1329,7 +1355,9 @@ func (s *System) update() bool {
 
 	if s.replayFile != nil {
 		// Holding a button fast-forwards; a late spectator catches up the same way.
-		if s.anyHardButton() || s.replayFile.liveCatchingUp() {
+		// Not in the lobby's watch window: its buttons are the lobby's menus
+		// and chat.
+		if (!s.watchWindow.active && s.anyHardButton()) || s.replayFile.liveCatchingUp() {
 			s.await(s.gameRenderSpeed() * 4)
 		} else {
 			s.await(s.gameRenderSpeed())
@@ -1382,6 +1410,9 @@ func (s *System) applyPauseFocusVolume() {
 	}
 	if s.focusMuted {
 		s.pauseSoundVolume = Min(s.pauseSoundVolume, s.cfg.Sound.FocusLossVolume)
+	}
+	if volume, ok := s.watchMatchVolume(); ok {
+		s.pauseSoundVolume = Min(s.pauseSoundVolume, int(volume))
 	}
 
 	pauseSilence := s.matchPaused() && s.cfg.Sound.PauseMasterVolume == 0
@@ -1766,15 +1797,22 @@ func (s *System) uiRawInput(btns []string, controllerIdx int) bool {
 		}
 		return false
 	}
+	// The engine's own reads (dialogue skip, win screens) always use the
+	// match's command lists; Lua's getInput reads the watch window's local
+	// lists through luaUIRawInput (watch_window.go).
+	lists := s.commandLists
+	if s.watchWindow.luaInput {
+		lists = s.watchWindow.uiLists
+	}
 	if controllerIdx >= 0 {
-		if controllerIdx < len(s.commandLists) {
-			return checkOne(controllerIdx, s.commandLists[controllerIdx])
+		if controllerIdx < len(lists) {
+			return checkOne(controllerIdx, lists[controllerIdx])
 		}
 		return false
 	}
 	//found := false
-	for i := 0; i < len(s.commandLists); i++ {
-		if checkOne(i, s.commandLists[i]) {
+	for i := 0; i < len(lists); i++ {
+		if checkOne(i, lists[i]) {
 			//found = true
 			return true
 		}
@@ -4635,6 +4673,10 @@ func (s *System) runMatch() (reload bool) {
 		outside = localReplay.watch()
 		heldPass = paused && s.replayTiming()
 		wasPaused := s.paused
+		// The lobby around a watch window runs once per engine frame, on
+		// every pass (uiAction skips passes without a tick), before it is
+		// drawn by renderFrame's canvas hooks.
+		s.runWatchTick()
 		s.uiAction()
 		heldPass = false
 		if s.paused && !wasPaused && !s.motif.me.active {
@@ -4778,6 +4820,12 @@ func (s *System) runMatch() (reload bool) {
 		}
 		if stepping && !paused {
 			s.paused, stepping = true, false
+		}
+
+		// The lobby asked to stop watching (stopWatching): the viewer left.
+		if s.watchStopRequested() {
+			s.endWatchedMatch()
+			break
 		}
 
 		// Exit the replay match loop before EOF can reuse the last input sample.

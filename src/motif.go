@@ -3547,6 +3547,11 @@ func (me *MotifMenu) init(m *Motif) {
 	// A match replay's input is its players'; the viewer opens the menu (or
 	// leaves the replay) with Esc only.
 	openPressed := sys.esc || (!sys.playingMatchReplay() && sys.uiRawInput(pm.Menu.Cancel.Key, -1))
+	// In the lobby's watch window no input opens the menu or ends the match
+	// (the lobby takes Esc; stopWatching ends it).
+	if sys.watchWindow.active {
+		openPressed = false
+	}
 
 	if !sys.sel.gameParams.PauseMenu {
 		if openPressed {
