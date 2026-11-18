@@ -341,7 +341,8 @@ func (rs *RollbackSystem) runFrame() bool {
 		return false
 	}
 
-	if rs.session.syncTest && rs.session.netTime == 0 {
+	// The replay stream advances netTime every frame, so sync-test mode is the only test here.
+	if rs.session.syncTest {
 		if rs.session.config.DesyncTestAI {
 			buffer = getAIInputs(0)
 			ggpoerr = rs.session.backend.AddLocalInput(ggpo.PlayerHandle(0), buffer, len(buffer))

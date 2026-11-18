@@ -486,6 +486,23 @@ func (gs *GameState) String() (str string) {
 		for j := 0; j < len(gs.charData[i]); j++ {
 			str += gs.charData[i][j].String()
 			str += "\n"
+			if c := &gs.charData[i][j]; c.anim != nil {
+				str += fmt.Sprintf("\tAnimElem            :%d/%d (time %d) HitPause:%d\n", c.anim.curelem, c.anim.curelemtime, c.anim.curtime, c.hitPauseTime)
+			}
+		}
+	}
+	// Add projectile data. Logic depends on their animation timing too (Clsn boxes, removal)
+	for i := range gs.projs {
+		for _, p := range gs.projs[i] {
+			if p == nil {
+				continue
+			}
+			animStr := "none"
+			if p.anim != nil {
+				animStr = fmt.Sprintf("%d/%d (time %d)", p.anim.curelem, p.anim.curelemtime, p.anim.curtime)
+			}
+			str += fmt.Sprintf("Projectile P%d id:%d anim:%d elem:%s status:%d pos:%v vel:%v time:%d removetime:%d hits:%d hitpause:%d misstime:%d\n",
+				i+1, p.id, p.animNo, animStr, p.status, p.pos, p.velocity, p.time, p.removetime, p.hits, p.hitpause, p.curmisstime)
 		}
 	}
 
