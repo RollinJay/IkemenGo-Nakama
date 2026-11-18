@@ -1,0 +1,59 @@
+; REPLAY++ MODULE by jay_ts
+; Definitions
+
+; Note: You need the jayinputdisplay module for the "show inputs" option to do anything.
+; https://github.com/saintjr2004/Ikemen-GO-Advanced-Input-Display
+
+[Replay Menu]
+; Fade info
+fadein.time = 10
+fadein.col = 0, 0, 0
+fadein.anim = -1
+fadein.snd = -1, 0
+fadeout.time = 10
+fadeout.col = 0, 0, 0
+fadeout.anim = -1
+fadeout.snd = -1, 0
+
+; Menu definitions
+menu.itemname.title = Replay Menu
+menu.itemname.continue = Continue
+menu.itemname.showinputs = Show Input
+menu.itemname.takeover = Take Control
+menu.itemname.exit = Exit
+menu.valuename.showinputs.no = No
+menu.valuename.showinputs.yes = Yes
+menu.valuename.takeover.p1 = P1
+menu.valuename.takeover.p2 = P2
+
+; Menu controls
+menu.key = m
+rewind.key = L
+fastforward.key = R
+pause.key = s
+
+; Default value of the "show inputs" option. yes/no
+show.inputs = yes
+
+; Amount of frames advanced when holding rewind or fast forward during a paused replay.
+rewind.speed = 1
+fastforward.speed = 1
+
+; Processing rate when fast forward is held during an unpaused replay. Max speed is 16.
+fastforward.rate = 3
+
+; Engine frames between held seek requests. Lower values repeat faster.
+rewind.repeat.ticks = 2
+fastforward.repeat.ticks = 2
+
+; Frames to hold input for input to be held.
+; Because input handling is different in replays i gotta do this manually
+hold.ticks = 10
+
+; Maximum amount of time the player is allowed to have in replay takeover.
+takeover.seconds = 10
+
+; Sparse snapshots that are confined to the current round.
+; (interval * count) / 60 is the rewind history span per round.
+history.interval = 2
+history.count = 450
