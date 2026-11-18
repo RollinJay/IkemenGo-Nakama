@@ -39,11 +39,11 @@ func defaultLobbyInfo(t *testing.T) LobbyInfoProperties {
 func TestLobbyWatchWindowDefaults(t *testing.T) {
 	r := defaultLobbyInfo(t).Room
 	w := r.Watch
-	if got, want := w.Window, [4]float32{156, 48, 160, 120}; got != want {
+	if got, want := w.Rect, [4]float32{156, 48, 160, 120}; got != want {
 		t.Fatalf("room.watch.window = %v, want %v", got, want)
 	}
-	if w.Window[0]+w.Window[2] > 320 || w.Window[1]+w.Window[3] > 240 {
-		t.Errorf("window %v leaves the 320x240 screen", w.Window)
+	if w.Rect[0]+w.Rect[2] > 320 || w.Rect[1]+w.Rect[3] > 240 {
+		t.Errorf("window %v leaves the 320x240 screen", w.Rect)
 	}
 	if w.Volume != 50 {
 		t.Errorf("room.watch.volume = %d, want 50", w.Volume)
@@ -73,8 +73,8 @@ func TestLobbyWatchingLayoutDefaults(t *testing.T) {
 	}
 	// The column's boxes end left of the window.
 	right := sl.Pos[0] + float32(sl.Bg["member"].Box.Coords[2])
-	if right >= r.Watch.Window[0] {
-		t.Errorf("member column reaches x=%v, the window starts at %v", right, r.Watch.Window[0])
+	if right >= r.Watch.Rect[0] {
+		t.Errorf("member column reaches x=%v, the window starts at %v", right, r.Watch.Rect[0])
 	}
 	// Eight rows fit above the menu bar.
 	if bottom := sl.Pos[1] + 7*sl.Spacing[1] + float32(sl.Bg["member"].Box.Coords[3]); bottom >= r.Watching.Menu.Pos[1]+float32(r.Watching.Menu.Box.Coords[1]) {
@@ -87,8 +87,8 @@ func TestLobbyWatchingLayoutDefaults(t *testing.T) {
 	if bar.Spacing <= 0 || !bar.Box.Visible || !bar.Cursor.Visible {
 		t.Errorf("bar spacing %v box %v cursor %v", bar.Spacing, bar.Box.Visible, bar.Cursor.Visible)
 	}
-	if bar.Pos[1] <= r.Watch.Window[1]+r.Watch.Window[3] {
-		t.Errorf("bar at y=%v overlaps the window (ends at %v)", bar.Pos[1], r.Watch.Window[1]+r.Watch.Window[3])
+	if bar.Pos[1] <= r.Watch.Rect[1]+r.Watch.Rect[3] {
+		t.Errorf("bar at y=%v overlaps the window (ends at %v)", bar.Pos[1], r.Watch.Rect[1]+r.Watch.Rect[3])
 	}
 }
 

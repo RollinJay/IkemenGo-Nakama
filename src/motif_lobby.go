@@ -166,7 +166,10 @@ type LobbyMenuBarProperties struct {
 type LobbyWatchProperties struct {
 	// x, y, width, height in lobby coordinates. 0, 0, 0, 0: no window; the
 	// room's WATCH item then watches full screen.
-	Window [4]float32 `ini:"window"`
+	// Named Rect, not Window: the boxes below look their parent's fields up
+	// by name (getFieldFromHierarchy), and a Window there is the clipping
+	// window SetRect reads.
+	Rect [4]float32 `ini:"window"`
 	// Drawn behind the window, frame first; coords relative to the window's
 	// x, y.
 	Frame LobbyBoxProperties `ini:"frame"`
