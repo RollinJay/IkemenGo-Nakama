@@ -113,6 +113,8 @@ func runBeforeLuaExit(l *lua.LState, before func()) {
 func nakamaScriptInit(l *lua.LState) {
 	// The router ports P2P sessions opened close when the game exits.
 	runBeforeLuaExit(l, releaseRouterPorts)
+	// -profile's files are finished on the way out too (profiling.go).
+	runBeforeLuaExit(l, stopProfiling)
 	api := l.NewTable()
 	callbacks := newNakamaLuaHandlers()
 	// The answers to ranked claims (nakama_ranked_queue.go) reach Lua as
