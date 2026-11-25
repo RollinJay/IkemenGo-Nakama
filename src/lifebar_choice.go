@@ -246,7 +246,9 @@ func applyLifebarGameplay(fs *FightScreen, base map[string]IniSection) {
 	if roundSec == nil {
 		roundSec = IniSection{}
 	}
-	ref := readFightScreenRound(roundSec, &Sff{}, NewAnimationTable(), &Snd{}, map[int]*Fnt{})
+	// No font map: only the timings are wanted, and the default's fonts
+	// aren't loaded (nil keeps readFSText from warning about them).
+	ref := readFightScreenRound(roundSec, &Sff{}, NewAnimationTable(), &Snd{}, nil)
 	if fs.round != nil {
 		fs.round.copyGameplayFrom(ref)
 	}

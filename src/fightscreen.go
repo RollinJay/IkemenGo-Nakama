@@ -252,7 +252,9 @@ func readFSText(pre string, is IniSection, str string, ln int16, f map[int]*Fnt,
 	// Retrieve font from map once and save the pointer
 	if txt.font[0] >= 0 {
 		txt.fnt = getFont(f, txt.font[0])
-		if txt.fnt == nil {
+		// A nil font map reads the text for its other values only
+		// (applyLifebarGameplay): no fonts to check.
+		if txt.fnt == nil && f != nil {
 			LogMessage("Undefined font %v referenced by fight screen parameter: %v", txt.font[0], pre+"font")
 			txt.font[0] = -1
 		}
