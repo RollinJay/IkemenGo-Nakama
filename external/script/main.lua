@@ -1915,7 +1915,10 @@ function main.f_updateRandomChars()
 			-- generate table with characters allowed to be randomly selected
 			if ch.playable
 				and (ch.hidden == nil or ch.hidden <= 1)
-				and (ch.exclude == nil or ch.exclude == 0) then
+				and (ch.exclude == nil or ch.exclude == 0)
+				-- select.def 'random = 0': never picked by random select
+				-- (e.g. a boss version reached through a slot)
+				and ch.random ~= 0 then
 				table.insert(t, i - 1)
 			end
 		end
