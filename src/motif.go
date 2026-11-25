@@ -743,8 +743,9 @@ type SelectInfoProperties struct {
 			Previous struct {
 				Key []string `ini:"key"`
 			} `ini:"previous"`
-			// Pressing a key twice within Time frames over a slot
-			// steps to the next character, like Next.Key.
+			// Double-tapping a key over a slot steps to the next
+			// character: main.lua turns it into the select.def
+			// [Command] "~key, ~key" (time Time, cell *slot, slotnext).
 			DoubleTap struct {
 				Key  []string `ini:"key"`
 				Time int32    `ini:"time"`

@@ -1599,50 +1599,6 @@ local function slotCycle(cell, dir)
 	return false
 end
 
---[Select Info] cell.slot.doubletap: per player progress of a double tap
-local t_slotTap = {}
-
---true when the key is tapped twice over the same cell: press, release,
---press, release, each press released and the second press started within
---cell.slot.doubletap.time frames. A press held longer (Start held for
---palettes 7-12) or an attack button pressed in between cancels it.
-local function slotDoubleTap(cell, cmd, player)
-	local dt = motif.select_info.cell.slot.doubletap
-	if dt == nil or dt.key == nil or #dt.key == 0 or dt.key[1] == '' then
-		return false
-	end
-	if start.f_selectCodeArmed(player) then
-		t_slotTap[player] = nil
-		return false
-	end
-	local now = getFrameCount()
-	local window = math.max(dt.time or 15, 1)
-	local t = t_slotTap[player]
-	if t ~= nil and (t.cell ~= cell or now - t.frame > window or main.f_btnPalNo(cmd) > 0) then
-		t = nil
-	end
-	local pressed = getInput(cmd, dt.key)
-	local held = pressed or getInputTime(cmd, dt.key) > 0
-	if t == nil then
-		if pressed then
-			t = {cell = cell, frame = now, taps = 1, down = true}
-		end
-	elseif t.down then
-		if not held then
-			-- released in time
-			if t.taps == 2 then
-				t_slotTap[player] = nil
-				return true
-			end
-			t.down, t.frame = false, now
-		end
-	elseif pressed then
-		t.taps, t.down, t.frame = 2, true, now
-	end
-	t_slotTap[player] = t
-	return false
-end
-
 --select.def [Codes] (see main.f_addSelectCode): per player cursor history
 local t_codeState = {}
 local t_attackKeys = {a = true, b = true, c = true, x = true, y = true, z = true}
@@ -1711,12 +1667,12 @@ end
 --    selection waits up to inputtime frames for the rest of the buttons
 --  'select', pal: the wait ran out, the normal selection goes through
 --  nil: nothing to do
-function start.f_selectCode(side, cmd, player, cell, selected)
-	if #main.t_selCodes == 0 or cmd == nil then
-		return nil
-	end
-	local now = getFrameCount()
+--the player's cursor history, updated once per frame
+local function codeTrack(player, cell, now)
 	local st = t_codeState[player]
+	if st ~= nil and st.last == now and st.cell == cell then
+		return st
+	end
 	if st == nil or st.cell ~= cell or now - st.last > 1 then
 		local hist = st ~= nil and st.hist or {}
 		if st ~= nil and now - st.last <= 1 then
@@ -1731,6 +1687,60 @@ function start.f_selectCode(side, cmd, player, cell, selected)
 		t_codeState[player] = st
 	end
 	st.last = now
+	return st
+end
+
+local function cellMatches(c, cell)
+	if c.anyCell then
+		return true
+	end
+	if c.slotCells and main.t_selGrid[cell] ~= nil and #main.t_selGrid[cell].chars > 1 then
+		return true
+	end
+	for _, ref in ipairs(c.cells) do
+		if cellHas(cell, ref) then
+			return true
+		end
+	end
+	return false
+end
+
+--select.def [Command] entries completed this frame by the player over this
+--cell. A command's progress is reset when the cursor changes cell, and none
+--fires while a [Codes] path is done (the code wins).
+local t_cmdCell = {}
+function start.f_selectCommands(cell, cmd, player, side)
+	if #main.t_selCommands == 0 or cmd == nil then
+		return {}
+	end
+	local now = getFrameCount()
+	local st = codeTrack(player, cell, now)
+	if t_cmdCell[player] ~= cell then
+		t_cmdCell[player] = cell
+		for _, c in ipairs(main.t_selCommands) do
+			commandReset(cmd, c.name)
+		end
+		return {}
+	end
+	if st.armed ~= nil then
+		return {}
+	end
+	local fired = {}
+	for _, c in ipairs(main.t_selCommands) do
+		if cellMatches(c, cell) and commandGetState(cmd, c.name)
+			and (c.pathrefs == nil or codePathDone(c, st, side, now, cell)) then
+			table.insert(fired, c)
+		end
+	end
+	return fired
+end
+
+function start.f_selectCode(side, cmd, player, cell, selected)
+	if (#main.t_selCodes == 0 and #main.t_selCommands == 0) or cmd == nil then
+		return nil
+	end
+	local now = getFrameCount()
+	local st = codeTrack(player, cell, now)
 	if st.pending ~= nil then
 		return 'fire', st.pending.ref, st.pending.pal, false
 	end
@@ -1758,6 +1768,18 @@ function start.f_selectCode(side, cmd, player, cell, selected)
 	end
 	if st.armed == nil then
 		st.wait = nil
+		-- select.def [Command] action = select
+		for _, c in ipairs(start.f_selectCommands(cell, cmd, player, side)) do
+			if c.action == 'select' and (not selected or c.lastAttack) then
+				local pal = c.pal
+				if pal == nil or pal <= 0 then
+					pal = main.f_btnPalNo(cmd)
+				end
+				main.f_preloadBoostChar(c.ref)
+				st.pending = {ref = c.ref, pal = pal}
+				return 'fire', c.ref, pal, true
+			end
+		end
 		return nil
 	end
 	if st.wait ~= nil then
@@ -1821,12 +1843,18 @@ function start.f_slotSelected(cell, side, cmd, player, x, y)
 				end
 			end
 		end
-		-- [Select Info] cell.slot.doubletap
-		if not pressed and #grid.chars > 1 and slotDoubleTap(cell, cmd, player) then
-			if slotCycle(cell, 1) then
-				sndPlay(motif.Snd, motif.select_info['p' .. side].swap.snd[1], motif.select_info['p' .. side].swap.snd[2])
+		-- select.def [Command] slotnext / slotprev (and the doubletap shortcut)
+		if not pressed and #grid.chars > 1 then
+			local normalPick = main.f_btnPalNo(cmd) > 0
+			for _, c in ipairs(start.f_selectCommands(cell, cmd, player, side)) do
+				if (c.action == 'slotnext' or c.action == 'slotprev') and (not normalPick or c.lastAttack) then
+					if slotCycle(cell, c.action == 'slotnext' and 1 or -1) then
+						sndPlay(motif.Snd, motif.select_info['p' .. side].swap.snd[1], motif.select_info['p' .. side].swap.snd[2])
+					end
+					pressed = true
+					break
+				end
 			end
-			pressed = true
 		end
 		if pressed then
 			start.t_grid[y + 1][x + 1].char = start.f_selGrid(cell).char

@@ -1602,6 +1602,7 @@ main.t_selGrid = {}
 main.t_selOptions = {}
 main.t_selStoryMode = {}
 main.t_selCodes = {}
+main.t_selCommands = {}
 local t_storyModeList = {}
 --select.def [Codes]: secret select screen codes. One code per line, as
 --comma separated key = value pairs:
@@ -1694,6 +1695,121 @@ function main.f_resolveSelectCodes()
 	main.t_selCodes = codes
 end
 
+--select.def [Command] sections: commands entered with the cursor over a
+--character, written like a .cmd file's [Command]:
+--  command = engine command syntax (~ release, / hold, + together, $ and > as
+--            in .cmd files), e.g. ~s, ~s or ~D, DF, F, x
+--  time    = frames to enter it (default 15)
+--  cell    = where the cursor must be: characters as named in [Characters],
+--            separated by |, or * (any cell) or *slot (any cell with a slot
+--            group). Default *.
+--  path, hold = optionally, a path walked first, as in [Codes]
+--  action  = slotnext | slotprev (step the cell's slot group) or select
+--            (pick char, with pal or the palette the buttons give)
+--The command's progress is reset whenever the cursor changes cell. If it
+--completes on the same frame as a normal pick (an attack button), it wins
+--only when its last element holds that attack button; otherwise the pick
+--goes through and the command is ignored. [Select Info]
+--cell.slot.doubletap.key = k is short for command = ~k, ~k (time =
+--cell.slot.doubletap.time), cell = *slot, action = slotnext.
+local t_attackButtons = {a = true, b = true, c = true, x = true, y = true, z = true}
+
+--true when the last element of a command string holds an attack button
+local function selectCommandLastAttack(str)
+	local last = str
+	for el in (str .. ','):gmatch('([^,]*),') do
+		if el:match('%S') then
+			last = el
+		end
+	end
+	for tok in last:gmatch('[%w]+') do
+		if t_attackButtons[tok] then
+			return true
+		end
+	end
+	return false
+end
+
+function main.f_resolveSelectCommands()
+	local t = {}
+	local dt = motif.select_info.cell.slot.doubletap
+	if dt ~= nil and dt.key ~= nil then
+		for _, k in ipairs(dt.key) do
+			k = tostring(k):match('^%s*(.-)%s*$')
+			if k ~= '' then
+				table.insert(t, {command = '~' .. k .. ', ~' .. k, time = tostring(dt.time or 15), cell = '*slot', action = 'slotnext'})
+			end
+		end
+	end
+	for _, c in ipairs(main.t_selCommands) do
+		table.insert(t, c)
+	end
+	main.t_selCommands = {}
+	for i, c in ipairs(t) do
+		local name = 'selectcommand' .. i
+		local action = (c.action or ''):lower()
+		local ok = c.command ~= nil and (action == 'slotnext' or action == 'slotprev' or action == 'select')
+		local entry = {
+			name = name,
+			label = c.name or c.command or name,
+			command = c.command,
+			action = action,
+			time = tonumber(c.time) or 15,
+			pal = tonumber(c.pal),
+			hold = math.max(tonumber(c.hold) or 60, 1),
+			cells = {},
+		}
+		for cell in ((c.cell or '*') .. '|'):gmatch('([^|]*)|') do
+			cell = selectCodeName(cell)
+			if cell == '*' then
+				entry.anyCell = true
+			elseif cell == '*slot' then
+				entry.slotCells = true
+			elseif cell ~= '' then
+				local r = main.t_charDef[cell]
+				if r == nil then
+					print('select.def [Command] ' .. entry.label .. ': unknown character ' .. cell)
+					ok = false
+				end
+				entry.cells[#entry.cells + 1] = r
+			end
+		end
+		if #entry.cells == 0 and not entry.slotCells then
+			entry.anyCell = true
+		end
+		if action == 'select' then
+			entry.ref = main.t_charDef[selectCodeName(c.char)]
+			if entry.ref == nil then
+				print('select.def [Command] ' .. entry.label .. ': unknown character ' .. tostring(c.char))
+				ok = false
+			end
+		end
+		if c.path ~= nil then
+			entry.pathrefs = {}
+			for _, n in ipairs(selectCodePath(c.path)) do
+				local r = main.t_charDef[n]
+				if r == nil then
+					print('select.def [Command] ' .. entry.label .. ': unknown character ' .. n)
+					ok = false
+				end
+				table.insert(entry.pathrefs, r)
+			end
+		end
+		if ok then
+			entry.lastAttack = selectCommandLastAttack(entry.command)
+			ok = pcall(commandAdd, name, entry.command, entry.time)
+			if not ok then
+				print('select.def [Command] ' .. entry.label .. ': bad command ' .. entry.command)
+			end
+		elseif c.command ~= nil or c.action ~= nil then
+			print('select.def [Command] ' .. entry.label .. ': ignored (needs command and action slotnext, slotprev or select)')
+		end
+		if ok then
+			table.insert(main.t_selCommands, entry)
+		end
+	end
+end
+
 local t_addExluded = {}
 local tmp = ''
 local section = 0
@@ -1770,6 +1886,9 @@ for line in content:gmatch('[^\r\n]+') do
 		end
 	elseif lineCase:match('^%s*%[%s*codes%s*%]') then
 		section = 5
+	elseif lineCase:match('^%s*%[%s*command%s*%]') then
+		section = 6
+		table.insert(main.t_selCommands, {})
 	elseif lineCase:match('^%s*%[%w+%]$') then
 		section = -1
 	elseif section == 1 then --[Characters]
@@ -1859,6 +1978,11 @@ for line in content:gmatch('[^\r\n]+') do
 		end
 	elseif section == 5 then --[Codes]
 		main.f_addSelectCode(line)
+	elseif section == 6 then --[Command]
+		local param, value = line:match('^%s*([%w%.]+)%s*=%s*(.-)%s*$')
+		if param ~= nil and value ~= '' then
+			main.t_selCommands[#main.t_selCommands][param:lower()] = value
+		end
 	end
 end
 
@@ -1876,6 +2000,7 @@ for i = 1, #t_addExluded do
 	main.f_addChar(t_addExluded[i], true, true)
 end
 main.f_resolveSelectCodes()
+main.f_resolveSelectCommands()
 
 --add Training char if defined and not included in select.def
 if gameOption('Config.TrainingChar') ~= '' and main.t_charDef[gameOption('Config.TrainingChar'):lower()] == nil then

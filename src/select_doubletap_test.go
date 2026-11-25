@@ -71,3 +71,30 @@ func TestSelectScriptsParse(t *testing.T) {
 		}
 	}
 }
+
+// The select.def [Command] strings HDBZ and the docs use parse with the
+// engine's command parser, and ResetName clears a command's progress.
+func TestSelectCommandStrings(t *testing.T) {
+	cl := NewCommandList(NewInputBuffer())
+	for i, s := range []string{"~s, ~s", "~D, DF, F, s", "~D, DF, F, x", "/s, x+y+z"} {
+		name := "selectcommand" + string(rune('1'+i))
+		if err := cl.AddCommand(name, CommandSpec{Cmd: s, Time: 15, BufTime: 1}); err != nil {
+			t.Errorf("%q: %v", s, err)
+			continue
+		}
+		c := &cl.Commands[cl.Names[name]][0]
+		c.curtime, c.curbuftime = 3, 1
+		for j := range c.completed {
+			c.completed[j] = true
+		}
+		cl.ResetName(name)
+		if c.curtime != 0 || c.curbuftime != 0 || cl.GetState(name) {
+			t.Errorf("%q: ResetName left curtime=%d buftime=%d", s, c.curtime, c.curbuftime)
+		}
+		for j, done := range c.completed {
+			if done {
+				t.Errorf("%q: step %d still complete after ResetName", s, j)
+			}
+		}
+	}
+}
