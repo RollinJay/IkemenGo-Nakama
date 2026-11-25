@@ -24,6 +24,7 @@ This folder holds the Android app that `build/build.sh Android` packages the gam
   - **From the game:** it handles commands 0x8001 (a text box opened or closed), 0x8002 (the glyph images changed) and 0x8003 (the buttons to show, one bit each, remembered for the next start) in `onUnhandledMessage`.
   - **To the game:** it calls `nativeShowKeyboard`, and `nativeSetKeyboardCover` with how much of the game's surface the on-screen keyboard covers; the game draws itself above it. SDL's text field sits at the top of the screen, so that Android doesn't pan the window instead.
   - **Keys:** `dispatchKeyEvent` hands a TV remote's arrows and OK to `TouchControls.onRemoteKey` first. A remote's key, like a touch, shows the faded controls again (`showControls`).
+  - **Full screen:** the game always fills the screen edge to edge, display cutouts included, with the system bars hidden; a swipe shows them for a moment over the game (`applyImmersive`, with `WindowInsetsController` on Android 11 and later and the immersive sticky flags before). It is applied again on resume and focus, and whatever window style the game asks for. While the bars are shown for good, the on-screen buttons keep clear of them.
   - **Text field:** SDL's `DummyEdit` lives in a layer of its own (`mTextLayout`), which the 5 s fade of the controls leaves alone, and asks the keyboard for no suggestions or corrections.
 - **`AssetExtractor`:**
   - It always replaces `external/script`.
