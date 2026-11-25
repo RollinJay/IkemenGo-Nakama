@@ -771,8 +771,8 @@ type matchContentSpec struct {
 // matchContentFor lists what a match with chars on stage depends on in this
 // game: its fight screen and the common files the configuration names.
 func matchContentFor(chars [2][]string, stage string) matchContentSpec {
-	spec := matchContentSpec{chars: chars, stage: stage, fight: sys.fightScreen.def, motifDef: sys.motif.Def}
-	dirs := []string{sys.motif.Def, sys.fightScreen.def, "", "data/"}
+	spec := matchContentSpec{chars: chars, stage: stage, fight: sys.fightScreen.gameplayDef(), motifDef: sys.motif.Def}
+	dirs := []string{sys.motif.Def, sys.fightScreen.gameplayDef(), "", "data/"}
 	seen := map[string]bool{}
 	add := func(files map[string][]string) {
 		for _, key := range SortedKeys(files) {
@@ -1322,7 +1322,7 @@ func matchReplayScriptInit(l *lua.LState) {
 		if !gamePath(stage) {
 			stage = ""
 		}
-		local := matchContentSpec{chars: chars, stage: stage, fight: sys.fightScreen.def, motifDef: sys.motif.Def}
+		local := matchContentSpec{chars: chars, stage: stage, fight: sys.fightScreen.gameplayDef(), motifDef: sys.motif.Def}
 		for _, it := range data.Match.Content {
 			if strings.HasPrefix(it.Label, "common ") {
 				file := it.File

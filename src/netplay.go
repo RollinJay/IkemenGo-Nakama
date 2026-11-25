@@ -1958,7 +1958,15 @@ func (s *System) currentContentFingerprint() string {
 	// rollback starts. Hash their contents rather than their absolute filesystem
 	// locations so two installations can agree on identical content.
 	writeFile("motif.def", s.motif.Def)
-	writeFile("fight_screen.def", s.fightScreen.def)
+	// The default fight screen and every alternative lifebar the motif lists,
+	// whichever one this player chose (Config.Lifebar): the choice only changes
+	// drawing, so players with different choices must still agree.
+	writeFile("fight_screen.def", s.fightScreen.gameplayDef())
+	if base := s.fightScreen.gameplayDef(); base != "" && sameDefPath(base, motifFightDef()) {
+		for i, c := range lifebarChoicesFrom(s.motif.Def, base)[1:] {
+			writeFile(fmt.Sprintf("fight_screen.alt.%d", i+1), c.Def)
+		}
+	}
 
 	// The first synchronize() runs right after connecting, before character
 	// select, and later syncs reuse the session override. Characters/stages
@@ -1994,7 +2002,7 @@ func (s *System) currentContentFingerprint() string {
 	}
 	for _, key := range SortedKeys(s.cfg.Common.Fx) {
 		for _, v := range s.cfg.Common.Fx[key] {
-			_ = LoadFile(&v, []string{s.fightScreen.def, s.motif.Def, "", "data/"}, "", func(filename string) error {
+			_ = LoadFile(&v, []string{s.fightScreen.gameplayDef(), s.motif.Def, "", "data/"}, "", func(filename string) error {
 				addFX(filename)
 				return nil
 			})

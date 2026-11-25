@@ -132,6 +132,10 @@ type Config struct {
 
 		// Skip character intros automatically in training mode.
 		TrainingSkipIntros bool `ini:"TrainingSkipIntros"`
+
+		// Lifebar drawn in fights: 0 = the screenpack's default fight screen,
+		// N = its [Files] lifebarN. Presentation only (lifebar_choice.go).
+		Lifebar int `ini:"Lifebar"`
 	} `ini:"Config"`
 	Debug struct {
 		AllowDebugMode      bool    `ini:"AllowDebugMode"`

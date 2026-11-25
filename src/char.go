@@ -4351,7 +4351,7 @@ func (c *Char) load(def string, gi *CharGlobalInfo) error {
 	}
 
 	// Merge common shaders. The char's own shaders take priority
-	if err := sys.loadCommonShaders(gi.customShaders, []string{def, sys.motif.Def, sys.fightScreen.def, "", "data/"}); err != nil {
+	if err := sys.loadCommonShaders(gi.customShaders, []string{def, sys.motif.Def, sys.fightScreen.gameplayDef(), "", "data/"}); err != nil {
 		return err
 	}
 
@@ -4364,7 +4364,7 @@ func (c *Char) load(def string, gi *CharGlobalInfo) error {
 	// Load common constants
 	for _, key := range SortedKeys(sys.cfg.Common.Const) {
 		for _, v := range sys.cfg.Common.Const[key] {
-			if err := LoadFile(&v, []string{def, sys.motif.Def, sys.fightScreen.def, "", "data/"}, "", func(filename string) error {
+			if err := LoadFile(&v, []string{def, sys.motif.Def, sys.fightScreen.gameplayDef(), "", "data/"}, "", func(filename string) error {
 				str, err = LoadText(filename)
 				if err != nil {
 					return err
@@ -4698,7 +4698,7 @@ func (c *Char) load(def string, gi *CharGlobalInfo) error {
 	// Read and merge common animations
 	for _, key := range SortedKeys(sys.cfg.Common.Air) {
 		for _, v := range sys.cfg.Common.Air[key] {
-			if err := LoadFile(&v, []string{def, sys.motif.Def, sys.fightScreen.def, "", "data/"}, "", func(filename string) error {
+			if err := LoadFile(&v, []string{def, sys.motif.Def, sys.fightScreen.gameplayDef(), "", "data/"}, "", func(filename string) error {
 				txt, err := LoadText(filename)
 				if err != nil {
 					return err

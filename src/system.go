@@ -7129,7 +7129,7 @@ func (l *Loader) load() {
 	// Load any config-driven Common FX not already cached. External modules may
 	// append to Common.Fx before a match; once loaded, non-char FX are kept.
 	if !stagedTurns {
-		if err := loadCommonFightFx(sys.fightScreen.def, false); err != nil {
+		if err := loadCommonFightFx(sys.fightScreen.gameplayDef(), false); err != nil {
 			l.err = err
 			l.state = LS_Error
 			return

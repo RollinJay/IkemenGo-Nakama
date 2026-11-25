@@ -144,6 +144,7 @@ options.t_itemname = {
 			--modifyGameOption('Config.Motif', "data/system.def")
 			modifyGameOption('Config.Players', 4)
 			modifyGameOption('Config.Language', "en")
+			modifyGameOption('Config.Lifebar', 0)
 			--modifyGameOption('Config.AfterImageMax', 128)
 			--modifyGameOption('Config.ExplodMax', 512)
 			--modifyGameOption('Config.HelperMax', 56)
@@ -1457,6 +1458,31 @@ options.t_itemname = {
 		end
 		return true
 	end,
+	--Lifebar (screenpack [Files] lifebarN alternatives). Applied right away:
+	--the options screen is never open during a match.
+	['lifebar'] = function(t, item, cursorPosY, moveTxt)
+		local dir = 0
+		if getInput(-1, motif.option_info.menu.add.key, motif.option_info.menu.done.key) then
+			dir = 1
+		elseif getInput(-1, motif.option_info.menu.subtract.key) then
+			dir = -1
+		end
+		if dir ~= 0 then
+			local names = lifebarChoices()
+			if #names > 1 then
+				sndPlay(motif.Snd, motif.option_info.cursor.move.snd[1], motif.option_info.cursor.move.snd[2])
+				local cur = gameOption('Config.Lifebar') or 0
+				if cur < 0 or cur >= #names then
+					cur = 0
+				end
+				modifyGameOption('Config.Lifebar', (cur + dir) % #names)
+				reloadFightScreen()
+				t.items[item].vardisplay = options.t_vardisplay['lifebar']()
+				options.modified = true
+			end
+		end
+		return true
+	end,
 	--Online play (Nakama sessions) always uses rollback netcode: nothing to
 	--change here.
 	['onlinenetcode'] = function(t, item, cursorPosY, moveTxt)
@@ -1726,6 +1752,11 @@ options.t_vardisplay = {
 	end,
 	['turnsloading'] = function()
 		return options.f_boolDisplay(gameOption('Config.TurnsLoading'), motif.option_info.menu.valuename.enabled, motif.option_info.menu.valuename.disabled)
+	end,
+	['lifebar'] = function()
+		local names = lifebarChoices()
+		local cur = gameOption('Config.Lifebar') or 0
+		return names[cur + 1] or names[1] or ''
 	end,
 	['localversusreplays'] = function()
 		return options.f_boolDisplay(gameOption('Config.LocalVersusReplays'), motif.option_info.menu.valuename.enabled, motif.option_info.menu.valuename.disabled)
