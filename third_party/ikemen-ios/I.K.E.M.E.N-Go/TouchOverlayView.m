@@ -76,7 +76,8 @@ static SDL_JoystickID virtualJoystickID = -1;
     for (UIButton *btn in self.buttons) {
         btn.exclusiveTouch = NO;
         btn.userInteractionEnabled = NO;
-        btn.alpha = 0.75f;
+        // A held button keeps its pressed look.
+        btn.alpha = [self.currentlyPressedButtons containsObject:btn] ? 0.3f : 0.75f;
     }
     
     // Reset timer and wake the overlay up when the device rotates
@@ -305,6 +306,13 @@ static SDL_JoystickID virtualJoystickID = -1;
 // real controller moves into its slot (packControllers in src/system_sdl.go).
 - (void)detachVirtualJoystick {
     if (virtualJoystickIndex < 0) {
+        return;
+    }
+    if (SDL_WasInit(SDL_INIT_JOYSTICK) == 0) {
+        // SDL quit, and took the joystick with it.
+        virtualJoystick = NULL;
+        virtualJoystickIndex = -1;
+        virtualJoystickID = -1;
         return;
     }
     if (virtualJoystick != NULL) {

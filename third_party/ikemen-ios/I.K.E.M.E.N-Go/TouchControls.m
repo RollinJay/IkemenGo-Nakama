@@ -40,6 +40,8 @@ static NSString *Str(NSString *key, NSString *english) {
 @property (nonatomic, assign) BOOL keyboardShown;
 @property (nonatomic, assign) BOOL keyboardClosed;
 @property (nonatomic, assign) int gameControllers;
+// Whether the game has reported its controllers yet (IkemenMsgControllers).
+@property (nonatomic, assign) BOOL gameReported;
 - (void)handleCommand:(int)command param:(int)param;
 @end
 
@@ -67,6 +69,9 @@ static NSString *Str(NSString *key, NSString *english) {
     if (self.overlay == overlay) {
         return;
     }
+    // A new overlay, as for a new scene: the old one's timer and observers go.
+    [self.timer invalidate];
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
     self.overlay = overlay;
 
     self.settingsButton = [self roundButton:@"gearshape.fill" label:Str(@"touchSettingsStr", @"Touch controls") size:40 alpha:0.5];
@@ -75,9 +80,10 @@ static NSString *Str(NSString *key, NSString *english) {
     [self.keyboardButton addTarget:self action:@selector(keyboardTapped:) forControlEvents:UIControlEventTouchUpInside];
     self.keyboardButton.hidden = YES;
     [NSLayoutConstraint activateConstraints:@[
-        [self.settingsButton.topAnchor constraintEqualToAnchor:overlay.topAnchor constant:8],
-        [self.settingsButton.leadingAnchor constraintEqualToAnchor:overlay.leadingAnchor constant:8],
-        [self.keyboardButton.topAnchor constraintEqualToAnchor:overlay.topAnchor constant:8],
+        // Clear of a notch or rounded corner.
+        [self.settingsButton.topAnchor constraintEqualToAnchor:overlay.safeAreaLayoutGuide.topAnchor constant:8],
+        [self.settingsButton.leadingAnchor constraintEqualToAnchor:overlay.safeAreaLayoutGuide.leadingAnchor constant:8],
+        [self.keyboardButton.topAnchor constraintEqualToAnchor:overlay.safeAreaLayoutGuide.topAnchor constant:8],
         [self.keyboardButton.centerXAnchor constraintEqualToAnchor:overlay.centerXAnchor],
     ]];
     [self buildSettingsPanel];
@@ -229,6 +235,7 @@ static NSString *Str(NSString *key, NSString *english) {
             break;
         case IkemenMsgControllers:
             self.gameControllers = param;
+            self.gameReported = YES;
             [self update];
             break;
     }
@@ -242,11 +249,16 @@ static NSString *Str(NSString *key, NSString *english) {
     [self update];
 }
 
-// Whether a real controller is connected: one the game has (it counts SDL's,
-// leaving out the on-screen buttons' own), or one the GameController
-// framework knows.
+// Whether a real controller is connected: once the game runs, one the game
+// has (it counts SDL's, leaving out the on-screen buttons' own); before, one
+// the GameController framework knows. The framework's list may stand still
+// while the game runs (see the top of this file), so it would keep the
+// buttons hidden after a controller went.
 - (BOOL)realControllerConnected {
-    return self.gameControllers > 0 || [GCController controllers].count > 0;
+    if (self.gameReported) {
+        return self.gameControllers > 0;
+    }
+    return [GCController controllers].count > 0;
 }
 
 // Shows or hides each part, for the setting, the controllers connected, and
