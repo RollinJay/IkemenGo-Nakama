@@ -234,7 +234,18 @@ func TestNakamaLive_LobbyLinkRoute(t *testing.T) {
 		cur, _ := st["current"].(map[string]any)
 		return cur != nil && cur["link_route"] == "relay-ws" && cur["link_kind"] == "relay" && cur["link"] == 88.0
 	})
+	// The pair's route is the worse of the two players' reports
+	// (ikemen_telemetry.lua combine): one player moving to direct is not enough.
 	if err := b.SendLobbyCommand("link", linkPayload(a.Session().UserID, 31*time.Millisecond, "direct-srflx", 1)); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(300 * time.Millisecond)
+	if st, _, ok := b.LobbyState(); ok {
+		if cur, _ := st["current"].(map[string]any); cur != nil && cur["link_kind"] != "relay" {
+			t.Fatalf("one direct report made the pair %v", cur["link_kind"])
+		}
+	}
+	if err := a.SendLobbyCommand("link", linkPayload(peer, 31*time.Millisecond, "direct-srflx", 1)); err != nil {
 		t.Fatal(err)
 	}
 	waitLobby(t, a, "direct route", func(st map[string]any) bool {
