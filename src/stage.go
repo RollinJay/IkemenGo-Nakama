@@ -1560,7 +1560,7 @@ func loadStage(def string, maindef bool) (*Stage, error) {
 		}
 	}
 	// Common Shaders
-	if err := sys.loadCommonShaders(s.customShaders, []string{def, sys.motif.Def, sys.fightScreen.def, "", "data/"}); err != nil {
+	if err := sys.loadCommonShaders(s.customShaders, []string{def, sys.motif.Def, sys.fightScreen.gameplayDef(), "", "data/"}); err != nil {
 		return nil, err
 	}
 

@@ -4483,6 +4483,32 @@ func systemScriptInit(l *lua.LState) {
 		sys.fightScreen = *fs
 		return 0
 	})
+	luaRegister(l, "lifebarChoices", func(l *lua.LState) int {
+		/*List the lifebars the screenpack offers (Config.Lifebar values).
+		@function lifebarChoices
+		@treturn table names Display names; index 1 is Config.Lifebar 0 (the default).*/
+		tbl := l.NewTable()
+		for _, c := range sys.lifebarChoices() {
+			tbl.Append(lua.LString(c.Name))
+		}
+		l.Push(tbl)
+		return 1
+	})
+	luaRegister(l, "reloadFightScreen", func(l *lua.LState) int {
+		/*Reload the fight screen now so that a changed Config.Lifebar applies.
+		Does nothing while a match runs (the choice then applies at the next load).
+		@function reloadFightScreen
+		@treturn bool reloaded True if the fight screen was reloaded.*/
+		if sys.gameRunning {
+			l.Push(lua.LFalse)
+			return 1
+		}
+		if err := sys.fightScreen.reload(); err != nil {
+			l.RaiseError("\nCan't reload fight screen: %v\n", err.Error())
+		}
+		l.Push(lua.LTrue)
+		return 1
+	})
 	luaRegister(l, "loadMotif", func(l *lua.LState) int {
 		/*Load a motif and return its configuration as a table.
 		@function loadMotif

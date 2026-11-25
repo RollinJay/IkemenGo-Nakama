@@ -4760,7 +4760,8 @@ func (mo *FightScreenMode) draw(layerno int16, f map[int]*Fnt) {
 }
 
 type FightScreen struct {
-	def           string
+	def           string // fight.def drawn (may be an alternative lifebar)
+	baseDef       string // default fight.def: gameplay values, common file search
 	name          string
 	nameLow       string
 	author        string
@@ -4811,6 +4812,17 @@ func loadFightScreen(def string) (*FightScreen, error) {
 	if def == "" {
 		sys.fightScreen.resolvePath()
 		def = sys.fightScreen.def
+	}
+	// An alternative lifebar (Config.Lifebar) replaces only what is drawn; the
+	// default fight.def keeps supplying gameplay values (see lifebar_choice.go).
+	baseDef := def
+	def = selectedLifebarDef(baseDef)
+	var baseSecs map[string]IniSection
+	if def != baseDef {
+		var err error
+		if baseSecs, err = readDefSections(baseDef); err != nil {
+			return nil, err
+		}
 	}
 	str, err := LoadText(def)
 	if err != nil {
@@ -4953,7 +4965,16 @@ func loadFightScreen(def string) (*FightScreen, error) {
 					}); err != nil {
 					return nil, err
 				}
-				if is.LoadFile("fightfx.sff", []string{def, sys.motif.Def, "", "data/"}, "",
+				// Common FightFX are gameplay content (characters use them), so an
+				// alternative lifebar loads those of the default fight.def.
+				fxIs, fxDef := is, def
+				if baseSecs != nil {
+					fxIs, fxDef = baseSecs["files"], baseDef
+					if fxIs == nil {
+						fxIs = IniSection{}
+					}
+				}
+				if fxIs.LoadFile("fightfx.sff", []string{fxDef, sys.motif.Def, "", "data/"}, "",
 					func(filename string) error {
 						s, err := loadSff(filename, SffTypeOther, true, false)
 						if err != nil {
@@ -4964,7 +4985,7 @@ func loadFightScreen(def string) (*FightScreen, error) {
 					}); err != nil {
 					return nil, err
 				}
-				if is.LoadFile("fightfx.air", []string{def, sys.motif.Def, "", "data/"}, "",
+				if fxIs.LoadFile("fightfx.air", []string{fxDef, sys.motif.Def, "", "data/"}, "",
 					func(filename string) error {
 						str, err := LoadText(filename)
 						if err != nil {
@@ -4975,7 +4996,7 @@ func loadFightScreen(def string) (*FightScreen, error) {
 					}); err != nil {
 					return nil, err
 				}
-				if is.LoadFile("common.snd", []string{def, sys.motif.Def, "", "data/"}, "",
+				if fxIs.LoadFile("common.snd", []string{fxDef, sys.motif.Def, "", "data/"}, "",
 					func(filename string) error {
 						ffx.snd, err = LoadSnd(filename)
 						return err
@@ -4983,7 +5004,7 @@ func loadFightScreen(def string) (*FightScreen, error) {
 					return nil, err
 				}
 				for i := 1; i <= fs.fx_limit; i++ {
-					if err := is.LoadFile(fmt.Sprintf("fx%v", i), []string{def, sys.motif.Def, "", "data/"}, "",
+					if err := fxIs.LoadFile(fmt.Sprintf("fx%v", i), []string{fxDef, sys.motif.Def, "", "data/"}, "",
 						func(filename string) error {
 							if err := loadFightFx(filename, false, true); err != nil {
 								return err
@@ -5050,7 +5071,11 @@ func loadFightScreen(def string) (*FightScreen, error) {
 				}
 			}
 		case "fightfx":
-			is.ReadF32("scale", &ffx.fx_scale)
+			if baseSecs == nil {
+				is.ReadF32("scale", &ffx.fx_scale)
+			} else if bfx := baseSecs["fightfx"]; bfx != nil {
+				bfx.ReadF32("scale", &ffx.fx_scale)
+			}
 		case "lifebar":
 			if fs.lifeBars[0][0] == nil {
 				fs.lifeBars[0][0] = readLifeBar("p1.", resolvedSection("p", 1), fs.sff, fs.animTable, fs.fnt)
@@ -5498,6 +5523,10 @@ func loadFightScreen(def string) (*FightScreen, error) {
 		}
 	}
 	fs.def = def
+	fs.baseDef = baseDef
+	if baseSecs != nil {
+		applyLifebarGameplay(fs, baseSecs)
+	}
 
 	/*
 		// TODO: This is a hack
@@ -5531,7 +5560,8 @@ func (fs *FightScreen) reload() error {
 	sys.loadMutex.Unlock()
 
 	// Load the new instance
-	new, err := loadFightScreen(fs.def)
+	// Reload from the default fight.def so that a changed lifebar choice applies.
+	new, err := loadFightScreen(fs.gameplayDef())
 	if err != nil {
 		return err
 	}

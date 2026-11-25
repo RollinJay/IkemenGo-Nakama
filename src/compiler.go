@@ -8667,7 +8667,7 @@ func (c *CharCompiler) Compile(p *Char, def string, gi *CharGlobalInfo) (map[int
 	}
 	for _, key := range SortedKeys(sys.cfg.Common.Cmd) {
 		for _, v := range sys.cfg.Common.Cmd[key] {
-			if err := LoadFile(&v, []string{def, sys.motif.Def, sys.fightScreen.def, "", "data/"}, "", func(filename string) error {
+			if err := LoadFile(&v, []string{def, sys.motif.Def, sys.fightScreen.gameplayDef(), "", "data/"}, "", func(filename string) error {
 				txt, err := LoadText(filename)
 				if err != nil {
 					return err
@@ -8845,7 +8845,7 @@ func (c *CharCompiler) Compile(p *Char, def string, gi *CharGlobalInfo) (map[int
 	// Compile common states
 	for _, key := range SortedKeys(sys.cfg.Common.States) {
 		for _, v := range sys.cfg.Common.States[key] {
-			if err := c.stateCompile(states, v, []string{def, sys.motif.Def, sys.fightScreen.def, "", "data/"},
+			if err := c.stateCompile(states, v, []string{def, sys.motif.Def, sys.fightScreen.gameplayDef(), "", "data/"},
 				false, constants); err != nil {
 				return nil, err
 			}

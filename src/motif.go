@@ -69,6 +69,11 @@ type FontProperties struct {
 	Offset  [2]int32  `ini:"offset"`
 }
 
+type LifebarProperties struct {
+	Def  string `ini:"" lua:"def" lookup:"def,,data/"`
+	Name string `ini:"name"`
+}
+
 type FilesProperties struct {
 	Spr  string `ini:"spr" lookup:"def,,data/"`
 	Snd  string `ini:"snd" lookup:"def,,data/"`
@@ -81,9 +86,11 @@ type FilesProperties struct {
 	Select string                     `ini:"select" default:"select.def" lookup:"def,,data/"`
 	Fight  string                     `ini:"fight" default:"fight.def" lookup:"def,,data/"`
 	Font   map[string]*FontProperties `ini:"map:^(?i)font[0-9]+$" lua:"font"`
-	Glyphs string                     `ini:"glyphs" lookup:"def,,data/"`
-	Module string                     `ini:"module" lookup:"def,,data/"`
-	Model  string                     `ini:"model" lookup:"def,,data/"`
+	// Alternative lifebars for Config.Lifebar (lifebar_choice.go reads them).
+	Lifebar map[string]*LifebarProperties `ini:"map:^(?i)lifebar[0-9]+$" lua:"lifebar"`
+	Glyphs  string                        `ini:"glyphs" lookup:"def,,data/"`
+	Module  string                        `ini:"module" lookup:"def,,data/"`
+	Model   string                        `ini:"model" lookup:"def,,data/"`
 }
 
 type BgmProperties struct {
