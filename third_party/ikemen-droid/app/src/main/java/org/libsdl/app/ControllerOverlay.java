@@ -49,6 +49,15 @@ public class ControllerOverlay extends RelativeLayout {
             R.id.btn_d, R.id.btn_w, R.id.btn_start, R.id.btn_back};
     private static final int[] REMOTE_CODES = {96, 97, 4005, 99, 100, 103, 102, 4004, 108, 109};
     private static final int[] ARROW_VIEWS = {R.id.dp_up, R.id.dp_down, R.id.dp_left, R.id.dp_right};
+    // The buttons the game can hide are REMOTE_VIEWS, button i being bit i
+    // of the set it sends (touchButtonTokens in src/touch_glyphs.go).
+    static final int ALL_BUTTONS = (1 << 10) - 1;
+    // The rows of the button grid, right to left. A hidden button keeps its
+    // place in the layout, since others are placed from it, and the buttons
+    // left of it move right to close the gap (closeGaps).
+    private static final int[][] GRID_ROWS = {{R.id.btn_w, R.id.btn_z, R.id.btn_y, R.id.btn_x},
+            {R.id.btn_d, R.id.btn_c, R.id.btn_b, R.id.btn_a}};
+    private int shownButtons = ALL_BUTTONS;
     private final Map<Integer, CharSequence> plainText = new HashMap<>();
     private final Map<Integer, Drawable> plainBackground = new HashMap<>();
     private int hatX, hatY = 0;
@@ -379,7 +388,7 @@ public class ControllerOverlay extends RelativeLayout {
 
     private void checkAndAdd(Set<Integer> set, int viewId, int code, float x, float y, int pad) {
         View v = findViewById(viewId);
-        if (v == null) return;
+        if (v == null || v.getVisibility() != View.VISIBLE) return;
 
         int[] loc = new int[2];
         int[] parentLoc = new int[2];
@@ -494,6 +503,67 @@ public class ControllerOverlay extends RelativeLayout {
         if (isInitialized) {
             SDLControllerManager.nativeRemoveJoystick(virtualDeviceId);
             isInitialized = false;
+        }
+    }
+
+    /**
+     * Shows the buttons in set (bit i for REMOTE_VIEWS[i]) and hides the
+     * others, letting go of any a finger holds. Start and Menu, centred
+     * together, close up; in the grid, the buttons move right over the gaps.
+     */
+    public void setButtonsShown(int set) {
+        set &= ALL_BUTTONS;
+        if (set == shownButtons) {
+            return;
+        }
+        shownButtons = set;
+        for (int i = 0; i < REMOTE_VIEWS.length; i++) {
+            View v = findViewById(REMOTE_VIEWS[i]);
+            if (v == null) continue;
+            boolean show = (set & (1 << i)) != 0;
+            if (!show) {
+                releaseCode(REMOTE_CODES[i]);
+                v.setPressed(false);
+            }
+            boolean inGrid = REMOTE_VIEWS[i] != R.id.btn_start && REMOTE_VIEWS[i] != R.id.btn_back;
+            v.setVisibility(show ? View.VISIBLE : inGrid ? View.INVISIBLE : View.GONE);
+        }
+        closeGaps();
+        requestLayout();
+    }
+
+    // Lets go of code wherever a finger holds it.
+    private void releaseCode(int code) {
+        for (Set<Integer> codes : pointerStates.values()) {
+            if (codes.remove(code)) {
+                handleInput(code, false);
+            }
+        }
+    }
+
+    @Override
+    protected void onLayout(boolean changed, int l, int t, int r, int b) {
+        super.onLayout(changed, l, t, r, b);
+        closeGaps();
+    }
+
+    // Moves each row's shown buttons, keeping their order, to the row's
+    // rightmost places.
+    private void closeGaps() {
+        for (int[] row : GRID_ROWS) {
+            int place = 0;
+            for (int id : row) {
+                View v = findViewById(id);
+                if (v == null) continue;
+                if (v.getVisibility() != View.VISIBLE) {
+                    v.setTranslationX(0);
+                    v.setTranslationY(0);
+                    continue;
+                }
+                View slot = findViewById(row[place++]);
+                v.setTranslationX(slot.getLeft() - v.getLeft());
+                v.setTranslationY(slot.getTop() - v.getTop());
+            }
         }
     }
 

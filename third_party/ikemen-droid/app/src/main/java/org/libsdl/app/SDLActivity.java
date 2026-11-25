@@ -1104,6 +1104,7 @@ public class SDLActivity extends Activity implements View.OnSystemUiVisibilityCh
     // Commands from the game (src/util_android.go).
     static final int COMMAND_TEXT_ENTRY = COMMAND_USER + 1;   // 1: a text box opened, 0: closed
     static final int COMMAND_TOUCH_GLYPHS = COMMAND_USER + 2; // the buttons' glyph images changed
+    static final int COMMAND_TOUCH_BUTTONS = COMMAND_USER + 3; // the buttons to show, bit i for ControllerOverlay's REMOTE_VIEWS[i]
 
     protected static boolean mFullscreenModeActive;
 
@@ -1125,6 +1126,11 @@ public class SDLActivity extends Activity implements View.OnSystemUiVisibilityCh
                 return true;
             case COMMAND_TOUCH_GLYPHS:
                 mTouchControls.reloadGlyphs();
+                return true;
+            case COMMAND_TOUCH_BUTTONS:
+                if (param instanceof Integer) {
+                    mTouchControls.setButtons((Integer) param);
+                }
                 return true;
         }
         return false;

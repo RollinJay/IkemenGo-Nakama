@@ -26,7 +26,10 @@ var touchButtons = []struct{ name, pad string }{
 // TouchControlsProperties is [Touch Controls]: for each game button, the
 // [Glyphs] tokens that Android's on-screen buttons try, in order, to show it.
 type TouchControlsProperties struct {
-	Glyph struct {
+	// Buttons are the on-screen buttons shown (touchButtonTokens); empty
+	// shows them all.
+	Buttons []string `ini:"buttons"`
+	Glyph   struct {
 		A     []string `ini:"a"`
 		B     []string `ini:"b"`
 		C     []string `ini:"c"`
@@ -42,6 +45,52 @@ type TouchControlsProperties struct {
 		Left  []string `ini:"left"`
 		Right []string `ini:"right"`
 	} `ini:"glyph"`
+}
+
+// touchButtonTokens name the on-screen buttons that [Touch Controls] buttons
+// and config.ini's [Input] TouchButtons can show, by the letters they carry
+// without a glyph, s and m being Start and Menu. Button i is bit i of the
+// set the app gets (appMsgTouchButtons).
+var touchButtonTokens = []string{"a", "b", "c", "x", "y", "z", "d", "w", "s", "m"}
+
+// touchButtonsAll is the set of every on-screen button.
+const touchButtonsAll = 1<<10 - 1
+
+// parseTouchButtons reads a list of touchButtonTokens ("start" and "menu" may
+// be spelled out, and "all" means every button) into a set. ok is false if
+// the list names no button, which then shows none.
+func parseTouchButtons(tokens []string) (set int, ok bool) {
+	for _, tok := range tokens {
+		switch tok = strings.ToLower(strings.TrimSpace(tok)); tok {
+		case "all":
+			return touchButtonsAll, true
+		case "start":
+			tok = "s"
+		case "menu":
+			tok = "m"
+		}
+		for i, name := range touchButtonTokens {
+			if tok == name {
+				set |= 1 << i
+				ok = true
+			}
+		}
+	}
+	return set, ok
+}
+
+// touchButtonsShown is the set of on-screen buttons to show: those that the
+// player's option (config.ini's [Input] TouchButtons, a comma-separated list)
+// names, or if it names none, as when it is empty, the screenpack's
+// [Touch Controls] buttons, or if those name none, all of them.
+func touchButtonsShown(option string, screenpack []string) int {
+	if set, ok := parseTouchButtons(strings.Split(option, ",")); ok {
+		return set
+	}
+	if set, ok := parseTouchButtons(screenpack); ok {
+		return set
+	}
+	return touchButtonsAll
 }
 
 // touchGlyphTokens picks, for each on-screen button, the glyph of the game

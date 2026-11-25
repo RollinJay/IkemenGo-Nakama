@@ -21,6 +21,26 @@ function options.f_definedDisplay(key, t, default, ret)
 	return default
 end
 
+--On-screen Buttons values: config.ini's [Input] TouchButtons (empty is the
+--screenpack's [Touch Controls] buttons) and their [Option Info] valuenames
+options.t_touchButtons = {
+	{value = "", valuename = 'default', name = 'Default'},
+	{value = "a, b, c, x, y, z, d, w, s, m", valuename = 'touchbuttons_all', name = 'All'},
+	{value = "a, b, c, x, y, z, s, m", valuename = 'touchbuttons_nodw', name = 'No D and W'},
+}
+
+--index in options.t_touchButtons of the current value; a value set by hand
+--that the menu doesn't offer shows as the first
+function options.f_touchButtonsIndex()
+	local current = (gameOption('Input.TouchButtons') or ""):gsub('%s', ''):lower()
+	for i, v in ipairs(options.t_touchButtons) do
+		if v.value:gsub('%s', '') == current then
+			return i
+		end
+	end
+	return 1
+end
+
 --return correct precision
 function options.f_precision(v, decimal)
 	return tonumber(string.format(decimal, v))
@@ -255,6 +275,7 @@ options.t_itemname = {
 			--modifyGameOption('Input.UiRepeatDelay', 30)
 			--modifyGameOption('Input.UiRepeatRate', 4)
 			--modifyGameOption('Input.PauseExitDelay', 10)
+			modifyGameOption('Input.TouchButtons', "")
 
 			loadFightScreen(motif.files.fight)
 			setPlayers()
@@ -1374,6 +1395,28 @@ options.t_itemname = {
 		end
 		return true
 	end,
+	--On-screen Buttons (Android): the screenpack's choice, all, or all but D and W
+	['touchbuttons'] = function(t, item, cursorPosY, moveTxt)
+		local step = 0
+		if getInput(-1, motif.option_info.menu.add.key) then
+			step = 1
+		elseif getInput(-1, motif.option_info.menu.subtract.key) then
+			step = -1
+		end
+		if step ~= 0 then
+			sndPlay(motif.Snd, motif.option_info.cursor.move.snd[1], motif.option_info.cursor.move.snd[2])
+			local i = options.f_touchButtonsIndex() + step
+			if i < 1 then
+				i = #options.t_touchButtons
+			elseif i > #options.t_touchButtons then
+				i = 1
+			end
+			modifyGameOption('Input.TouchButtons', options.t_touchButtons[i].value)
+			t.items[item].vardisplay = options.t_vardisplay['touchbuttons']()
+			options.modified = true
+		end
+		return true
+	end,
 	--Players
 	['players'] = function(t, item, cursorPosY, moveTxt)
 		if getInput(-1, motif.option_info.menu.add.key) and gameOption('Config.Players') < 8 then
@@ -1912,6 +1955,10 @@ options.t_vardisplay = {
 	['turnsrecoverybonus'] = function()
 		return gameOption('Options.Turns.Recovery.Bonus') .. '%'
 	end,
+	['touchbuttons'] = function()
+		local entry = options.t_touchButtons[options.f_touchButtonsIndex()]
+		return motif.option_info.menu.valuename[entry.valuename] or entry.name
+	end,
 	['vsync'] = function()
 		return options.f_definedDisplay(gameOption('Video.VSync'), {[1] = motif.option_info.menu.valuename.enabled}, motif.option_info.menu.valuename.disabled)
 	end,
@@ -2141,11 +2188,11 @@ function options.f_start()
 	end
 	-- Runtime platform filtering
 	local runtimeOS = getRuntimeOS()
-	local excluded = {gles32 = true}
+	local excluded = {gles32 = true, touchbuttons = true}
 	if runtimeOS == 'android' then
 		excluded = {keyboard = true, gl33 = true}
 	elseif runtimeOS == 'ios' then
-		excluded = {keyboard = true, gl33 = true, gles32 = true}
+		excluded = {keyboard = true, gl33 = true, gles32 = true, touchbuttons = true}
 	end
 	main.f_pruneMenu(options.menu, excluded)
 	main.f_prunePointers(options.t_vardisplayPointers, excluded)

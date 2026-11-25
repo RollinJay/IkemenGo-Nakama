@@ -43,6 +43,8 @@ class TouchControls implements InputManager.InputDeviceListener {
     static final int MODE_SHOW = 1;
     static final int MODE_HIDE = 2;
     private static final String PREF_MODE = "touch_controls";
+    // The on-screen buttons the game last chose to show, for the next start.
+    private static final String PREF_BUTTONS = "touch_buttons";
     // A press from the remote lasts at least this long, so that the game,
     // which reads its controllers once a frame, sees it.
     private static final long MIN_PRESS_MS = 60;
@@ -92,6 +94,7 @@ class TouchControls implements InputManager.InputDeviceListener {
 
         inputManager = (InputManager) activity.getSystemService(Context.INPUT_SERVICE);
         inputManager.registerInputDeviceListener(this, handler);
+        overlay.setButtonsShown(prefs.getInt(PREF_BUTTONS, ControllerOverlay.ALL_BUTTONS));
         reloadGlyphs();
         update();
     }
@@ -171,6 +174,19 @@ class TouchControls implements InputManager.InputDeviceListener {
     /** The game wrote the buttons' glyph images (src/touch_glyphs_android.go). */
     void reloadGlyphs() {
         overlay.loadGlyphs(new File(activity.getFilesDir(), "touch-glyphs"));
+    }
+
+    /**
+     * The game chose which on-screen buttons show (src/touch_glyphs.go
+     * touchButtonsShown). The remote's highlight leaves a button that hid.
+     */
+    void setButtons(int set) {
+        prefs.edit().putInt(PREF_BUTTONS, set).apply();
+        overlay.setButtonsShown(set);
+        if (selected != null && !isTarget(selected)) {
+            select(defaultTarget());
+        }
+        ring.invalidate();
     }
 
     /**
