@@ -1601,7 +1601,215 @@ main.t_bonusChars = {}
 main.t_selGrid = {}
 main.t_selOptions = {}
 main.t_selStoryMode = {}
+main.t_selCodes = {}
+main.t_selCommands = {}
 local t_storyModeList = {}
+--select.def [Codes]: secret select screen codes. One code per line, as
+--comma separated key = value pairs:
+--  name = label; path = names highlighted in order, separated by '>';
+--  p1.path / p2.path = the path for that side only; hold = frames each
+--  path character stays highlighted (default 60, cells highlighted for less
+--  are passed through); input = buttons pressed together on the last one,
+--  joined by '+' (default s+x+y+z); inputtime = frames in which they must
+--  all be pressed (default 4); char = the character it selects; pal =
+--  its palette (default: from the buttons, like a normal selection).
+--Characters are named as written in [Characters].
+local function selectCodeName(n)
+	return (n or ''):gsub('\\', '/'):match('^%s*(.-)%s*$'):lower()
+end
+
+local function selectCodePath(v)
+	local t = {}
+	for name in (v .. '>'):gmatch('([^>]*)>') do
+		name = selectCodeName(name)
+		if name ~= '' then
+			table.insert(t, name)
+		end
+	end
+	return t
+end
+
+function main.f_addSelectCode(line)
+	local code = {hold = 60, inputtime = 4, input = {'s', 'x', 'y', 'z'}}
+	for _, kv in ipairs(main.f_strsplit(',', line)) do
+		local k, v = kv:match('^%s*([%w%.]+)%s*=%s*(.-)%s*$')
+		if k ~= nil then
+			k = k:lower()
+			if k == 'name' then
+				code.name = v
+			elseif k == 'path' then
+				code.path = selectCodePath(v)
+			elseif k == 'p1.path' then
+				code.p1path = selectCodePath(v)
+			elseif k == 'p2.path' then
+				code.p2path = selectCodePath(v)
+			elseif k == 'hold' or k == 'inputtime' or k == 'pal' then
+				code[k] = tonumber(v)
+			elseif k == 'input' then
+				code.input = {}
+				for b in v:gmatch('[^+%s]+') do
+					table.insert(code.input, b)
+				end
+			elseif k == 'char' then
+				code.char = selectCodeName(v)
+			end
+		end
+	end
+	if code.char ~= nil and #code.input > 0 and (code.path or code.p1path or code.p2path) then
+		code.name = code.name or code.char
+		table.insert(main.t_selCodes, code)
+	elseif line:match('%S') then
+		print('select.def [Codes]: ignored line: ' .. line)
+	end
+end
+
+--resolves the names of [Codes] to character refs once all are added
+function main.f_resolveSelectCodes()
+	local codes = {}
+	for _, code in ipairs(main.t_selCodes) do
+		code.ref = main.t_charDef[code.char]
+		local ok = code.ref ~= nil
+		for _, key in ipairs({'path', 'p1path', 'p2path'}) do
+			if code[key] ~= nil then
+				local refs = {}
+				for _, name in ipairs(code[key]) do
+					local r = main.t_charDef[name]
+					if r == nil then
+						print('select.def [Codes] ' .. code.name .. ': unknown character ' .. name)
+						ok = false
+					end
+					table.insert(refs, r)
+				end
+				code[key .. 'refs'] = refs
+			end
+		end
+		if code.ref == nil then
+			print('select.def [Codes] ' .. code.name .. ': unknown character ' .. code.char)
+		end
+		if ok then
+			code.hold = math.max(code.hold or 60, 1)
+			code.inputtime = math.max(code.inputtime or 4, 1)
+			table.insert(codes, code)
+		end
+	end
+	main.t_selCodes = codes
+end
+
+--select.def [Command] sections: commands entered with the cursor over a
+--character, written like a .cmd file's [Command]:
+--  command = engine command syntax (~ release, / hold, + together, $ and > as
+--            in .cmd files), e.g. ~s, ~s or ~D, DF, F, x
+--  time    = frames to enter it (default 15)
+--  cell    = where the cursor must be: characters as named in [Characters],
+--            separated by |, or * (any cell) or *slot (any cell with a slot
+--            group). Default *.
+--  path, hold = optionally, a path walked first, as in [Codes]
+--  action  = slotnext | slotprev (step the cell's slot group) or select
+--            (pick char, with pal or the palette the buttons give)
+--The command's progress is reset whenever the cursor changes cell. If it
+--completes on the same frame as a normal pick (an attack button), it wins
+--only when its last element holds that attack button; otherwise the pick
+--goes through and the command is ignored. [Select Info]
+--cell.slot.doubletap.key = k is short for command = ~k, ~k (time =
+--cell.slot.doubletap.time), cell = *slot, action = slotnext.
+local t_attackButtons = {a = true, b = true, c = true, x = true, y = true, z = true}
+
+--true when the last element of a command string holds an attack button
+local function selectCommandLastAttack(str)
+	local last = str
+	for el in (str .. ','):gmatch('([^,]*),') do
+		if el:match('%S') then
+			last = el
+		end
+	end
+	for tok in last:gmatch('[%w]+') do
+		if t_attackButtons[tok] then
+			return true
+		end
+	end
+	return false
+end
+
+function main.f_resolveSelectCommands()
+	local t = {}
+	local dt = motif.select_info.cell.slot.doubletap
+	if dt ~= nil and dt.key ~= nil then
+		for _, k in ipairs(dt.key) do
+			k = tostring(k):match('^%s*(.-)%s*$')
+			if k ~= '' then
+				table.insert(t, {command = '~' .. k .. ', ~' .. k, time = tostring(dt.time or 15), cell = '*slot', action = 'slotnext'})
+			end
+		end
+	end
+	for _, c in ipairs(main.t_selCommands) do
+		table.insert(t, c)
+	end
+	main.t_selCommands = {}
+	for i, c in ipairs(t) do
+		local name = 'selectcommand' .. i
+		local action = (c.action or ''):lower()
+		local ok = c.command ~= nil and (action == 'slotnext' or action == 'slotprev' or action == 'select')
+		local entry = {
+			name = name,
+			label = c.name or c.command or name,
+			command = c.command,
+			action = action,
+			time = tonumber(c.time) or 15,
+			pal = tonumber(c.pal),
+			hold = math.max(tonumber(c.hold) or 60, 1),
+			cells = {},
+		}
+		for cell in ((c.cell or '*') .. '|'):gmatch('([^|]*)|') do
+			cell = selectCodeName(cell)
+			if cell == '*' then
+				entry.anyCell = true
+			elseif cell == '*slot' then
+				entry.slotCells = true
+			elseif cell ~= '' then
+				local r = main.t_charDef[cell]
+				if r == nil then
+					print('select.def [Command] ' .. entry.label .. ': unknown character ' .. cell)
+					ok = false
+				end
+				entry.cells[#entry.cells + 1] = r
+			end
+		end
+		if #entry.cells == 0 and not entry.slotCells then
+			entry.anyCell = true
+		end
+		if action == 'select' then
+			entry.ref = main.t_charDef[selectCodeName(c.char)]
+			if entry.ref == nil then
+				print('select.def [Command] ' .. entry.label .. ': unknown character ' .. tostring(c.char))
+				ok = false
+			end
+		end
+		if c.path ~= nil then
+			entry.pathrefs = {}
+			for _, n in ipairs(selectCodePath(c.path)) do
+				local r = main.t_charDef[n]
+				if r == nil then
+					print('select.def [Command] ' .. entry.label .. ': unknown character ' .. n)
+					ok = false
+				end
+				table.insert(entry.pathrefs, r)
+			end
+		end
+		if ok then
+			entry.lastAttack = selectCommandLastAttack(entry.command)
+			ok = pcall(commandAdd, name, entry.command, entry.time)
+			if not ok then
+				print('select.def [Command] ' .. entry.label .. ': bad command ' .. entry.command)
+			end
+		elseif c.command ~= nil or c.action ~= nil then
+			print('select.def [Command] ' .. entry.label .. ': ignored (needs command and action slotnext, slotprev or select)')
+		end
+		if ok then
+			table.insert(main.t_selCommands, entry)
+		end
+	end
+end
+
 local t_addExluded = {}
 local tmp = ''
 local section = 0
@@ -1676,6 +1884,11 @@ for line in content:gmatch('[^\r\n]+') do
 		else
 			section = -1
 		end
+	elseif lineCase:match('^%s*%[%s*codes%s*%]') then
+		section = 5
+	elseif lineCase:match('^%s*%[%s*command%s*%]') then
+		section = 6
+		table.insert(main.t_selCommands, {})
 	elseif lineCase:match('^%s*%[%w+%]$') then
 		section = -1
 	elseif section == 1 then --[Characters]
@@ -1763,6 +1976,13 @@ for line in content:gmatch('[^\r\n]+') do
 				main.t_selStoryMode[#main.t_selStoryMode][param] = value
 			end
 		end
+	elseif section == 5 then --[Codes]
+		main.f_addSelectCode(line)
+	elseif section == 6 then --[Command]
+		local param, value = line:match('^%s*([%w%.]+)%s*=%s*(.-)%s*$')
+		if param ~= nil and value ~= '' then
+			main.t_selCommands[#main.t_selCommands][param:lower()] = value
+		end
 	end
 end
 
@@ -1779,6 +1999,8 @@ end
 for i = 1, #t_addExluded do
 	main.f_addChar(t_addExluded[i], true, true)
 end
+main.f_resolveSelectCodes()
+main.f_resolveSelectCommands()
 
 --add Training char if defined and not included in select.def
 if gameOption('Config.TrainingChar') ~= '' and main.t_charDef[gameOption('Config.TrainingChar'):lower()] == nil then
@@ -1818,7 +2040,10 @@ function main.f_updateRandomChars()
 			-- generate table with characters allowed to be randomly selected
 			if ch.playable
 				and (ch.hidden == nil or ch.hidden <= 1)
-				and (ch.exclude == nil or ch.exclude == 0) then
+				and (ch.exclude == nil or ch.exclude == 0)
+				-- select.def 'random = 0': never picked by random select
+				-- (e.g. a boss version reached through a slot)
+				and ch.random ~= 0 then
 				table.insert(t, i - 1)
 			end
 		end

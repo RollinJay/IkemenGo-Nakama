@@ -2418,6 +2418,21 @@ func systemScriptInit(l *lua.LState) {
 		}
 		return 0
 	})
+	luaRegister(l, "commandReset", func(l *lua.LState) int {
+		/*Reset the progress of named commands, leaving the input buffer and the
+		other commands alone (unlike commandBufReset).
+		@function commandReset
+		@tparam int playerNo 1-based player/controller index.
+		@tparam string ... Command names.*/
+		pn := int(numArg(l, 1))
+		if pn < 1 || pn > len(sys.commandLists) || sys.commandLists[pn-1] == nil {
+			return 0
+		}
+		for i := 2; i <= l.GetTop(); i++ {
+			sys.commandLists[pn-1].ResetName(strArg(l, i))
+		}
+		return 0
+	})
 	luaRegister(l, "commandDebug", func(*lua.LState) int {
 		/*Print debug information about a command list.
 		@function commandDebug

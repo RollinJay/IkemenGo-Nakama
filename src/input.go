@@ -3082,6 +3082,19 @@ func (cl *CommandList) ClearName(name string) {
 	}
 }
 
+// ResetName clears the progress and buffer time of every variant of a command,
+// so inputs made before the call can't complete it.
+func (cl *CommandList) ResetName(name string) {
+	i, ok := cl.Names[name]
+	if !ok || i < 0 || i >= len(cl.Commands) {
+		return
+	}
+	for j := range cl.Commands[i] {
+		cl.Commands[i][j].Clear(true)
+		cl.Commands[i][j].completeframe = false
+	}
+}
+
 // Used when updating commands in each frame
 func (cl *CommandList) Step(ai, isHelper, hpbuf, pausebuf bool, extratime int32) {
 	if cl.Buffer == nil {
