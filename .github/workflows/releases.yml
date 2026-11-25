@@ -477,19 +477,18 @@ jobs:
           if [ "${{ matrix.cfg.runner_os }}" = "ios" ]; then
             # Same defaults build.sh uses, so the notices match what gets bundled.
             bdef() { python3 -c 'import re,sys;print(re.search(r"^%s=\"\$\{%s:-(.*?)\}\"" % (sys.argv[1],sys.argv[1]), open("build/build.sh").read(), re.M).group(1))' "$1"; }
-            ios_repo="$(bdef IOS_APP_REPO)"; ios_repo="${ios_repo#https://github.com/}"; ios_repo="${ios_repo%.git}"
-            ios_ref="$(bdef IOS_APP_REF)"
+            # The app is the copy in third_party/ikemen-ios (see its VENDOR.md).
+            ios_dir=third_party/ikemen-ios
             mvk_rev="$(bdef MOLTENVK_REV)"
-            ios_raw="https://raw.githubusercontent.com/${ios_repo}/${ios_ref}"
-            zip_rev="$(curl -fsSL "$ios_raw/I.K.E.M.E.N-Go.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved" \
-              | python3 -c 'import json,sys;print(next(p["state"]["revision"] for p in json.load(sys.stdin)["pins"] if p["identity"]=="ziparchive"))')"
+            zip_rev="$(python3 -c 'import json,sys;print(next(p["state"]["revision"] for p in json.load(open(sys.argv[1]))["pins"] if p["identity"]=="ziparchive"))' \
+              "$ios_dir/I.K.E.M.E.N-Go.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved")"
             {
               echo
               echo "Section 7: iOS app components"
               echo "-----------------------------"
-              echo "7.1 ikemen-ios wrapper (https://github.com/${ios_repo}):"
+              echo "7.1 ikemen-ios wrapper (https://github.com/Jesuszilla/ikemen-ios, with this repository's changes in $ios_dir):"
               echo
-              curl -fsSL "$ios_raw/LICENSE.txt"
+              cat "$ios_dir/LICENSE.txt"
               echo
               echo "7.2 MoltenVK ${mvk_rev} (https://github.com/KhronosGroup/MoltenVK):"
               echo
