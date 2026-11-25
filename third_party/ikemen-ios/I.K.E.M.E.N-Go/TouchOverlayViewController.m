@@ -7,6 +7,7 @@
 
 #import "TouchOverlayViewController.h"
 #import "TouchOverlayView.h"
+#import "TouchControls.h"
 #import "ViewController.h"
 #import <UIKit/UIKit.h>
 #import <Foundation/Foundation.h>
@@ -36,6 +37,9 @@
         [placeholder.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor]
     ]];
     self.overlayView = (TouchOverlayView*)self.view;
+    // The xib's views are in place: the settings, keyboard and the game's
+    // choice of buttons can go on them.
+    [[TouchControls shared] attachToOverlay:self.overlayView];
 }
 
 // THIS! YOU! YOU FUCKING GUY! THIS IS THE KEY! YOU DO NOT EVER TELL ME TO FUCK!

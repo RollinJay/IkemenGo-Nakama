@@ -19,6 +19,7 @@
 #import <SDL2/SDL.h>
 #import "GoWindow.h"
 #import "SDLWindowFix.h"
+#import "TouchControls.h"
 
 @interface ViewController ()
 @property (nonatomic, strong) NSURL *assetsFolderURL;
@@ -84,6 +85,11 @@ static NSString * const RestartFolderPickKey = @"ShouldDisplayRestartFolderPicke
 }
 
 - (BOOL)prefersHomeIndicatorAutoHidden {
+    return YES;
+}
+
+// The game fills the screen, without the status bar.
+- (BOOL)prefersStatusBarHidden {
     return YES;
 }
 
@@ -431,6 +437,9 @@ static NSString * const RestartFolderPickKey = @"ShouldDisplayRestartFolderPicke
 
         // Force button labels mapping
         SDL_SetHint(SDL_HINT_GAMECONTROLLER_USE_BUTTON_LABELS, "1");
+
+        // The game's commands for the touch controls (TouchControls.h)
+        IkemenSetAppMessageHandler((void *)IkemenTouchControlsMessage);
 
         // Start SDL_main
         self.overlayView.sdlWasInit = YES;

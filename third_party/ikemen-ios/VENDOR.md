@@ -10,4 +10,19 @@ This folder holds the iOS app that `build/build.sh iOS` packages the game into. 
 
 ## Local changes
 
-None yet.
+They make the on-screen buttons work as the Android app's do (see `third_party/ikemen-droid/VENDOR.md`).
+
+- **`TouchOverlayView`:**
+  - The on-screen buttons play as a controller named "IKEMEN Touch Controls" (`SDL_JoystickAttachVirtualEx`, no vendor or product ID), so that the game recognises it.
+  - The buttons can be hidden (`setControlsShown:`), which also removes their controller. Hidden, they take no touches, and the next touch after they show again brings the controller back.
+  - Each attack, Start and Menu button shows the glyph image the game writes for it, or its letter where there is none (`loadGlyphsFromDirectory:`). The d-pad is a single disc and shows none.
+  - The game chooses which of the ten buttons show (`setButtonsShown:`). Hidden grid buttons keep their place, and the shown ones in their row move right over the gaps; Start and Menu close up. Hidden buttons take no touches. The game can also move Start into the grid, in a hidden button's place (`[Touch Controls] start.slot`). With `[Touch Controls] layout = grid` the grid drops its stagger: each punch sits straight above its kick, and Start, in the grid, stands apart on the right. Buttons move by transforms, so the xib's layout stays as it is.
+- **`TouchControls`** (new):
+  - **Setting:** Automatic, Always show or Always hide, chosen from a small settings button at the top left. Automatic hides the buttons while a real controller is connected: one the game has (command 0x8004), or one the GameController framework lists (its notifications, and a check every second).
+  - **Keyboard button:** shown while the game has a text box open and the keyboard is closed.
+  - **From the game:** `IkemenTouchControlsMessage` takes commands 0x8001 (a text box opened or closed), 0x8002 (the glyph images changed), 0x8003 (the buttons to show, remembered for the next start) and 0x8004 (the number of real controllers the game has).
+  - **To the game:** `IkemenShowKeyboard`, and `IkemenSetKeyboardCover` with how much of the game's view the keyboard covers; the game draws itself above it.
+  - **Text field:** SDL's text field is in SDL's window, under the app's, so SDL's window is the key window while a text box is open.
+  - Nothing in it goes through the main dispatch queue, which the game holds while it runs.
+- **`ViewController`:** gives the game `IkemenTouchControlsMessage` (`IkemenSetAppMessageHandler`) before `SDL_main`, and hides the status bar.
+- **`TouchOverlayViewController`:** hands the overlay to `TouchControls` once the xib is loaded.
