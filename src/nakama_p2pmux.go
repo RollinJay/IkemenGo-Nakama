@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"hash/fnv"
 	"log"
 	"net"
@@ -57,6 +58,34 @@ const (
 	// The routes a session accepts data from (p2pMux.known), and the routes
 	// its handshake keeps (NakamaP2P.checks), are at most this many.
 	p2pMaxRoutes = 16
+
+	// The mux pings every route it knows, not only the one it sends on: the
+	// pongs, which the peer sends back on the route the ping came on, measure
+	// each route's round trip and show which routes still work. It pings
+	// every p2pProbeInterval while the session runs on a relay, in its first
+	// p2pProbeFastFor and for as long after a change of route, and every
+	// p2pProbeSlowEvery-th interval otherwise.
+	p2pProbeInterval  = 250 * time.Millisecond
+	p2pProbeSlowEvery = 4
+	p2pProbeFastFor   = 30 * time.Second
+	// A route nothing arrived on for this long is quiet: when it is the one
+	// the session sends on, the session moves to a route that still works
+	// (the relay, when it is still open), or asks for the relay again
+	// (p2pMuxHooks.lost).
+	p2pRouteQuiet = 2500 * time.Millisecond
+	// A route takes over from a lower-ranked one (a direct route from a
+	// relay) once this many pongs came back on it in a row, and its round
+	// trip is at most p2pUpgradeMargin (or a quarter) above the current
+	// route's.
+	p2pUpgradePongs  = 3
+	p2pUpgradeMargin = 20 * time.Millisecond
+	// Between routes of the same rank (two direct routes: LAN and public
+	// address, a VPN and the internet), the session moves to one that is
+	// faster by p2pFasterMargin (or a fifth) on p2pFasterSamples pongs or
+	// more, at most once every p2pSwitchDwell.
+	p2pFasterMargin  = 15 * time.Millisecond
+	p2pFasterSamples = 5
+	p2pSwitchDwell   = 5 * time.Second
 )
 
 // nakamaP2PHostLabel stands in for the host address on the guest's rollback
@@ -66,8 +95,9 @@ const nakamaP2PHostLabel = "nakama-p2p"
 var errP2PMuxClosed = errors.New("p2p socket is closed")
 
 // p2pMux reads the punched socket and routes datagrams to channels. The
-// session's other paths (the IPv6 socket, the relay) hand it what they read
-// (dispatch), and it sends on the route the handshake completed on (active).
+// session's other paths (the IPv6 socket, the relays) hand it what they read
+// (dispatch), and it sends on its active route, which it changes as routes
+// start and stop working (see p2pRouteStat).
 type p2pMux struct {
 	conn  *net.UDPConn // the IPv4 socket, which run reads
 	udp   *p2pUDPPath  // conn's path, for the routes of what run reads
@@ -80,10 +110,21 @@ type p2pMux struct {
 	remote *net.UDPAddr
 
 	mu       sync.Mutex
-	known    []p2pRoute
+	known    []*p2pRouteStat
 	active   p2pRoute
 	channels map[byte]*p2pChannel
 	heard    sync.Once
+	// activeSince is when the active route became active, lastSwitch when it
+	// last changed (zero before), switches how often it changed, and
+	// lostSent whether hooks.lost ran for the current quiet spell.
+	activeSince time.Time
+	lastSwitch  time.Time
+	switches    int
+	lostSent    bool
+	// probeInterval and routeQuiet are p2pProbeInterval and p2pRouteQuiet
+	// (tests shorten them before start).
+	probeInterval time.Duration
+	routeQuiet    time.Duration
 
 	runOnce   sync.Once
 	closed    chan struct{}
@@ -91,12 +132,23 @@ type p2pMux struct {
 	lastSend  atomic.Int64
 	lastRecv  atomic.Int64
 
-	// Round trip over the punched path: smoothed as TCP does (srtt), from
-	// pings sent every p2pKeepaliveInterval/2. epoch is the clock pings carry.
-	epoch      time.Time
-	rttMu      sync.Mutex
-	srtt       time.Duration
-	rttSamples int
+	// epoch is the clock pings carry; started is when the mux started.
+	epoch   time.Time
+	started time.Time
+}
+
+// p2pRouteStat is what the mux knows of one verified route: its round trip,
+// smoothed as TCP does (srtt) from the pongs that came back on it, how many
+// pongs came in a row without a quiet gap (streak), and when the peer's
+// pongs, datagrams, and game data (stream or GGPO) last arrived on it.
+type p2pRouteStat struct {
+	route    p2pRoute
+	srtt     time.Duration
+	samples  int
+	streak   int
+	lastPong time.Time
+	lastRecv time.Time
+	lastData time.Time
 }
 
 // p2pMuxHooks connect a mux to its session: control takes the handshake
@@ -104,28 +156,36 @@ type p2pMux struct {
 // IPv4 socket (p2pCrypt), and heard runs once, at the peer's first data,
 // which shows its game finished the handshake too. unverified runs when the
 // peer's data comes on a route this side has not verified, and dropped it:
-// the session checks that route (NakamaP2P.recheck). A nil open takes
-// datagrams as they are (tests).
+// the session checks that route (NakamaP2P.recheck). switched runs when the
+// active route changed, and lost when it went quiet with no other route
+// working. A nil open takes datagrams as they are (tests).
 type p2pMuxHooks struct {
 	control    func(data []byte, from p2pRoute)
 	open       func(sealed []byte) ([]byte, bool)
 	heard      func()
 	unverified func(from p2pRoute)
+	switched   func(from, to p2pRoute)
+	lost       func()
 }
 
 func newP2PMux(conn *net.UDPConn, udp *p2pUDPPath, remote *net.UDPAddr, route p2pRoute, hooks p2pMuxHooks) *p2pMux {
 	r := *remote
+	now := time.Now()
 	m := &p2pMux{
-		conn:     conn,
-		udp:      udp,
-		hooks:    hooks,
-		remote:   &r,
-		active:   route,
-		channels: make(map[byte]*p2pChannel),
-		closed:   make(chan struct{}),
-		epoch:    time.Now(),
+		conn:          conn,
+		udp:           udp,
+		hooks:         hooks,
+		remote:        &r,
+		active:        route,
+		activeSince:   now,
+		channels:      make(map[byte]*p2pChannel),
+		closed:        make(chan struct{}),
+		epoch:         now,
+		started:       now,
+		probeInterval: p2pProbeInterval,
+		routeQuiet:    p2pRouteQuiet,
 	}
-	m.lastRecv.Store(time.Now().UnixNano())
+	m.lastRecv.Store(now.UnixNano())
 	m.addKnown(route)
 	return m
 }
@@ -142,6 +202,23 @@ func (m *p2pMux) activeRoute() p2pRoute {
 	return m.active
 }
 
+// switchCount is how often the active route changed.
+func (m *p2pMux) switchCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.switches
+}
+
+// statLocked returns the entry of a known route, or nil.
+func (m *p2pMux) statLocked(route p2pRoute) *p2pRouteStat {
+	for _, k := range m.known {
+		if k.route.equal(route) {
+			return k
+		}
+	}
+	return nil
+}
+
 // addKnown records a route the handshake verified (NakamaP2P.verify): it
 // works both ways, so the peer's data is accepted from it. The peer may send
 // on another route than the one this side sends on (LAN versus hairpinned
@@ -153,40 +230,268 @@ func (m *p2pMux) addKnown(route p2pRoute) {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	for _, k := range m.known {
-		if k.equal(route) {
-			return
-		}
+	if m.statLocked(route) != nil {
+		return
 	}
 	if len(m.known) < p2pMaxRoutes {
-		m.known = append(m.known, route)
+		m.known = append(m.known, &p2pRouteStat{route: route})
 	}
 }
 
-// prefer makes a verified UDP route the route to send on instead of the
-// relay.
+// forget drops a route that closed (a relay the session left), unless it is
+// the active one.
+func (m *p2pMux) forget(route p2pRoute) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.active.equal(route) {
+		return
+	}
+	for i, k := range m.known {
+		if k.route.equal(route) {
+			m.known = append(m.known[:i], m.known[i+1:]...)
+			return
+		}
+	}
+}
+
+// prefer makes a verified route the route to send on at once when it ranks
+// higher than the active one (a UDP route instead of a relay).
 func (m *p2pMux) prefer(route p2pRoute) {
 	if !route.valid() {
 		return
 	}
 	m.addKnown(route)
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	var from p2pRoute
+	switched := false
 	if m.active.valid() && p2pPathRank(route.path) > p2pPathRank(m.active.path) {
-		log.Printf("Nakama P2P: %s works too; sending on it instead of %s", route, m.active)
-		m.active = route
+		from, switched = m.active, true
+		m.setActiveLocked(route, time.Now(), "works too")
+	}
+	m.mu.Unlock()
+	if switched {
+		m.notifySwitch(from, route)
+	}
+}
+
+// consider takes a route the handshake verified after the session started.
+// Before a match runs on the session (no GGPO channel), a route that ranks
+// higher than the active one takes over at once, as prefer does; during a
+// match, only once its pongs show it works steadily and is not slower
+// (recordPong), so a route that answered one check and then fails does not
+// stall the match.
+func (m *p2pMux) consider(route p2pRoute) {
+	m.mu.Lock()
+	match := m.channels[p2pTagGGPO] != nil
+	m.mu.Unlock()
+	if match {
+		m.addKnown(route)
+		return
+	}
+	m.prefer(route)
+}
+
+// setActiveLocked makes route the active one.
+func (m *p2pMux) setActiveLocked(route p2pRoute, now time.Time, why string) {
+	log.Printf("Nakama P2P: %s %s; sending on it instead of %s", route, why, m.active)
+	m.active = route
+	m.activeSince = now
+	m.lastSwitch = now
+	m.switches++
+	m.lostSent = false
+}
+
+func (m *p2pMux) notifySwitch(from, to p2pRoute) {
+	if m.hooks.switched != nil {
+		m.hooks.switched(from, to)
 	}
 }
 
 func (m *p2pMux) isKnown(route p2pRoute) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	for _, k := range m.known {
-		if k.equal(route) {
-			return true
+	return m.statLocked(route) != nil
+}
+
+// touch records a datagram of the peer's on a route, and reports whether
+// the route is known (verified).
+func (m *p2pMux) touch(from p2pRoute, tag byte) bool {
+	now := time.Now()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	st := m.statLocked(from)
+	if st == nil {
+		return false
+	}
+	st.lastRecv = now
+	if tag == p2pTagStream || tag == p2pTagGGPO {
+		st.lastData = now
+	}
+	return true
+}
+
+// routeActivity reports when anything, and when game data, last arrived on
+// a known route (zero times for an unknown one).
+func (m *p2pMux) routeActivity(route p2pRoute) (recv, data time.Time) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if st := m.statLocked(route); st != nil {
+		return st.lastRecv, st.lastData
+	}
+	return time.Time{}, time.Time{}
+}
+
+// activeLive reports whether something arrived on the active route lately
+// (or it became active only lately).
+func (m *p2pMux) activeLive() bool {
+	now := time.Now()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	st := m.statLocked(m.active)
+	if st == nil {
+		return false
+	}
+	last := st.lastRecv
+	if m.activeSince.After(last) {
+		last = m.activeSince
+	}
+	return now.Sub(last) <= m.routeQuiet
+}
+
+// recordPong folds one round trip measured on route into its entry, and
+// moves the session to a better route when the pongs show one (see
+// betterLocked).
+func (m *p2pMux) recordPong(from p2pRoute, sample time.Duration) {
+	if sample <= 0 || sample > 10*time.Second {
+		return
+	}
+	now := time.Now()
+	m.mu.Lock()
+	st := m.statLocked(from)
+	if st == nil {
+		m.mu.Unlock()
+		return
+	}
+	if st.samples == 0 {
+		st.srtt = sample
+	} else {
+		st.srtt += (sample - st.srtt) / 8
+	}
+	st.samples++
+	if !st.lastPong.IsZero() && now.Sub(st.lastPong) <= m.routeQuiet {
+		st.streak++
+	} else {
+		st.streak = 1
+	}
+	st.lastPong = now
+	prev, next, switched := m.evaluateLocked(now)
+	m.mu.Unlock()
+	if switched {
+		m.notifySwitch(prev, next)
+	}
+}
+
+// evaluateLocked moves the session to the best route that answers steadily
+// and is better than the active one (betterLocked).
+func (m *p2pMux) evaluateLocked(now time.Time) (from, to p2pRoute, switched bool) {
+	cur := m.statLocked(m.active)
+	if cur == nil {
+		return
+	}
+	var best *p2pRouteStat
+	for _, s := range m.known {
+		if s == cur || s.streak < p2pUpgradePongs || now.Sub(s.lastPong) > m.routeQuiet || !m.betterLocked(s, cur, now) {
+			continue
+		}
+		if best == nil || p2pPathRank(s.route.path) > p2pPathRank(best.route.path) ||
+			(p2pPathRank(s.route.path) == p2pPathRank(best.route.path) && s.srtt < best.srtt) {
+			best = s
 		}
 	}
+	if best == nil {
+		return
+	}
+	from = m.active
+	why := fmt.Sprintf("answers steadily (%v against %v)", best.srtt.Round(time.Millisecond), cur.srtt.Round(time.Millisecond))
+	m.setActiveLocked(best.route, now, why)
+	return from, best.route, true
+}
+
+// betterLocked reports whether s should take over from cur: a higher rank
+// when its round trip is not worse by more than a margin, or the same rank
+// when it is clearly faster.
+func (m *p2pMux) betterLocked(s, cur *p2pRouteStat, now time.Time) bool {
+	rs, rc := p2pPathRank(s.route.path), p2pPathRank(cur.route.path)
+	switch {
+	case rs > rc:
+		if cur.samples == 0 {
+			return true
+		}
+		margin := cur.srtt / 4
+		if margin < p2pUpgradeMargin {
+			margin = p2pUpgradeMargin
+		}
+		return s.srtt <= cur.srtt+margin
+	case rs == rc:
+		if (!m.lastSwitch.IsZero() && now.Sub(m.lastSwitch) < p2pSwitchDwell) || s.samples < p2pFasterSamples || cur.samples < p2pFasterSamples {
+			return false
+		}
+		margin := cur.srtt / 5
+		if margin < p2pFasterMargin {
+			margin = p2pFasterMargin
+		}
+		return s.srtt+margin < cur.srtt
+	}
 	return false
+}
+
+// checkRoutes runs every probe interval: when nothing arrived on the active
+// route for routeQuiet, the session moves to the best route something still
+// arrives on (the relay, while it is open), or, when there is none, tells
+// the session once (hooks.lost), which asks for the relay again.
+func (m *p2pMux) checkRoutes() {
+	now := time.Now()
+	m.mu.Lock()
+	cur := m.statLocked(m.active)
+	if cur == nil {
+		m.mu.Unlock()
+		return
+	}
+	last := cur.lastRecv
+	if m.activeSince.After(last) {
+		last = m.activeSince
+	}
+	if now.Sub(last) <= m.routeQuiet {
+		m.lostSent = false
+		m.mu.Unlock()
+		return
+	}
+	var best *p2pRouteStat
+	for _, s := range m.known {
+		if s == cur || s.lastRecv.IsZero() || now.Sub(s.lastRecv) > m.routeQuiet {
+			continue
+		}
+		if best == nil || p2pPathRank(s.route.path) > p2pPathRank(best.route.path) ||
+			(p2pPathRank(s.route.path) == p2pPathRank(best.route.path) && s.samples > 0 && (best.samples == 0 || s.srtt < best.srtt)) {
+			best = s
+		}
+	}
+	if best != nil {
+		from := m.active
+		m.setActiveLocked(best.route, now, fmt.Sprintf("still works while %s went quiet", from))
+		m.mu.Unlock()
+		m.notifySwitch(from, best.route)
+		return
+	}
+	report := !m.lostSent
+	m.lostSent = true
+	m.mu.Unlock()
+	if report {
+		log.Printf("Nakama P2P: nothing arrived over %s for %v, and no other route works", cur.route, m.routeQuiet)
+		if m.hooks.lost != nil {
+			go m.hooks.lost()
+		}
+	}
 }
 
 // start launches the reader once. readMu is held for the reader's lifetime so
@@ -238,7 +543,7 @@ func (m *p2pMux) dispatch(data []byte, from p2pRoute) {
 			m.hooks.control(append([]byte(nil), data...), from)
 		}
 	case p2pTagControl, p2pTagStream, p2pTagGGPO:
-		if !m.isKnown(from) {
+		if !m.touch(from, data[0]) {
 			// The peer's data, since it opened, on a route the peer verified
 			// and this side has not: this side's check of it may have been
 			// lost.
@@ -252,7 +557,7 @@ func (m *p2pMux) dispatch(data []byte, from p2pRoute) {
 			m.heard.Do(m.hooks.heard)
 		}
 		if data[0] == p2pTagControl {
-			m.handleControl(data[1:])
+			m.handleControl(data[1:], from)
 			return
 		}
 		m.mu.Lock()
@@ -265,21 +570,24 @@ func (m *p2pMux) dispatch(data []byte, from p2pRoute) {
 }
 
 func (m *p2pMux) keepalive() {
-	ticker := time.NewTicker(p2pKeepaliveInterval / 2)
+	ticker := time.NewTicker(m.probeInterval)
 	defer ticker.Stop()
 	// A ping at once tells the peer this side is ready (p2pMuxHooks.heard).
-	_ = m.sendPing()
-	for {
+	m.pingRoutes()
+	for tick := 1; ; tick++ {
 		select {
 		case <-m.closed:
 			return
 		case <-ticker.C:
-			// The ping also keeps the NAT mapping alive; the keepalive only goes
-			// out when the ping could not be sent.
-			_ = m.sendPing()
+			// The pings also keep the NAT mappings alive; the keepalive only
+			// goes out when nothing could be sent.
+			if m.probeFast() || tick%p2pProbeSlowEvery == 0 {
+				m.pingRoutes()
+			}
 			if time.Since(time.Unix(0, m.lastSend.Load())) >= p2pKeepaliveInterval {
 				_ = m.send(p2pTagControl, []byte{p2pCtrlKeepalive})
 			}
+			m.checkRoutes()
 			if time.Since(time.Unix(0, m.lastRecv.Load())) >= p2pPeerSilenceTimeout {
 				m.mu.Lock()
 				ch := m.channels[p2pTagStream]
@@ -293,36 +601,59 @@ func (m *p2pMux) keepalive() {
 	}
 }
 
-func (m *p2pMux) sendPing() error {
+// probeFast reports whether the routes are pinged every probe interval: while
+// the session runs on a relay, and for a while after it started or changed
+// route.
+func (m *p2pMux) probeFast() bool {
+	now := time.Now()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return p2pIsRelay(m.active.path) || now.Sub(m.started) < p2pProbeFastFor ||
+		(!m.lastSwitch.IsZero() && now.Sub(m.lastSwitch) < p2pProbeFastFor)
+}
+
+// pingRoutes pings every known route, the active one first.
+func (m *p2pMux) pingRoutes() {
+	m.mu.Lock()
+	routes := make([]p2pRoute, 0, len(m.known))
+	routes = append(routes, m.active)
+	for _, k := range m.known {
+		if !k.route.equal(m.active) {
+			routes = append(routes, k.route)
+		}
+	}
+	m.mu.Unlock()
+	for _, r := range routes {
+		_ = m.sendPingOn(r)
+	}
+}
+
+// sendPing pings the peer on the active route.
+func (m *p2pMux) sendPing() error { return m.sendPingOn(m.activeRoute()) }
+
+// sendPingOn pings the peer on route; its pong comes back on that route.
+func (m *p2pMux) sendPingOn(route p2pRoute) error {
 	msg := make([]byte, 9)
 	msg[0] = p2pCtrlPing
 	binary.LittleEndian.PutUint64(msg[1:], uint64(time.Since(m.epoch)))
-	return m.send(p2pTagControl, msg)
+	return m.sendOn(route, p2pTagControl, msg)
 }
 
-// addRTTSample folds one measured round trip into the smoothed value.
-func (m *p2pMux) addRTTSample(sample time.Duration) {
-	if sample <= 0 || sample > 10*time.Second {
-		return
-	}
-	m.rttMu.Lock()
-	defer m.rttMu.Unlock()
-	if m.rttSamples == 0 {
-		m.srtt = sample
-	} else {
-		m.srtt += (sample - m.srtt) / 8
-	}
-	m.rttSamples++
-}
-
-// rtt returns the smoothed round trip and how many pings it is made of.
+// rtt returns the active route's smoothed round trip and how many pongs it
+// is made of.
 func (m *p2pMux) rtt() (time.Duration, int) {
-	m.rttMu.Lock()
-	defer m.rttMu.Unlock()
-	return m.srtt, m.rttSamples
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if st := m.statLocked(m.active); st != nil {
+		return st.srtt, st.samples
+	}
+	return 0, 0
 }
 
-func (m *p2pMux) handleControl(data []byte) {
+// handleControl handles a control message that came on route from. A pong
+// goes back on the route its ping came on, so each route's round trip is
+// measured on that route (recordPong).
+func (m *p2pMux) handleControl(data []byte, from p2pRoute) {
 	if len(data) < 1 {
 		return
 	}
@@ -330,12 +661,14 @@ func (m *p2pMux) handleControl(data []byte) {
 	case p2pCtrlPing:
 		if len(data) >= 9 {
 			pong := append([]byte{p2pCtrlPong}, data[1:9]...)
-			_ = m.send(p2pTagControl, pong)
+			if !from.valid() || m.sendOn(from, p2pTagControl, pong) != nil {
+				_ = m.send(p2pTagControl, pong)
+			}
 		}
 	case p2pCtrlPong:
 		if len(data) >= 9 {
 			sent := time.Duration(binary.LittleEndian.Uint64(data[1:9]))
-			m.addRTTSample(time.Since(m.epoch) - sent)
+			m.recordPong(from, time.Since(m.epoch)-sent)
 		}
 	case p2pCtrlBye:
 		if len(data) < 5 {
@@ -359,10 +692,23 @@ func (m *p2pMux) send(tag byte, payload []byte) error {
 		return errP2PMuxClosed
 	default:
 	}
+	return m.sendOn(m.activeRoute(), tag, payload)
+}
+
+// sendOn writes one tagged datagram on route.
+func (m *p2pMux) sendOn(route p2pRoute, tag byte, payload []byte) error {
+	select {
+	case <-m.closed:
+		return errP2PMuxClosed
+	default:
+	}
+	if !route.valid() {
+		return errors.New("p2p: no route")
+	}
 	pkt := make([]byte, 1+len(payload))
 	pkt[0] = tag
 	copy(pkt[1:], payload)
-	if err := m.activeRoute().send(pkt); err != nil {
+	if err := route.send(pkt); err != nil {
 		return err
 	}
 	m.lastSend.Store(time.Now().UnixNano())

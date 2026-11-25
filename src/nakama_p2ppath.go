@@ -13,12 +13,15 @@ import (
 // A P2P session reaches the peer over one of several paths, tried in turn
 // while the handshake runs (see punchLoop):
 //
-//	direct  the IPv4 UDP socket: host and STUN candidates, and the candidate
-//	        a router opened with PCP, NAT-PMP or UPnP
-//	ipv6    a second UDP socket for IPv6 host candidates, which need no NAT
-//	relay   a match on the Nakama server that the two players join, used
-//	        when no UDP path works: the server forwards each datagram over
-//	        the players' realtime sockets
+//	direct     the IPv4 UDP socket: host and STUN candidates, the candidate
+//	           a router opened with PCP, NAT-PMP or UPnP, and ports predicted
+//	           for a peer behind a NAT that maps each destination anew
+//	ipv6       a second UDP socket for IPv6 host candidates, which need no NAT
+//	relay-udp  the server's UDP relay (nakama_udprelay.go), when the server
+//	           has one: a forwarder of datagrams, without TCP's stalls
+//	relay      a match on the Nakama server that the two players join, used
+//	           when nothing else works: the server forwards each datagram
+//	           over the players' realtime sockets (TCP)
 //
 // Every path carries the same datagrams (handshake JSON and the mux's tagged
 // frames), sealed (p2pCrypt), so the handshake and the mux do not depend on
@@ -28,13 +31,36 @@ type p2pPath interface {
 	write(b []byte, to net.Addr) error
 }
 
-// p2pPathRank orders paths: a session moves from the relay to a UDP path
-// when both turn out to work, since the relay adds the server's round trip.
+// The ranks of p2pPathRank: a direct path beats either relay, and the UDP
+// relay beats the websocket relay.
+const (
+	p2pRankRelayWS  = 1
+	p2pRankRelayUDP = 2
+	p2pRankDirect   = 3
+)
+
+// p2pPathRank orders paths: a session moves from a relay to a direct path
+// when both turn out to work (p2pMux), since a relay adds the server's round
+// trip, and the websocket relay TCP's stalls on top.
 func p2pPathRank(p p2pPath) int {
 	if _, ok := p.(*p2pRelayPath); ok {
-		return 1
+		return p2pRankRelayWS
 	}
-	return 2
+	if p != nil && p.name() == "relay-udp" {
+		return p2pRankRelayUDP
+	}
+	return p2pRankDirect
+}
+
+// p2pIsRelay reports whether p goes through the server (either relay).
+func p2pIsRelay(p p2pPath) bool { return p != nil && p2pPathRank(p) < p2pRankDirect }
+
+// p2pClosePath closes a path that can be closed (the relays); the UDP
+// sockets close with the session.
+func p2pClosePath(p p2pPath) {
+	if c, ok := p.(interface{ close() }); ok {
+		c.close()
+	}
 }
 
 // p2pRoute is a path and the peer's address on it.
@@ -137,6 +163,9 @@ type p2pUDPPath struct {
 	label string
 	conn  *net.UDPConn
 	crypt *atomic.Pointer[p2pCrypt] // the session's (NakamaP2P.crypt)
+	// sendHook, when set, takes each sealed datagram instead of the socket:
+	// tests put a simulated network (NATs) behind it.
+	sendHook func(sealed []byte, to *net.UDPAddr) error
 }
 
 func (p *p2pUDPPath) name() string { return p.label }
@@ -150,6 +179,9 @@ func (p *p2pUDPPath) write(b []byte, to net.Addr) error {
 	if err != nil {
 		return err
 	}
+	if p.sendHook != nil {
+		return p.sendHook(sealed, addr)
+	}
 	_, err = p.conn.WriteToUDP(sealed, addr)
 	return err
 }
@@ -159,6 +191,17 @@ func (p *p2pUDPPath) write(b []byte, to net.Addr) error {
 type p2pRelayer interface {
 	JoinRelay(req p2pRelayRequest, deliver func([]byte)) (p2pRelayLink, error)
 }
+
+// p2pUDPRelayer is a p2pRelayer that can also ask the server for a ticket to
+// its UDP relay (NakamaClient.RequestUDPRelay): the ladder tries that relay
+// before the websocket one.
+type p2pUDPRelayer interface {
+	RequestUDPRelay(matchID, peer string) (udpRelayTicket, error)
+}
+
+// p2pDialUDPRelay joins the UDP relay with a ticket (dialUDPRelay; tests
+// replace it).
+var p2pDialUDPRelay = dialUDPRelay
 
 // p2pRelayRequest names the relay of a session.
 type p2pRelayRequest struct {
