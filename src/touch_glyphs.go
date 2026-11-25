@@ -12,9 +12,10 @@ import (
 	"strings"
 )
 
-// touchButtons are the Android app's on-screen buttons (its
-// virtual_controller.xml), named as their glyph images are, with the pad
-// input each one plays.
+// touchButtons are the Android and iOS apps' on-screen buttons (Android's
+// virtual_controller.xml, iOS's TouchOverlayView.xib), named as their glyph
+// images are, with the pad input each one plays. iOS's directional pad is a
+// single disc, which shows no glyphs.
 var touchButtons = []struct{ name, pad string }{
 	{"a", "A"}, {"b", "B"}, {"c", "RT"},
 	{"x", "X"}, {"y", "Y"}, {"z", "RB"},
@@ -24,7 +25,8 @@ var touchButtons = []struct{ name, pad string }{
 }
 
 // TouchControlsProperties is [Touch Controls]: for each game button, the
-// [Glyphs] tokens that Android's on-screen buttons try, in order, to show it.
+// [Glyphs] tokens that the Android and iOS on-screen buttons try, in order, to
+// show it.
 type TouchControlsProperties struct {
 	// Buttons are the on-screen buttons shown (touchButtonTokens); empty
 	// shows them all.
@@ -134,6 +136,19 @@ func touchButtonsMessage(set, startSlot int, layout string) int {
 		msg |= touchLayoutGrid
 	}
 	return msg
+}
+
+// realControllerCount is how many of the connected controllers, each given by
+// whether it is the touch controls' own (isTouchControls), are real ones. The
+// iOS app hides its on-screen buttons while there is one (appMsgControllers).
+func realControllerCount(touch []bool) int {
+	n := 0
+	for _, t := range touch {
+		if !t {
+			n++
+		}
+	}
+	return n
 }
 
 // touchGlyphTokens picks, for each on-screen button, the glyph of the game

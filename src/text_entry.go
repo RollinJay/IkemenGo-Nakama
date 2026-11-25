@@ -6,11 +6,25 @@ import (
 )
 
 // keyboardCover is how many pixels at the bottom of the window the on-screen
-// keyboard covers, which the Android app reports (nativeSetKeyboardCover); 0
-// elsewhere. The game draws itself in the part of the window above it
+// keyboard covers, which the Android app (nativeSetKeyboardCover) and the iOS
+// app (IkemenSetKeyboardCover) report; 0 elsewhere. The game draws itself in the part of the window above it
 // (Window.GetScaledViewportSize), so that a text box and what is typed in it
 // stay in sight, wherever a screenpack draws them.
 var keyboardCover atomic.Int32
+
+// keyboardCoverPixels converts the part of a view that the on-screen keyboard
+// covers, covered of its height in points, into pixels of a drawable height
+// pixels tall that fills the view. It is 0 for no keyboard, and the whole
+// drawable at most.
+func keyboardCoverPixels(covered, height, pixels int32) int32 {
+	if covered <= 0 || height <= 0 || pixels <= 0 {
+		return 0
+	}
+	if covered >= height {
+		return pixels
+	}
+	return int32((int64(covered)*int64(pixels) + int64(height)/2) / int64(height))
+}
 
 // textEntryIdleFrames is how many frames without a read of typed text end a
 // text box. A text box (main.f_drawInput, the lobby's editText) reads it every
@@ -18,8 +32,8 @@ var keyboardCover atomic.Int32
 const textEntryIdleFrames = 10
 
 // textEntry knows whether a Lua text box is open: one is while Lua reads typed
-// text (getKeyText). On Android, the on-screen keyboard opens and closes with
-// it (screenKeyboardOpen and screenKeyboardClose).
+// text (getKeyText). On Android and iOS, the on-screen keyboard opens and
+// closes with it (screenKeyboardOpen and screenKeyboardClose).
 type textEntry struct {
 	open    bool
 	wasRead bool // getKeyText ran since the last update

@@ -1396,7 +1396,7 @@ options.t_itemname = {
 		end
 		return true
 	end,
-	--On-screen Buttons (Android): the screenpack's choice, all, or all but D and W
+	--On-screen Buttons (Android and iOS): the screenpack's choice, all, or all but D and W
 	['touchbuttons'] = function(t, item, cursorPosY, moveTxt)
 		local step = 0
 		if getInput(-1, motif.option_info.menu.add.key) then
@@ -2223,7 +2223,7 @@ function options.f_start()
 	if runtimeOS == 'android' then
 		excluded = {keyboard = true, gl33 = true}
 	elseif runtimeOS == 'ios' then
-		excluded = {keyboard = true, gl33 = true, gles32 = true, touchbuttons = true}
+		excluded = {keyboard = true, gl33 = true, gles32 = true}
 	end
 	main.f_pruneMenu(options.menu, excluded)
 	main.f_prunePointers(options.t_vardisplayPointers, excluded)

@@ -1,4 +1,4 @@
-//go:build android
+//go:build android || ios
 
 package main
 
@@ -8,8 +8,9 @@ import (
 	"github.com/veandco/go-sdl2/sdl"
 )
 
-// keyboardRequested is set by the Android app's keyboard button, on the app's
-// own thread (nativeShowKeyboard).
+// keyboardRequested is set by the app's keyboard button, on Android on the
+// app's own thread (nativeShowKeyboard), on iOS on the game's (the export
+// IkemenShowKeyboard).
 var keyboardRequested atomic.Bool
 
 // confirmDown and cancelDown remember whether a controller held one of the
@@ -39,7 +40,8 @@ func screenKeyboardClose() {
 // the app's keyboard button does: by default any attack button or Start, in
 // HDBZ a punch. Its cancel keys cancel the box, as Escape does: by default
 // Menu, in HDBZ a kick. (A TV remote is not a controller: it presses the
-// app's buttons.)
+// app's buttons. iOS has no Back button: the on-screen buttons' cancel key
+// is the way out of a box there.)
 //
 // A cancel key cancels as it comes up, not as it goes down. The menus under
 // the box carry on in the same frame once it closes, and each would take the
@@ -80,9 +82,9 @@ func textBoxButtons() (done, cancel bool) {
 
 // showScreenKeyboard starts SDL's text input, which opens the keyboard. SDL's
 // text field goes at the top of the screen, which the keyboard leaves alone,
-// so that Android doesn't lift the game to show it: a prompt drawn high would
-// go off the top. The game draws itself above the keyboard instead
-// (keyboardCover), the lobby's chat line included.
+// so that neither Android nor SDL's iOS view lifts the game to show it: a
+// prompt drawn high would go off the top. The game draws itself above the
+// keyboard instead (keyboardCover), the lobby's chat line included.
 func showScreenKeyboard() {
 	if w, h := sys.window.GetSize(); w > 0 && h > 0 {
 		sdl.SetTextInputRect(&sdl.Rect{X: 0, Y: 0, W: int32(w), H: int32(h / 10)})

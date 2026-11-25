@@ -171,7 +171,7 @@ class TouchControls implements InputManager.InputDeviceListener {
         update();
     }
 
-    /** The game wrote the buttons' glyph images (src/touch_glyphs_android.go). */
+    /** The game wrote the buttons' glyph images (src/touch_glyphs_mobile.go). */
     void reloadGlyphs() {
         overlay.loadGlyphs(new File(activity.getFilesDir(), "touch-glyphs"));
     }

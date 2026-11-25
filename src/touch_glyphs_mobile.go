@@ -1,28 +1,26 @@
-//go:build android
+//go:build android || ios
 
 package main
 
 import (
 	"fmt"
-	"path/filepath"
-
-	"github.com/veandco/go-sdl2/sdl"
 )
 
 // touchGlyphsKey is what the app's button images were last written from, and
 // touchGlyphsWait the frames until the next check.
-// touchButtonsSent is the set of on-screen buttons the app last got, -1
-// before the first.
+// touchButtonsSent is the set of on-screen buttons the app last got, and
+// touchControllersSent the number of real controllers, -1 before the first.
 var (
-	touchGlyphsKey   string
-	touchGlyphsWait  int
-	touchButtonsSent = -1
+	touchGlyphsKey       string
+	touchGlyphsWait      int
+	touchButtonsSent     = -1
+	touchControllersSent = -1
 )
 
 // touchControlsUpdate keeps the app's on-screen buttons showing the glyphs of
-// the game buttons they play, in <internal storage>/touch-glyphs, and tells it
-// which of them to show. It checks twice a second, since the screenpack, the
-// options, the controller mapping and the touch controls' player can change.
+// the game buttons they play, in touchGlyphsDir, and tells it which of them
+// to show. It checks twice a second, since the screenpack, the options, the
+// controller mapping and the touch controls' player can change.
 func touchControlsUpdate() {
 	if touchGlyphsWait > 0 {
 		touchGlyphsWait--
@@ -35,8 +33,20 @@ func touchControlsUpdate() {
 		touchButtonsSent = msg
 		sendToApp(appMsgTouchButtons, msg)
 	}
-	storage := sdl.AndroidGetInternalStoragePath()
-	if m.GlyphsSff == nil || m.GlyphsSff.filename == "" || storage == "" {
+	if appWantsControllerCount {
+		touch := make([]bool, 0, len(input.controllers))
+		for _, c := range input.controllers {
+			if c != nil {
+				touch = append(touch, isTouchControls(c))
+			}
+		}
+		if n := realControllerCount(touch); n != touchControllersSent {
+			touchControllersSent = n
+			sendToApp(appMsgControllers, n)
+		}
+	}
+	dir := touchGlyphsDir()
+	if m.GlyphsSff == nil || m.GlyphsSff.filename == "" || dir == "" {
 		return
 	}
 	tokens := touchGlyphTokens(touchControlsKeyConfig(), &m.TouchControls, func(token string) bool {
@@ -52,7 +62,7 @@ func touchControlsUpdate() {
 		return
 	}
 	touchGlyphsKey = key
-	if err := writeTouchGlyphs(filepath.Join(storage, "touch-glyphs"), m.GlyphsSff.filename, sprites); err != nil {
+	if err := writeTouchGlyphs(dir, m.GlyphsSff.filename, sprites); err != nil {
 		Logcat("Touch control glyphs: " + err.Error())
 	}
 	sendToApp(appMsgTouchGlyphs, len(sprites))

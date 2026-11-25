@@ -249,7 +249,7 @@ type Config struct {
 		UiRepeatDelay              int32   `ini:"UiRepeatDelay" sync:"host"`
 		UiRepeatRate               int32   `ini:"UiRepeatRate" sync:"host"`
 		PauseExitDelay             int32   `ini:"PauseExitDelay" sync:"host"`
-		// The Android app's on-screen buttons shown (touchButtonsShown).
+		// The Android and iOS apps' on-screen buttons shown (touchButtonsShown).
 		TouchButtons string `ini:"TouchButtons"`
 	} `ini:"Input"`
 	// CBR AI settings, applied before each fight by external/mods/cbr.lua.
