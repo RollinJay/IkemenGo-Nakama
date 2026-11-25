@@ -161,6 +161,12 @@ static NSString * const RestartFolderPickKey = @"ShouldDisplayRestartFolderPicke
         return;
     }
     
+    // Simulator test runs name their game folder instead of picking one.
+    if ([self useTestAssetsFolder]) {
+        [self prepareAssetsAndRun];
+        return;
+    }
+
     // Get whether or not we should display the folder picker now.
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
     BOOL shouldPickFolder = [defaults boolForKey:RestartFolderPickKey];
@@ -365,6 +371,39 @@ static NSString * const RestartFolderPickKey = @"ShouldDisplayRestartFolderPicke
         self.alertWindow.hidden = YES;
         self.alertWindow = nil;
     });
+}
+
+// Test hook, iOS Simulator builds only (TARGET_OS_SIMULATOR): device builds,
+// the released IPA among them, never compile it. When the app is launched with
+// IKEMEN_TEST_GAME_FOLDER in its environment (`SIMCTL_CHILD_IKEMEN_TEST_GAME_FOLDER=...
+// xcrun simctl launch`, see .github/workflows/ios-simulator.yml), that folder is
+// the game folder: an absolute path, or one relative to the app's Documents. It
+// needs no security scope, like the fallback folder below. No picker opens, and
+// the saved bookmark is left alone.
+- (BOOL)useTestAssetsFolder {
+#if TARGET_OS_SIMULATOR
+    NSString *folder = NSProcessInfo.processInfo.environment[@"IKEMEN_TEST_GAME_FOLDER"];
+    if (folder.length == 0) {
+        return NO;
+    }
+    NSFileManager *fm = [NSFileManager defaultManager];
+    if (!folder.isAbsolutePath) {
+        NSURL *documents = [fm URLForDirectory:NSDocumentDirectory inDomain:NSUserDomainMask appropriateForURL:nil create:YES error:nil];
+        folder = [documents URLByAppendingPathComponent:folder isDirectory:YES].path;
+    }
+    NSError *error = nil;
+    if (![fm createDirectoryAtPath:folder withIntermediateDirectories:YES attributes:nil error:&error]) {
+        NSLog(@"[IkemenTest] Could not create the test game folder %@: %@", folder, error);
+        return NO;
+    }
+    NSLog(@"[IkemenTest] Test game folder: %@", folder);
+    [self stopAccessingAssetsFolder];
+    self.assetsFolderURL = [NSURL fileURLWithPath:folder isDirectory:YES];
+    self.securityScopeActive = NO;
+    return YES;
+#else
+    return NO;
+#endif
 }
 
 // User still didn't pick a folder? PICK FOR THEM.

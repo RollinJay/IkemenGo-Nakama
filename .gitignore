@@ -80,6 +80,7 @@ build/android-apk/
 bin/libikemen.h
 bin/libikemen.a
 bin/*.ipa
+bin/ios-simulator/
 lib/*.dylib
 
 # macOS System Files
@@ -89,6 +90,8 @@ lib/*.dylib
 build/android-deps/
 build/ios-deps/
 build/ios-app/
+build/ios-sim-deps/
+build/ios-sim-app/
 build/libxmp-src/
 build/libvpx-src/
 build/sdl2-src/

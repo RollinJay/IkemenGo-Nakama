@@ -110,6 +110,15 @@ IOS_IPA_OUT="${IOS_IPA_OUT:-$REPO_ROOT/bin/ikemen-go.ipa}"
 IOS_APP_VERSION="${IOS_APP_VERSION:-}"
 IOS_BUILD_NUMBER="${IOS_BUILD_NUMBER:-}"
 MOLTENVK_REV="${MOLTENVK_REV:-v1.4.2}"
+# The iOSSimulator target (variOSSimulator) builds the same app for the iOS Simulator
+# on Apple silicon, for CI tests (.github/workflows/ios-simulator.yml). It keeps its
+# own dependencies, wrapper copy and outputs, so it never mixes with the device build.
+IOS_SIMULATOR=0
+IOS_SDK="iphoneos"                    # xcrun SDK: iphoneos, or iphonesimulator
+IOS_TARGET_SUFFIX=""                  # clang -target suffix: "" or -simulator
+IOS_SDL2_SLICE="ios-arm64"            # SDL2.xcframework slice the engine compiles against
+IOS_APP_BUILDDIR="ios-app"            # under $BUILDDIR: wrapper copy, frameworks, Xcode output
+IOS_SIM_APP_OUT="${IOS_SIM_APP_OUT:-$REPO_ROOT/bin/ios-simulator}"
 
 # FFmpeg config
 FFMPEG_REV="${FFMPEG_REV:-release/7.1}"
@@ -470,9 +479,13 @@ function main() {
 			variOS
 			build
 		;;
+		[iI][oO][sS][sS][iI][mM][uU][lL][aA][tT][oO][rR])
+			variOSSimulator
+			build
+		;;
 		*)
 			echo "Unknown target: ${targetOS}"
-			echo "Valid targets: Win64 MacOS MacOSARM Linux LinuxARM Android iOS"
+			echo "Valid targets: Win64 MacOS MacOSARM Linux LinuxARM Android iOS iOSSimulator"
 			exit 1
 		;;
 	esac
@@ -554,7 +567,7 @@ function variOS() {
 		echo "ERROR: the iOS target must be built on macOS with Xcode installed." >&2
 		exit 1
 	fi
-	local sdk="iphoneos"
+	local sdk="$IOS_SDK"
 	local min_ios_version="$IOS_MIN_VERSION"
 
 	export GOOS=ios
@@ -568,13 +581,19 @@ function variOS() {
 	export RANLIB="$(xcrun --sdk "$sdk" --find ranlib)"
 	export STRIP="$(xcrun --sdk "$sdk" --find strip)"
 
-	export IOS_DEPS_PATH="$REPO_ROOT/build/ios-deps"
+	if [[ "$IOS_SIMULATOR" == "1" ]]; then
+		export IOS_DEPS_PATH="$REPO_ROOT/build/ios-sim-deps"
+	else
+		export IOS_DEPS_PATH="$REPO_ROOT/build/ios-deps"
+	fi
 	mkdir -p "$IOS_DEPS_PATH/lib/pkgconfig" "$IOS_DEPS_PATH/include"
 
 	# No Vulkan/MoltenVK headers needed here: github.com/Eiton/vulkan bundles its own
 	# and resolves MoltenVK via dlsym. MoltenVK is only linked by the Xcode app.
-	export IOS_CFLAGS="-I$IOS_DEPS_PATH/include -target arm64-apple-ios${min_ios_version} -isysroot $SDKROOT"
-	export IOS_LDFLAGS="-target arm64-apple-ios${min_ios_version} -isysroot $SDKROOT"
+	# The simulator's triple (arm64-apple-iosN-simulator) also marks Go's own objects
+	# as simulator ones: Go's linker copies the platform from the cgo objects.
+	export IOS_CFLAGS="-I$IOS_DEPS_PATH/include -target arm64-apple-ios${min_ios_version}${IOS_TARGET_SUFFIX} -isysroot $SDKROOT"
+	export IOS_LDFLAGS="-target arm64-apple-ios${min_ios_version}${IOS_TARGET_SUFFIX} -isysroot $SDKROOT"
 
 	# Apple targets
 	export CGO_CFLAGS="$IOS_CFLAGS"
@@ -589,6 +608,20 @@ function variOS() {
 	export PKG_CONFIG_SYSROOT_DIR=""
 
 	binName="libikemen.a"
+}
+# The iOS app for the iOS Simulator on Apple silicon (arm64 only), for CI tests:
+# everything variOS builds, from the iphonesimulator SDK. The app goes to
+# $IOS_SIM_APP_OUT instead of an IPA (build_ios_simulator_app).
+function variOSSimulator() {
+	IOS_SIMULATOR=1
+	IOS_SDK="iphonesimulator"
+	IOS_TARGET_SUFFIX="-simulator"
+	IOS_SDL2_SLICE="ios-arm64-simulator"
+	IOS_APP_BUILDDIR="ios-sim-app"
+	variOS
+	# bin/libikemen.a and .h stay the device build's.
+	OUTDIR="$BUILDDIR/ios-sim-app/bin"
+	mkdir -p "$OUTDIR"
 }
 
 # --- FFmpeg detection / build ---
@@ -643,7 +676,16 @@ function build_libvpx() {
 		linux/amd64) target="x86_64-linux-gcc" ;;
 		linux/arm64) target="arm64-linux-gcc" ;;
 		android/arm64) target="arm64-android-gcc" ;;
-		ios/arm64) target="arm64-darwin-gcc" ;;
+		ios/arm64)
+			# libvpx has no arm64 simulator target (its arm64-darwin-gcc forces the
+			# iphoneos SDK), so the simulator takes the portable C build with our
+			# flags. It is slower (no NEON), which a test run does not mind.
+			if [[ "$IOS_SIMULATOR" == "1" ]]; then
+				target="generic-gnu"
+			else
+				target="arm64-darwin-gcc"
+			fi
+			;;
 		*)
 			echo "ERROR: Unsupported libvpx target: $GOOS/$arch" >&2
 			return 1
@@ -671,6 +713,19 @@ function build_libvpx() {
 		CC="$CC" CXX="$CXX" \
 			AR="$TOOLCHAIN/bin/llvm-ar" LD="$CC" STRIP="$TOOLCHAIN/bin/llvm-strip" \
 			../configure "${configure_args[@]}"
+	elif [[ "$GOOS" == "ios" && "$IOS_SIMULATOR" == "1" ]]; then
+		# generic-gnu links its configure checks with $LD, plain ld by default,
+		# which knows none of clang's flags: link with clang instead.
+		CFLAGS="${IOS_CFLAGS} ${CFLAGS:-}" \
+		CXXFLAGS="${IOS_CFLAGS} ${CXXFLAGS:-}" \
+		LDFLAGS="${IOS_LDFLAGS} ${LDFLAGS:-}" \
+		CC="$CC" \
+		CXX="$CXX" \
+		LD="$CC" \
+		AR="$AR" \
+		RANLIB="$RANLIB" \
+		STRIP="$STRIP" \
+		../configure "${configure_args[@]}"
 	elif [[ "$GOOS" == "ios" ]]; then
 		CFLAGS="${IOS_CFLAGS} ${CFLAGS:-}" \
 		CXXFLAGS="${IOS_CFLAGS} ${CXXFLAGS:-}" \
@@ -951,7 +1006,7 @@ function create_sdl2_pc() {
     local pc_dir="$IOS_DEPS_PATH/lib/pkgconfig"
     local sdl2_pc="$pc_dir/sdl2.pc"
 
-    local sdl2_framework="$IOS_WRAPPER_DIR/Frameworks/SDL2.xcframework/ios-arm64/SDL2.framework"
+    local sdl2_framework="$IOS_WRAPPER_DIR/Frameworks/SDL2.xcframework/$IOS_SDL2_SLICE/SDL2.framework"
     local sdl2_headers="$sdl2_framework/Headers"
     local sdl2_include="$IOS_DEPS_PATH/include"
 
@@ -1508,7 +1563,7 @@ function prepare_ios_deps() {
 
 function build_libxmp_ios() {
     local src="$BUILDDIR/libxmp-src"
-    local build_dir="$src/build-ios"
+    local build_dir="$src/build-$IOS_SDK"
     local prefix="$IOS_DEPS_PATH"
 
     if [[ -f "$prefix/lib/libxmp.a" ]]; then
@@ -1533,7 +1588,7 @@ function build_libxmp_ios() {
 
     cmake .. \
         -DCMAKE_SYSTEM_NAME=iOS \
-        -DCMAKE_OSX_SYSROOT=iphoneos \
+        -DCMAKE_OSX_SYSROOT="$IOS_SDK" \
         -DCMAKE_OSX_ARCHITECTURES=arm64 \
         -DCMAKE_OSX_DEPLOYMENT_TARGET="$IOS_MIN_VERSION" \
         -DCMAKE_C_COMPILER="$CC" \
@@ -1568,7 +1623,8 @@ function xcodebuild_clean() {
 
 # Resolve the ikemen-ios Xcode wrapper. IOS_WRAPPER_DIR (if set) is used in place;
 # otherwise IOS_APP_REPO is copied (a local folder, by default third_party/ikemen-ios)
-# or cloned at IOS_APP_REF (a git URL) into build/ios-app/ikemen-ios.
+# or cloned at IOS_APP_REF (a git URL) into build/ios-app/ikemen-ios (build/ios-sim-app/ikemen-ios
+# for the simulator).
 function sync_ios_app_repo() {
 	if [[ -n "$IOS_WRAPPER_DIR" ]]; then
 		if [[ ! -d "$IOS_WRAPPER_DIR/I.K.E.M.E.N-Go.xcodeproj" ]]; then
@@ -1580,7 +1636,7 @@ function sync_ios_app_repo() {
 		return 0
 	fi
 
-	IOS_WRAPPER_DIR="$REPO_ROOT/$BUILDDIR/ios-app/ikemen-ios"
+	IOS_WRAPPER_DIR="$REPO_ROOT/$BUILDDIR/$IOS_APP_BUILDDIR/ikemen-ios"
 	mkdir -p "$(dirname "$IOS_WRAPPER_DIR")"
 	if [[ -d "$IOS_APP_REPO" ]]; then
 		local src
@@ -1588,7 +1644,7 @@ function sync_ios_app_repo() {
 		echo "==> Using local ikemen-ios checkout: $src -> $IOS_WRAPPER_DIR"
 		# A fresh copy each build, keeping only the SDL2 and MoltenVK frameworks
 		# built or downloaded for an earlier one (ensure_ios_*_framework).
-		local kept="$REPO_ROOT/$BUILDDIR/ios-app/Frameworks.kept"
+		local kept="$REPO_ROOT/$BUILDDIR/$IOS_APP_BUILDDIR/Frameworks.kept"
 		rm -rf "$kept"
 		[[ -d "$IOS_WRAPPER_DIR/Frameworks" ]] && mv "$IOS_WRAPPER_DIR/Frameworks" "$kept"
 		rm -rf "$IOS_WRAPPER_DIR"
@@ -1615,63 +1671,98 @@ function sync_ios_app_repo() {
 }
 
 # SDL2.xcframework for the wrapper. Built from source ($SDL2_REV) because SDL2
-# releases do not ship an iOS binary. Skipped when the wrapper already has one.
+# releases do not ship an iOS binary. Skipped when the wrapper already has one
+# with the slice this build needs ($IOS_SDL2_SLICE: the device's, or the simulator's).
 function ensure_ios_sdl2_framework() {
 	local xcfw="$IOS_WRAPPER_DIR/Frameworks/SDL2.xcframework"
-	if [[ -f "$xcfw/ios-arm64/SDL2.framework/Headers/SDL.h" ]]; then
+	if [[ -f "$xcfw/$IOS_SDL2_SLICE/SDL2.framework/Headers/SDL.h" ]]; then
 		echo "==> Found SDL2.xcframework in $IOS_WRAPPER_DIR/Frameworks"
 		return 0
 	fi
 
-	echo "==> Building SDL2 $SDL2_REV xcframework for iOS"
 	if [[ ! -d "$SDL2_SRCDIR/.git" ]]; then
 		rm -rf "$SDL2_SRCDIR"
 		git clone --depth=1 -b "$SDL2_REV" https://github.com/libsdl-org/SDL.git "$SDL2_SRCDIR"
 	fi
 
-	local archive="$REPO_ROOT/$BUILDDIR/ios-app/SDL2-iphoneos.xcarchive"
+	local archive="$REPO_ROOT/$BUILDDIR/$IOS_APP_BUILDDIR/SDL2-$IOS_SDK.xcarchive"
 	rm -rf "$archive"
-	xcodebuild_clean archive \
-		-project "$SDL2_SRCDIR/Xcode/SDL/SDL.xcodeproj" \
-		-scheme Framework-iOS \
-		-destination 'generic/platform=iOS' \
-		-archivePath "$archive" \
-		BUILD_LIBRARY_FOR_DISTRIBUTION=YES SKIP_INSTALL=NO \
-		IPHONEOS_DEPLOYMENT_TARGET="$IOS_MIN_VERSION" \
-		CODE_SIGNING_ALLOWED=NO
+	if [[ "$IOS_SIMULATOR" == "1" ]]; then
+		# arm64 only, like the engine (Apple silicon simulators): slice ios-arm64-simulator.
+		echo "==> Building SDL2 $SDL2_REV xcframework for the iOS Simulator"
+		xcodebuild_clean archive \
+			-project "$SDL2_SRCDIR/Xcode/SDL/SDL.xcodeproj" \
+			-scheme Framework-iOS \
+			-destination 'generic/platform=iOS Simulator' \
+			-archivePath "$archive" \
+			ARCHS=arm64 \
+			BUILD_LIBRARY_FOR_DISTRIBUTION=YES SKIP_INSTALL=NO \
+			IPHONEOS_DEPLOYMENT_TARGET="$IOS_MIN_VERSION" \
+			CODE_SIGNING_ALLOWED=NO
+	else
+		echo "==> Building SDL2 $SDL2_REV xcframework for iOS"
+		xcodebuild_clean archive \
+			-project "$SDL2_SRCDIR/Xcode/SDL/SDL.xcodeproj" \
+			-scheme Framework-iOS \
+			-destination 'generic/platform=iOS' \
+			-archivePath "$archive" \
+			BUILD_LIBRARY_FOR_DISTRIBUTION=YES SKIP_INSTALL=NO \
+			IPHONEOS_DEPLOYMENT_TARGET="$IOS_MIN_VERSION" \
+			CODE_SIGNING_ALLOWED=NO
+	fi
 
 	mkdir -p "$(dirname "$xcfw")"
 	rm -rf "$xcfw"
 	xcodebuild_clean -create-xcframework \
 		-framework "$archive/Products/Library/Frameworks/SDL2.framework" \
 		-output "$xcfw"
-	if [[ ! -f "$xcfw/ios-arm64/SDL2.framework/Headers/SDL.h" ]]; then
-		echo "ERROR: SDL2.xcframework has no ios-arm64 slice: $xcfw" >&2
+	if [[ ! -f "$xcfw/$IOS_SDL2_SLICE/SDL2.framework/Headers/SDL.h" ]]; then
+		echo "ERROR: SDL2.xcframework has no $IOS_SDL2_SLICE slice: $xcfw" >&2
+		ls "$xcfw" >&2 || true
 		exit 1
 	fi
 }
 
 # MoltenVK.xcframework (dynamic) for the wrapper, from the pinned Khronos release.
+# MoltenVK-ios.tar holds the device slice only; the simulator takes the
+# xcframework from MoltenVK-all.tar, which has the simulator slice too.
 function ensure_ios_moltenvk_framework() {
 	local xcfw="$IOS_WRAPPER_DIR/Frameworks/MoltenVK.xcframework"
-	if [[ -d "$xcfw/ios-arm64/MoltenVK.framework" ]]; then
+	local package="ios"
+	if [[ "$IOS_SIMULATOR" == "1" ]]; then
+		package="all"
+		if compgen -G "$xcfw/ios-*-simulator/MoltenVK.framework" >/dev/null; then
+			echo "==> Found MoltenVK.xcframework (with a simulator slice) in $IOS_WRAPPER_DIR/Frameworks"
+			return 0
+		fi
+	elif [[ -d "$xcfw/ios-arm64/MoltenVK.framework" ]]; then
 		echo "==> Found MoltenVK.xcframework in $IOS_WRAPPER_DIR/Frameworks"
 		return 0
 	fi
 
-	echo "==> Downloading MoltenVK $MOLTENVK_REV for iOS"
-	local work="$REPO_ROOT/$BUILDDIR/ios-app/moltenvk"
+	echo "==> Downloading MoltenVK $MOLTENVK_REV (MoltenVK-$package.tar)"
+	local work="$REPO_ROOT/$BUILDDIR/$IOS_APP_BUILDDIR/moltenvk"
 	rm -rf "$work"
 	mkdir -p "$work"
 	download_file \
-		"https://github.com/KhronosGroup/MoltenVK/releases/download/$MOLTENVK_REV/MoltenVK-ios.tar" \
-		"$work/MoltenVK-ios.tar"
-	tar -xf "$work/MoltenVK-ios.tar" -C "$work"
+		"https://github.com/KhronosGroup/MoltenVK/releases/download/$MOLTENVK_REV/MoltenVK-$package.tar" \
+		"$work/MoltenVK-$package.tar"
+	if [[ "$package" == "all" ]]; then
+		# Only the dynamic xcframework: the whole archive is about 180 MB.
+		tar -xf "$work/MoltenVK-$package.tar" -C "$work" MoltenVK/MoltenVK/dynamic/MoltenVK.xcframework
+	else
+		tar -xf "$work/MoltenVK-$package.tar" -C "$work"
+	fi
 
 	mkdir -p "$(dirname "$xcfw")"
 	rm -rf "$xcfw"
 	cp -R "$work/MoltenVK/MoltenVK/dynamic/MoltenVK.xcframework" "$xcfw"
 	rm -rf "$work"
+	if [[ "$IOS_SIMULATOR" == "1" ]] && ! compgen -G "$xcfw/ios-*-simulator/MoltenVK.framework" >/dev/null; then
+		echo "ERROR: MoltenVK.xcframework has no iOS Simulator slice: $xcfw" >&2
+		ls "$xcfw" >&2 || true
+		exit 1
+	fi
 }
 
 # Adds to ikemen-ios's manifest.txt the files the desktop release ships that it
@@ -1708,15 +1799,11 @@ function check_ios_default_assets() {
 	echo "==> DefaultAssets: all $(list_tree_files "$REPO_ROOT" data font external | grep -c .) engine files from data, font and external staged"
 }
 
-# Package the wrapper into an unsigned IPA. Users sign it themselves when
-# sideloading (Apple requires a per-user signature outside the App Store).
-function build_ios_ipa() {
-	[[ "$GOOS" != "ios" ]] && return 0
-	[[ "$BUILD_IOS_IPA" == "0" ]] && { echo "==> BUILD_IOS_IPA=0: skipping IPA build"; return 0; }
-
+# DefaultAssets.zip in the wrapper: manifest.txt plus every path it lists, all
+# at the zip root. The staged files stay in $IOS_WRAPPER_DIR/DefaultAssets.
+function stage_ios_default_assets() {
 	ensure_mobile_runtime_assets
 
-	# DefaultAssets.zip: manifest.txt plus every path it lists, all at the zip root.
 	local assets_dir="$IOS_WRAPPER_DIR/DefaultAssets"
 	local manifest="$assets_dir/manifest.txt"
 	if [[ ! -f "$manifest" ]]; then
@@ -1729,8 +1816,17 @@ function build_ios_ipa() {
 	check_ios_default_assets "$assets_dir"
 	rm -f "$IOS_WRAPPER_DIR/DefaultAssets.zip"
 	( cd "$assets_dir" && zip -qr -X "$IOS_WRAPPER_DIR/DefaultAssets.zip" . )
+}
 
-	local out="$REPO_ROOT/$BUILDDIR/ios-app/out"
+# Package the wrapper into an unsigned IPA. Users sign it themselves when
+# sideloading (Apple requires a per-user signature outside the App Store).
+function build_ios_ipa() {
+	[[ "$GOOS" != "ios" ]] && return 0
+	[[ "$BUILD_IOS_IPA" == "0" ]] && { echo "==> BUILD_IOS_IPA=0: skipping IPA build"; return 0; }
+
+	stage_ios_default_assets
+
+	local out="$REPO_ROOT/$BUILDDIR/$IOS_APP_BUILDDIR/out"
 	rm -rf "$out"
 
 	local version_args=()
@@ -1763,6 +1859,39 @@ function build_ios_ipa() {
 	rm -f "$IOS_IPA_OUT"
 	( cd "$out/ipa" && zip -qry "$IOS_IPA_OUT" Payload )
 	echo "==> IPA ready: $IOS_IPA_OUT"
+}
+
+# Build the wrapper for the iOS Simulator (arm64), unsigned, into
+# $IOS_SIM_APP_OUT/I.K.E.M.E.N-Go.app, for `xcrun simctl install`. Release
+# configuration like the IPA; the app's test hooks exist in simulator builds
+# only (TARGET_OS_SIMULATOR), so they never reach a device.
+function build_ios_simulator_app() {
+	stage_ios_default_assets
+
+	local out="$REPO_ROOT/$BUILDDIR/$IOS_APP_BUILDDIR/out"
+	rm -rf "$out"
+
+	echo "==> Building the iOS Simulator app with xcodebuild (unsigned)..."
+	xcodebuild_clean build \
+		-project "$IOS_WRAPPER_DIR/I.K.E.M.E.N-Go.xcodeproj" \
+		-scheme I.K.E.M.E.N-Go \
+		-configuration Release \
+		-sdk iphonesimulator \
+		-destination 'generic/platform=iOS Simulator' \
+		-derivedDataPath "$out/DerivedData" \
+		ARCHS=arm64 ONLY_ACTIVE_ARCH=NO \
+		IPHONEOS_DEPLOYMENT_TARGET="$IOS_MIN_VERSION" \
+		CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" DEVELOPMENT_TEAM=""
+
+	local app="$out/DerivedData/Build/Products/Release-iphonesimulator/I.K.E.M.E.N-Go.app"
+	if [[ ! -d "$app" ]]; then
+		echo "ERROR: xcodebuild finished but app not found at: $app" >&2
+		exit 1
+	fi
+	rm -rf "$IOS_SIM_APP_OUT"
+	mkdir -p "$IOS_SIM_APP_OUT"
+	cp -R "$app" "$IOS_SIM_APP_OUT/"
+	echo "==> iOS Simulator app ready: $IOS_SIM_APP_OUT/I.K.E.M.E.N-Go.app"
 }
 
 function maybe_build_ffmpeg() {
@@ -1865,7 +1994,7 @@ function build() {
 		ensure_ios_moltenvk_framework
 		prepare_ios_deps
 		create_sdl2_pc
-		export CGO_CFLAGS="-DSDL_MAIN_HANDLED -I${IOS_WRAPPER_DIR}/Frameworks/SDL2.xcframework/ios-arm64/SDL2.framework/Headers -I${IOS_WRAPPER_DIR}/I.K.E.M.E.N-Go ${CGO_CFLAGS:-}"
+		export CGO_CFLAGS="-DSDL_MAIN_HANDLED -I${IOS_WRAPPER_DIR}/Frameworks/SDL2.xcframework/${IOS_SDL2_SLICE}/SDL2.framework/Headers -I${IOS_WRAPPER_DIR}/I.K.E.M.E.N-Go ${CGO_CFLAGS:-}"
 	else
 		maybe_build_ffmpeg
 		export PKG_CONFIG="${PKG_CONFIG:-pkg-config}"
@@ -1923,7 +2052,11 @@ function build() {
 		cp "$OUTDIR/$headerName" "$IOS_WRAPPER_DIR/"
 		cp "$OUTDIR/$binName" "$IOS_WRAPPER_DIR/"
 		echo "==> Copied libs to wrapper dir: $IOS_WRAPPER_DIR/"
-		build_ios_ipa
+		if [[ "$IOS_SIMULATOR" == "1" ]]; then
+			build_ios_simulator_app
+		else
+			build_ios_ipa
+		fi
 	fi
 
 	# For Android, optionally build the APK via ikemen-droid
