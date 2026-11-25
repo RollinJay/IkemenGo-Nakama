@@ -213,6 +213,9 @@ type LobbyRoomProperties struct {
 		Streak TextProperties         `ini:"streak"` // %d, %s: straight wins, champion
 		// The players' round trip over their direct connection, once measured.
 		Link LobbyPingProperties `ini:"link"`
+		// What that connection runs over, once reported: text.direct (a
+		// direct path) or text.relay (through the server).
+		Route TextMapProperties `ini:"route"`
 	} `ini:"match"`
 	Results struct {
 		Pos    [2]float32             `ini:"pos"`

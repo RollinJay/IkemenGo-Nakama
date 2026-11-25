@@ -16,7 +16,11 @@ import (
 // Direct round trip: while two players have their P2P path open, pings over
 // it measure their round trip (p2pMux). In a lobby, the client reports it
 // with the "link" command, so members see the direct value instead of the
-// round trip to the server.
+// round trip to the server. The command also names the route the path runs
+// over (direct or relayed, see NakamaP2P.RouteName), which the lobby shows
+// and the server logs once per pairing and change (nakama/README.md,
+// Connection telemetry); a ranked or quick-match session gets the same
+// command when the route is first known and when it changes.
 
 // rankedReplayDelaySeconds is the publication delay in a ranked session
 // (setReplayPublish does not change it): the server keeps the stream for
@@ -75,18 +79,77 @@ const (
 	// Pings answered before the first report.
 	linkReportSamples = 3
 	// Later reports: when the round trip moved by linkReportChange (and by a
-	// fifth), at most every linkReportInterval.
+	// fifth), at most every linkReportInterval. A change of route is
+	// reported at once.
 	linkReportChange   = 10 * time.Millisecond
 	linkReportInterval = 5 * time.Second
 )
 
-// reportLink sends the lobby the round trip to the paired player while the
-// P2P path p of matchID is open.
+// linkReport is what reportLink last sent (sent is false before the first).
+type linkReport struct {
+	sent     bool
+	rtt      time.Duration
+	route    string
+	upgrades int
+	at       time.Time
+}
+
+// linkReportDue decides whether reportLink sends a report now: rtt is the
+// rounded round trip after samples pings, route and upgrades are
+// NakamaP2P.RouteName and Upgrades. In a lobby the round trip is reported
+// as it moves; elsewhere (a ranked or quick-match session) only the route
+// is, so the first report and each change of route or upgrades.
+func linkReportDue(last linkReport, rtt time.Duration, samples int, route string, upgrades int, inLobby bool, now time.Time) bool {
+	if samples < linkReportSamples || route == "" {
+		return false
+	}
+	if !last.sent || route != last.route || upgrades != last.upgrades {
+		return true
+	}
+	if !inLobby {
+		return false
+	}
+	change := rtt - last.rtt
+	if change < 0 {
+		change = -change
+	}
+	return now.Sub(last.at) >= linkReportInterval && change >= linkReportChange && change*5 >= last.rtt
+}
+
+// linkPayload is the body of the "link" command: the paired player, the
+// round trip in ms, the route the connection runs over (NakamaP2P.RouteName:
+// "direct-host", "direct-srflx", ..., "relay-udp" or "relay-ws") and how
+// many times it changed route after the first.
+func linkPayload(peer string, rtt time.Duration, route string, upgrades int) map[string]any {
+	return map[string]any{
+		"peer":     peer,
+		"rtt":      int(rtt / time.Millisecond),
+		"route":    route,
+		"upgrades": upgrades,
+	}
+}
+
+// p2pRoute returns the route and route changes of the current P2P session
+// ("" and 0 without one).
+func (n *NakamaClient) p2pRoute() (string, int) {
+	n.mu.Lock()
+	p := n.p2p
+	n.mu.Unlock()
+	if p == nil {
+		return "", 0
+	}
+	return p.RouteName(), p.Upgrades()
+}
+
+// reportLink sends the match the round trip to the paired player and the
+// route the P2P path p of matchID runs over, while it is open: a lobby keeps
+// both for its members and logs the route of each pairing; a ranked or
+// quick-match session logs the route (it takes the same "link" command on
+// the lobby command op code). The route is sent again whenever it changes.
 func (n *NakamaClient) reportLink(p *NakamaP2P, matchID string) {
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
-	reported := time.Duration(-1)
-	var reportedAt time.Time
+	var last linkReport
 	for {
 		select {
 		case <-p.closed:
@@ -96,33 +159,20 @@ func (n *NakamaClient) reportLink(p *NakamaP2P, matchID string) {
 		if n.CurrentMatchID() != matchID {
 			return
 		}
-		if !n.inLobby(matchID) {
-			continue
-		}
 		pairing, ok := n.Pairing()
 		if !ok || pairing.PeerUserID == "" {
 			continue
 		}
 		rtt, samples := p.RTT()
-		if samples < linkReportSamples {
+		rtt = rtt.Round(time.Millisecond)
+		route, upgrades := p.RouteName(), p.Upgrades()
+		now := time.Now()
+		if !linkReportDue(last, rtt, samples, route, upgrades, n.inLobby(matchID), now) {
 			continue
 		}
-		rtt = rtt.Round(time.Millisecond)
-		if reported >= 0 {
-			change := rtt - reported
-			if change < 0 {
-				change = -change
-			}
-			if time.Since(reportedAt) < linkReportInterval || change < linkReportChange || change*5 < reported {
-				continue
-			}
-		}
-		err := n.SendLobbyCommand("link", map[string]any{
-			"peer": pairing.PeerUserID,
-			"rtt":  int(rtt / time.Millisecond),
-		})
+		err := n.SendLobbyCommand("link", linkPayload(pairing.PeerUserID, rtt, route, upgrades))
 		if err == nil {
-			reported, reportedAt = rtt, time.Now()
+			last = linkReport{sent: true, rtt: rtt, route: route, upgrades: upgrades, at: now}
 		}
 	}
 }

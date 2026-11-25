@@ -101,10 +101,10 @@ func (m *fakeRelayMember) Close() error {
 // addresses and router.
 func noLadderExtras(t *testing.T) {
 	t.Helper()
-	prevIPv6, prevMap := p2pIPv6Addresses, p2pMapPort
-	p2pIPv6Addresses = func() ([]net.IP, error) { return nil, nil }
-	p2pMapPort = func(context.Context, int) (*portmap.Mapping, error) { return nil, errors.New("no router in tests") }
-	t.Cleanup(func() { p2pIPv6Addresses, p2pMapPort = prevIPv6, prevMap })
+	stubP2PRouter(t, func(h *p2pRouterHooks) {
+		h.ipv6 = func() ([]net.IP, error) { return nil, nil }
+		h.mapPort = func(context.Context, int) (*portmap.Mapping, error) { return nil, errors.New("no router in tests") }
+	})
 }
 
 // deadUDPPort is a localhost port nothing listens on: datagrams to it are
@@ -343,7 +343,9 @@ func TestP2PLadderConnectsOverIPv6(t *testing.T) {
 	probe.Close()
 	noLadderExtras(t)
 	// Stand-ins for global addresses: the loopback reaches the other peer.
-	p2pIPv6Addresses = func() ([]net.IP, error) { return []net.IP{net.IPv6loopback}, nil }
+	stubP2PRouter(t, func(h *p2pRouterHooks) {
+		h.ipv6 = func() ([]net.IP, error) { return []net.IP{net.IPv6loopback}, nil }
+	})
 	a, b := ladderPair(t, nil)
 	go a.punchLoop()
 	go b.punchLoop()
@@ -382,10 +384,12 @@ func TestP2PLadderOffersTheRouterPort(t *testing.T) {
 	noLadderExtras(t)
 	var mapped sync.WaitGroup
 	mapped.Add(1)
-	p2pMapPort = func(_ context.Context, port int) (*portmap.Mapping, error) {
-		defer mapped.Done()
-		return &portmap.Mapping{Method: "upnp", ExternalIP: net.ParseIP("203.0.113.9"), ExternalPort: port + 1, InternalPort: port}, nil
-	}
+	stubP2PRouter(t, func(h *p2pRouterHooks) {
+		h.mapPort = func(_ context.Context, port int) (*portmap.Mapping, error) {
+			defer mapped.Done()
+			return &portmap.Mapping{Method: "upnp", ExternalIP: net.ParseIP("203.0.113.9"), ExternalPort: port + 1, InternalPort: port}, nil
+		}
+	})
 	signals := make(chan P2PSignal, 16)
 	p, err := NewNakamaP2P("map-match", 0, func(s P2PSignal) error { signals <- s; return nil })
 	if err != nil {
@@ -1075,36 +1079,81 @@ func TestP2PDataOnAnUnverifiedRouteHasItChecked(t *testing.T) {
 	if err != nil || string(buf[:n]) != "counted" {
 		t.Fatalf("read %q, %v; want only what came after the check was answered", buf[:n], err)
 	}
-	if a.Route() != "direct" {
-		t.Fatalf("route %q, want the UDP route the check verified", a.Route())
+	// A match runs (GGPO): the session moves to the verified UDP route once
+	// the peer's pongs show it works steadily.
+	if a.Route() != "relay" {
+		t.Fatalf("route %q; during a match a route answers pongs before it takes over", a.Route())
+	}
+	go answerPings(peer, b, aAddr)
+	waitRoute(t, a, "direct", 3*time.Second)
+	if a.RouteName() != "direct-prflx" || a.Upgrades() != 1 {
+		t.Fatalf("route name %q, %d upgrades", a.RouteName(), a.Upgrades())
+	}
+}
+
+// answerPings answers the pings that reach sock with pongs, as peer's game
+// would, until sock closes.
+func answerPings(sock *net.UDPConn, peer *NakamaP2P, to *net.UDPAddr) {
+	buf := make([]byte, 2048)
+	for {
+		n, from, err := sock.ReadFromUDP(buf)
+		if err != nil {
+			return
+		}
+		data, ok := peer.openDatagram(buf[:n])
+		if !ok || len(data) < 10 || data[0] != p2pTagControl || data[1] != p2pCtrlPing {
+			continue
+		}
+		pong := append([]byte{p2pTagControl, p2pCtrlPong}, data[2:10]...)
+		if sealed, err := sealFor(&peer.crypt, pong); err == nil {
+			dst := to
+			if dst == nil {
+				dst = from
+			}
+			_, _ = sock.WriteToUDP(sealed, dst)
+		}
+	}
+}
+
+// waitRoute waits for p's session to run on route (Route).
+func waitRoute(t *testing.T, p *NakamaP2P, route string, within time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(within)
+	for p.Route() != route {
+		if time.Now().After(deadline) {
+			t.Fatalf("route %q (%s) after %v, want %q", p.Route(), p.RouteName(), within, route)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
 // A port the router opened for a session closes with the session, and at
-// once when the router grants it after another way already worked.
+// once when the router grants it after a direct way already worked; a
+// session on the relay keeps it, as a way off the relay.
 func TestP2PClosesTheRouterPort(t *testing.T) {
 	noLadderExtras(t)
 	var mu sync.Mutex
 	var closed []*portmap.Mapping
-	prevUnmap := p2pUnmapPort
-	p2pUnmapPort = func(m *portmap.Mapping) error {
-		mu.Lock()
-		closed = append(closed, m)
-		mu.Unlock()
-		return nil
-	}
-	t.Cleanup(func() { p2pUnmapPort = prevUnmap })
+	stubP2PRouter(t, func(h *p2pRouterHooks) {
+		h.unmapPort = func(m *portmap.Mapping) error {
+			mu.Lock()
+			closed = append(closed, m)
+			mu.Unlock()
+			return nil
+		}
+	})
 	closedNow := func() []*portmap.Mapping {
 		mu.Lock()
 		defer mu.Unlock()
 		return append([]*portmap.Mapping(nil), closed...)
 	}
 	var granted []*portmap.Mapping
-	p2pMapPort = func(_ context.Context, port int) (*portmap.Mapping, error) {
+	grant := func(_ context.Context, port int) (*portmap.Mapping, error) {
 		m := &portmap.Mapping{Method: "pcp", ExternalIP: net.ParseIP("203.0.113.9"), ExternalPort: port, InternalPort: port}
 		granted = append(granted, m)
 		return m, nil
 	}
+	stubP2PRouter(t, func(h *p2pRouterHooks) { h.mapPort = grant })
 
 	// Granted while the handshake goes on: the session keeps it until it
 	// closes.
@@ -1122,31 +1171,52 @@ func TestP2PClosesTheRouterPort(t *testing.T) {
 		t.Fatalf("closed %v after the session closed; want its port, once", got)
 	}
 
-	// Granted once the session is ready: closed at once.
+	// Granted once the session runs on the relay: kept until it closes.
 	relay := p2pRoute{path: &p2pRelayPath{crypt: &b.crypt, link: recordLink(func([]byte) {})}, addr: p2pRelayAddr{peer: "a"}}
 	if !b.receive(sealAs(t, a, a.handshakePacket(p2pAck, p2pCheckNonce(a.keys.handshake, relay.addr))), relay) {
 		t.Fatal("not connected over the relay")
 	}
 	b.openRouterPort()
-	if got := closedNow(); len(granted) != 2 || len(got) != 2 || got[1] != granted[1] {
-		t.Fatalf("closed %v; want the port granted after the handshake closed at once", got)
+	if got := closedNow(); len(granted) != 2 || len(got) != 1 {
+		t.Fatalf("closed %v; want the port granted on the relay kept", got)
 	}
 	b.Close()
+	deadline = time.Now().Add(2 * time.Second)
+	for len(closedNow()) < 2 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := closedNow(); len(got) != 2 || got[1] != granted[1] {
+		t.Fatalf("closed %v after the session on the relay closed", got)
+	}
+
+	// Granted once the session runs on a direct route: closed at once.
+	d, e := signedPair(t)
+	peer := listenLocalUDP(t)
+	direct := p2pRoute{path: d.udp4, addr: peer.LocalAddr()}
+	if !d.receive(sealAs(t, e, e.handshakePacket(p2pAck, p2pCheckNonce(e.keys.handshake, direct.addr))), direct) {
+		t.Fatal("not connected directly")
+	}
+	d.openRouterPort()
+	if got := closedNow(); len(granted) != 3 || len(got) != 3 || got[2] != granted[2] {
+		t.Fatalf("closed %v; want the port granted after a direct way worked closed at once", got)
+	}
+	d.Close()
 	time.Sleep(100 * time.Millisecond)
-	if got := closedNow(); len(got) != 2 {
-		t.Fatalf("closed %d ports; the session kept none to close", len(got))
+	if got := closedNow(); len(got) != 3 {
+		t.Fatalf("closed %d ports; the direct session kept none to close", len(got))
 	}
 
 	// Granted after the session closed (the player gave up while the router
 	// answered): closed at once.
 	c, _ := signedPair(t)
-	grant := p2pMapPort
-	p2pMapPort = func(ctx context.Context, port int) (*portmap.Mapping, error) {
-		c.Close()
-		return grant(ctx, port)
-	}
+	stubP2PRouter(t, func(h *p2pRouterHooks) {
+		h.mapPort = func(ctx context.Context, port int) (*portmap.Mapping, error) {
+			c.Close()
+			return grant(ctx, port)
+		}
+	})
 	c.openRouterPort()
-	if got := closedNow(); len(granted) != 3 || len(got) != 3 || got[2] != granted[2] {
+	if got := closedNow(); len(granted) != 4 || len(got) != 4 || got[3] != granted[3] {
 		t.Fatalf("closed %v; want the port granted after the session closed closed at once", got)
 	}
 }

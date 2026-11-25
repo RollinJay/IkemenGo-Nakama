@@ -34,24 +34,62 @@ const (
 	p2pHello           = "hello"
 	p2pAck             = "ack"
 	p2pDefaultInterval = 75 * time.Millisecond
-	// The handshake tries one way after another (punchLoop): the IPv4 path
-	// alone, then also IPv6 and a port the router opens, then also the relay
-	// through the server. It gives up when none has worked by the timeout.
+	// The handshake tries the direct ways from the start (punchLoop): the
+	// IPv4 path and IPv6; a port the router opens once no direct way worked
+	// within p2pExtrasDelay; and the relays through the server
+	// p2pRelayDelay after the peer's signal (its keys) arrived. It gives up
+	// when none has worked by the timeout.
 	p2pDefaultTimeout = 30 * time.Second
 	p2pExtrasDelay    = 4 * time.Second
-	p2pRelayDelay     = 10 * time.Second
+	p2pRelayDelay     = 6 * time.Second
 	p2pRelayRetry     = 2 * time.Second
 	p2pPortMapTimeout = 5 * time.Second
+	// While a session runs on a relay, it keeps checking the direct routes
+	// (upgradeLoop): every p2pUpgradeFast for p2pUpgradeFastFor, then every
+	// p2pUpgradeSlow; and it signals again every p2pUpgradeResignal,
+	// p2pUpgradeResignalSlow after, and p2pUpgradeResignalLate once it ran
+	// p2pUpgradeLateAfter (the signals go through the Nakama match).
+	p2pUpgradeFast         = 250 * time.Millisecond
+	p2pUpgradeFastFor      = 30 * time.Second
+	p2pUpgradeSlow         = 1500 * time.Millisecond
+	p2pUpgradeResignal     = time.Second
+	p2pUpgradeResignalSlow = 5 * time.Second
+	p2pUpgradeResignalLate = 30 * time.Second
+	p2pUpgradeLateAfter    = time.Minute
+	// A relay stays open this long after the session moved to a direct
+	// route, so the session can fall back to it at once (p2pMux.checkRoutes),
+	// and longer while the peer still sends its game data on it.
+	p2pRelayLinger    = 10 * time.Second
+	p2pRelayDataQuiet = 3 * time.Second
+	// The UDP relay gets this long to carry the handshake before the
+	// websocket relay is joined too.
+	p2pUDPRelayGrace = 3 * time.Second
+	// Port prediction for a peer behind a NAT that maps each destination to
+	// a new port (P2PNATInfo): every p2pSprayInterval, for p2pSprayFor after
+	// the peer's signal, hellos go to the p2pPredictSeq ports that follow the
+	// peer's last mapping by its step, and to p2pPredictRandom random ports
+	// within p2pPredictSpread of it.
+	p2pSprayInterval  = 250 * time.Millisecond
+	p2pSprayFor       = 30 * time.Second
+	p2pPredictSeq     = 24
+	p2pPredictRandom  = 8
+	p2pPredictSpread  = 512
+	p2pPredictMaxStep = 64
+	p2pPredictedKeep  = 4096
 	// A game that completed the handshake waits this long at least for the
 	// peer's first data, which shows the peer completed it too (punchLoop).
 	p2pConfirmGrace = 10 * time.Second
 	// A port the router opened lasts this long unless the session renews it,
 	// so one that a game which crashed or lost its network left open does
 	// not stay open for long.
-	p2pPortMapLifetime   = 15 * time.Minute
-	p2pResignalInterval  = 500 * time.Millisecond
-	p2pSTUNTimeout       = 3 * time.Second
-	p2pSTUNRetry         = 500 * time.Millisecond
+	p2pPortMapLifetime  = 15 * time.Minute
+	p2pResignalInterval = 500 * time.Millisecond
+	p2pSTUNTimeout      = 3 * time.Second
+	p2pSTUNRetry        = 500 * time.Millisecond
+	// Once one STUN server answered, the others get this much longer: the
+	// first signal does not wait p2pSTUNTimeout for a server that is down
+	// or blocked.
+	p2pSTUNSettle        = 500 * time.Millisecond
 	stunBindingRequest   = 0x0001
 	stunBindingSuccess   = 0x0101
 	stunMappedAddress    = 0x0001
@@ -93,6 +131,22 @@ type P2PSignal struct {
 	// signal to the session of its purpose only (deliverSignal), and a
 	// session takes no signal of another purpose (HandleSignal).
 	Purpose string `json:"purpose,omitempty"`
+	// NAT is what the sender's STUN queries showed of its NAT, when they
+	// showed something (gatherCandidates).
+	NAT *P2PNATInfo `json:"nat,omitempty"`
+}
+
+// P2PNATInfo describes the sender's NAT from two STUN servers' answers. Type
+// is "cone" when both saw the same address (the NAT keeps one port for all
+// destinations) and "symmetric" when they did not (a new port for each
+// destination: a peer reaches it only at a port the NAT is about to give, so
+// the peer predicts it, see sendPunches). IP and Port are the last mapping,
+// Delta the step between the two mappings.
+type P2PNATInfo struct {
+	Type  string `json:"type"`
+	IP    string `json:"ip,omitempty"`
+	Port  int    `json:"port,omitempty"`
+	Delta int    `json:"delta,omitempty"`
 }
 
 // p2PPacket is a handshake packet: a hello, which checks a route, or the ack
@@ -116,25 +170,43 @@ type p2PPacket struct {
 // or a relay through the Nakama server (nakama_p2ppath.go); the mux then
 // sends on whichever completed the handshake.
 type NakamaP2P struct {
-	mu          sync.Mutex
-	conn        *net.UDPConn
-	udp4        *p2pUDPPath
-	conn6       *net.UDPConn
-	udp6        *p2pUDPPath
-	relayer     p2pRelayer
-	relay       *p2pRelayPath
-	relayStart  sync.Once
-	portMap     *portmap.Mapping
-	stage       string
-	matchID     string
-	token       string
-	key         *ecdh.PrivateKey
-	remoteToken string
-	remoteKey   string
-	keys        *p2pKeys // from the peer's signal; nil before
+	mu       sync.Mutex
+	conn     *net.UDPConn
+	udp4     *p2pUDPPath
+	conn6    *net.UDPConn
+	udp6     *p2pUDPPath
+	relayer  p2pRelayer
+	relay    *p2pRelayPath
+	udpRelay p2pPath // the UDP relay's path once joined
+	// relayJoining: a joinRelay runs.
+	relayJoining bool
+	portMap      *portmap.Mapping
+	stage        string
+	matchID      string
+	token        string
+	key          *ecdh.PrivateKey
+	remoteToken  string
+	remoteKey    string
+	keys         *p2pKeys // from the peer's signal; nil before
 	// peerServerRelay: the peer's signal says its game asks for the server's
 	// relay (P2PSignal.ServerRelay).
 	peerServerRelay bool
+	// keysReady closes when the peer's first signal gave the keys, at keysAt:
+	// the relay's timer counts from then (punchLoop).
+	keysReady chan struct{}
+	keysOnce  sync.Once
+	keysAt    time.Time
+	// nat is this side's NAT as its STUN queries showed it, peerNAT the
+	// peer's as its signal says; predicted are the ports hellos went to by
+	// prediction (sendPunches), and lastSpray when they last did.
+	nat        *P2PNATInfo
+	peerNAT    *P2PNATInfo
+	predicted  map[string]bool
+	lastSpray  time.Time
+	ipv6Once   sync.Once
+	routerOnce sync.Once
+	// upgrading: an upgradeLoop runs.
+	upgrading atomic.Bool
 	// crypt seals and opens every datagram on every path once the peer's
 	// signal gave the keys (p2pCrypt); the paths hold a pointer to it.
 	crypt atomic.Pointer[p2pCrypt]
@@ -161,12 +233,22 @@ type NakamaP2P struct {
 	timeout     time.Duration
 	extrasDelay time.Duration
 	relayDelay  time.Duration
+	// relayLinger, upgradeFast and upgradeSlow are p2pRelayLinger,
+	// p2pUpgradeFast and p2pUpgradeSlow (tests shorten them); muxProbe and
+	// muxQuiet, when set, replace the mux's probe interval and quiet time.
+	relayLinger time.Duration
+	upgradeFast time.Duration
+	upgradeSlow time.Duration
+	muxProbe    time.Duration
+	muxQuiet    time.Duration
 	// confirmGrace is how long a game that completed the handshake waits
 	// at least for the peer's first data (punchLoop).
 	confirmGrace time.Duration
 }
 
 func NewNakamaP2P(matchID string, localPort int, signal func(P2PSignal) error) (*NakamaP2P, error) {
+	// A VPN may have come up since the last session (classifyRoute).
+	go refreshVPNAdapterNets()
 	if matchID == "" {
 		return nil, errors.New("p2p match id is empty")
 	}
@@ -194,6 +276,11 @@ func NewNakamaP2P(matchID string, localPort int, signal func(P2PSignal) error) (
 		ready:        make(chan struct{}),
 		closed:       make(chan struct{}),
 		confirmed:    make(chan struct{}),
+		keysReady:    make(chan struct{}),
+		predicted:    map[string]bool{},
+		relayLinger:  p2pRelayLinger,
+		upgradeFast:  p2pUpgradeFast,
+		upgradeSlow:  p2pUpgradeSlow,
 		signal:       signal,
 		interval:     p2pDefaultInterval,
 		timeout:      p2pDefaultTimeout,
@@ -233,7 +320,7 @@ func (p *NakamaP2P) localSignal() P2PSignal {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return P2PSignal{Magic: p2pMagic, MatchID: p.matchID, Token: p.token, Key: p.publicKey(),
-		Candidates: append([]P2PCandidate(nil), p.local...), From: p.selfID, To: p.peerID, ServerRelay: true, Purpose: p.purpose}
+		Candidates: append([]P2PCandidate(nil), p.local...), From: p.selfID, To: p.peerID, ServerRelay: true, Purpose: p.purpose, NAT: p.nat}
 }
 
 // publicKey is this side's half of the key exchange, as signals carry it.
@@ -284,13 +371,17 @@ func (p *NakamaP2P) Wait(ctx context.Context) error {
 }
 
 func (p *NakamaP2P) Start(ctx context.Context, stunServers []string) error {
+	// IPv6 from the start, alongside STUN: the first signal carries the
+	// IPv6 candidates. The router's port waits for extrasDelay (punchLoop),
+	// so a session that finds a direct way at once holds none.
+	p.startIPv6()
 	local, err := p.gatherCandidates(ctx, stunServers)
 	if err != nil {
 		p.Close()
 		return err
 	}
 	p.mu.Lock()
-	p.local = local
+	p.local = uniqueCandidates(append(local, p.local...))
 	p.mu.Unlock()
 	if p.signal != nil {
 		if err := p.signal(p.localSignal()); err != nil {
@@ -368,9 +459,22 @@ func (p *NakamaP2P) HandleSignal(signal P2PSignal) error {
 		}
 		p.remoteToken, p.remoteKey, p.keys = signal.Token, signal.Key, keys
 		p.crypt.Store(crypt)
+		if u, ok := p.udpRelay.(interface {
+			setCrypt(*atomic.Pointer[p2pCrypt])
+		}); ok {
+			u.setCrypt(&p.crypt)
+		}
+		p.keysOnce.Do(func() {
+			p.keysAt = time.Now()
+			close(p.keysReady)
+		})
 	}
 	p.remote = append([]P2PCandidate(nil), signal.Candidates...)
 	p.peerServerRelay = signal.ServerRelay
+	if signal.NAT != nil {
+		nat := *signal.NAT
+		p.peerNAT = &nat
+	}
 	p.mu.Unlock()
 	return nil
 }
@@ -449,6 +553,10 @@ func (p *NakamaP2P) gatherCandidates(ctx context.Context, stunServers []string) 
 	for _, ip := range addresses {
 		candidates = append(candidates, P2PCandidate{Type: "host", Address: ip.String(), Port: port})
 	}
+	// Every STUN server, all at once rather than the first that answers: two
+	// answers show whether the NAT keeps one port for all destinations
+	// (P2PNATInfo).
+	var servers []*net.UDPAddr
 	for _, server := range stunServers {
 		server = strings.TrimSpace(server)
 		if server == "" {
@@ -459,31 +567,64 @@ func (p *NakamaP2P) gatherCandidates(ctx context.Context, stunServers []string) 
 			log.Printf("P2P STUN resolve failed for %q: %v", server, err)
 			continue
 		}
-		mapped, err := stunBinding(ctx, conn, addr)
+		servers = append(servers, addr)
+	}
+	if len(servers) > 0 {
+		mapped, err := stunBindings(ctx, conn, servers)
 		if err != nil {
-			log.Printf("P2P STUN query failed for %q: %v", server, err)
-			continue
+			log.Printf("P2P STUN query failed: %v", err)
 		}
-		candidates = append(candidates, P2PCandidate{Type: "srflx", Address: mapped.IP.String(), Port: mapped.Port})
-		break
+		var answered []*net.UDPAddr
+		for i, m := range mapped {
+			if m == nil {
+				log.Printf("P2P STUN query failed for %s", servers[i])
+				continue
+			}
+			answered = append(answered, m)
+			candidates = append(candidates, P2PCandidate{Type: "srflx", Address: m.IP.String(), Port: m.Port})
+		}
+		if nat := p2pClassifyNAT(answered); nat != nil {
+			log.Printf("Nakama P2P: NAT %s (mapped %v)", nat.Type, answered)
+			p.mu.Lock()
+			p.nat = nat
+			p.mu.Unlock()
+		}
 	}
 	return uniqueCandidates(candidates), nil
 }
 
-// punchLoop runs the handshake until a path to the peer works. It tries one
-// way after another, each added to the ones before, since a path that has
-// not worked yet may still work once the peer's side has started too:
+// p2pClassifyNAT compares the mappings STUN servers saw, in the order the
+// queries went out: one address for all means the NAT keeps the port for
+// every destination, different ones that it maps each anew. One answer
+// shows nothing (nil).
+func p2pClassifyNAT(mapped []*net.UDPAddr) *P2PNATInfo {
+	if len(mapped) < 2 {
+		return nil
+	}
+	first, last := mapped[0], mapped[len(mapped)-1]
+	for _, m := range mapped[1:] {
+		if m.Port != first.Port || !m.IP.Equal(first.IP) {
+			return &P2PNATInfo{Type: "symmetric", IP: last.IP.String(), Port: last.Port, Delta: last.Port - mapped[len(mapped)-2].Port}
+		}
+	}
+	return &P2PNATInfo{Type: "cone", IP: last.IP.String(), Port: last.Port}
+}
+
+// punchLoop runs the handshake until a path to the peer works:
 //
-//	from the start   the IPv4 path: host and STUN candidates
-//	extrasDelay on   IPv6 host candidates, and a port the router opens to
-//	                 the IPv4 socket (PCP, NAT-PMP or UPnP)
-//	relayDelay on    the relay through the Nakama server
+//	from the start          the IPv4 path (host, STUN and predicted
+//	                        candidates), IPv6 host candidates, and a port the
+//	                        router opens to the IPv4 socket (PCP, NAT-PMP or
+//	                        UPnP)
+//	relayDelay after the    the server's UDP relay, then the relay over the
+//	peer's keys arrived     Nakama websocket
 //
 // and gives up at the timeout. Completing the handshake does not end it:
 // the peer may not have completed it yet, and needs this side's hellos and
 // acks until it has, possibly on a way that has yet to come (the relay). It
 // ends at the peer's first data, which shows the peer completed it, and a
-// game that completed it but never hears from the peer gives up.
+// game that completed it but never hears from the peer gives up. A session
+// that runs on a relay then keeps looking for a direct route (upgradeLoop).
 func (p *NakamaP2P) punchLoop() {
 	timer := time.NewTicker(p.interval)
 	defer timer.Stop()
@@ -493,15 +634,22 @@ func (p *NakamaP2P) punchLoop() {
 	defer deadline.Stop()
 	extras := time.NewTimer(p.extrasDelay)
 	defer extras.Stop()
-	relay := time.NewTimer(p.relayDelay)
-	defer relay.Stop()
+	// The relays count from the peer's keys: before them nothing can be
+	// sent to the peer on any way, and this side's own start says nothing
+	// of when the peer's game started.
+	keys := p.keysReady
+	var relay <-chan time.Time
 	start := time.Now()
 	ready := p.ready
+	p.startIPv6()
 	for {
 		select {
 		case <-p.closed:
 			return
 		case <-p.confirmed:
+			if p2pIsRelay(p.activePath()) {
+				p.startUpgrade()
+			}
 			return
 		case <-ready:
 			ready = nil
@@ -517,9 +665,21 @@ func (p *NakamaP2P) punchLoop() {
 			}
 			p.Close()
 			return
+		case <-keys:
+			keys = nil
+			t := time.NewTimer(p.relayDelay)
+			defer t.Stop()
+			relay = t.C
 		case <-extras.C:
-			p.startExtras()
-		case <-relay.C:
+			if ready != nil && p.Stage() == "direct" {
+				p.setStage("extras")
+				log.Printf("Nakama P2P: no direct path yet after %v; trying a port the router opens and predicted ports too", p.extrasDelay)
+			}
+			if path := p.activePath(); path == nil || p2pIsRelay(path) {
+				p.startRouterPort()
+			}
+		case <-relay:
+			relay = nil
 			p.startRelay()
 		case <-resignal.C:
 			// Nakama only relays to peers present when the message is sent, so
@@ -530,6 +690,189 @@ func (p *NakamaP2P) punchLoop() {
 			p.sendPunches()
 		}
 	}
+}
+
+// activePath is the path the session sends on (nil before it is ready).
+func (p *NakamaP2P) activePath() p2pPath {
+	p.mu.Lock()
+	m := p.mux
+	p.mu.Unlock()
+	if m == nil {
+		return nil
+	}
+	return m.activeRoute().path
+}
+
+// startUpgrade starts an upgradeLoop unless one runs.
+func (p *NakamaP2P) startUpgrade() {
+	if p.upgrading.CompareAndSwap(false, true) {
+		go p.upgradeLoop()
+	}
+}
+
+// upgradeLoop keeps checking the direct routes while the session runs on a
+// relay, or its route went quiet: hellos to every route the mux does not
+// know yet (sendPunches), often at first and then less, and the signal
+// again now and then, which carries late candidates (the router's port).
+// Once a direct route is verified, the mux moves the session to it as soon
+// as it answers steadily (p2pMux.recordPong). The loop ends when the session
+// runs on a working direct route, or closes.
+func (p *NakamaP2P) upgradeLoop() {
+	start := time.Now()
+	var lastSignal time.Time
+	for {
+		ran := time.Since(start)
+		wait, signalEvery := p.upgradeSlow, p2pUpgradeResignalSlow
+		switch {
+		case ran < p2pUpgradeFastFor:
+			wait, signalEvery = p.upgradeFast, p2pUpgradeResignal
+		case ran >= p2pUpgradeLateAfter:
+			signalEvery = p2pUpgradeResignalLate
+		}
+		select {
+		case <-p.closed:
+			p.upgrading.Store(false)
+			return
+		case <-time.After(wait):
+		}
+		if p.directWorks() {
+			p.upgrading.Store(false)
+			// One may have started meanwhile, while this one was ending.
+			if !p.directWorks() {
+				p.startUpgrade()
+			}
+			return
+		}
+		p.sendPunches()
+		p.mu.Lock()
+		udpDied := p.udpRelay != nil && p2pPathDead(p.udpRelay)
+		p.mu.Unlock()
+		if udpDied {
+			// The UDP relay's path died while the session needs a relay: a
+			// new ticket, or the websocket relay.
+			p.startRelay()
+		}
+		if time.Since(lastSignal) >= signalEvery {
+			lastSignal = time.Now()
+			p.resignal()
+		}
+	}
+}
+
+// directWorks reports whether the session runs on a direct route that works.
+func (p *NakamaP2P) directWorks() bool {
+	p.mu.Lock()
+	m := p.mux
+	p.mu.Unlock()
+	return m != nil && !p2pIsRelay(m.activeRoute().path) && m.activeLive()
+}
+
+// onSwitch runs when the mux changed the route it sends on: on a relay, the
+// session looks for a direct route again; off a relay, it leaves the relays
+// after a while (closeRelays).
+func (p *NakamaP2P) onSwitch(from, to p2pRoute) {
+	if p2pIsRelay(to.path) {
+		p.startRouterPort()
+		p.startUpgrade()
+		// Off the websocket relay onto the UDP relay: the websocket relay
+		// can go as well (closeRelays).
+		if p2pPathRank(to.path) > p2pPathRank(from.path) {
+			p.scheduleRelayClose(p.relayLinger)
+		}
+		return
+	}
+	if p2pIsRelay(from.path) {
+		p.scheduleRelayClose(p.relayLinger)
+	}
+}
+
+// onLost runs when the active route went quiet and no other route works:
+// the session asks for the relay again (it may have left it) and keeps
+// checking the direct routes.
+func (p *NakamaP2P) onLost() {
+	select {
+	case <-p.closed:
+		return
+	default:
+	}
+	p.startRouterPort()
+	p.startUpgrade()
+	p.startRelay()
+}
+
+func (p *NakamaP2P) scheduleRelayClose(after time.Duration) {
+	time.AfterFunc(after, p.closeRelays)
+}
+
+// closeRelays leaves the relays ranked below the active route, once the
+// session runs on a working route above them (a direct route, or the UDP
+// relay above the websocket relay) and the peer sent no game data on them
+// for p2pRelayDataQuiet (else it tries again later). Should the route go
+// quiet later, onLost joins the relay again.
+func (p *NakamaP2P) closeRelays() {
+	p.mu.Lock()
+	m := p.mux
+	if m == nil || p.conn == nil {
+		p.mu.Unlock()
+		return
+	}
+	active := m.activeRoute()
+	if !active.valid() || !m.activeLive() {
+		p.mu.Unlock()
+		return
+	}
+	activeRank := p2pPathRank(active.path)
+	type relayRoute struct {
+		route p2pRoute
+		clear func()
+	}
+	var routes []relayRoute
+	if p.relay != nil {
+		r := p.relay
+		routes = append(routes, relayRoute{p2pRoute{path: r, addr: p2pRelayAddr{peer: p.peerID}}, func() {
+			if p.relay == r {
+				p.relay = nil
+			}
+		}})
+	}
+	if p.udpRelay != nil {
+		r := p.udpRelay
+		routes = append(routes, relayRoute{p2pRoute{path: r, addr: p2pUDPRelayRouteAddr(r, p.peerID)}, func() {
+			if p.udpRelay == r {
+				p.udpRelay = nil
+			}
+		}})
+	}
+	var closing []relayRoute
+	busy := false
+	for _, r := range routes {
+		if p2pPathRank(r.route.path) >= activeRank {
+			continue
+		}
+		if _, data := m.routeActivity(r.route); !data.IsZero() && time.Since(data) < p2pRelayDataQuiet {
+			busy = true
+			continue
+		}
+		r.clear()
+		closing = append(closing, r)
+	}
+	p.mu.Unlock()
+	for _, r := range closing {
+		m.forget(r.route)
+		p2pClosePath(r.route.path)
+		log.Printf("Nakama P2P: left %s; the session runs on %s", r.route, active)
+	}
+	if busy {
+		p.scheduleRelayClose(p2pRelayDataQuiet)
+	}
+}
+
+// p2pUDPRelayRouteAddr is the peer's address on the UDP relay path.
+func p2pUDPRelayRouteAddr(path p2pPath, peerID string) net.Addr {
+	if r, ok := path.(interface{ routeAddr() net.Addr }); ok {
+		return r.routeAddr()
+	}
+	return p2pRelayAddr{peer: peerID}
 }
 
 // resignal publishes this side's signal again, candidates or not: the peer
@@ -551,8 +894,8 @@ func (p *NakamaP2P) setStage(stage string) {
 	p.mu.Unlock()
 }
 
-// Stage reports the handshake's latest step: "direct", "extras" (IPv6 and a
-// router port as well) or "relay" (the relay as well).
+// Stage reports the handshake's latest step: "direct", "extras" (no path
+// yet after extrasDelay) or "relay" (the relay as well).
 func (p *NakamaP2P) Stage() string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -560,37 +903,236 @@ func (p *NakamaP2P) Stage() string {
 }
 
 // Route names the path the session runs over once the handshake completed:
-// "direct" (the IPv4 socket), "ipv6" or "relay"; "" before.
+// "direct" (the IPv4 socket), "ipv6", "relay-udp" or "relay"; "" before.
+// RouteName says more.
 func (p *NakamaP2P) Route() string {
+	if path := p.activePath(); path != nil {
+		return path.name()
+	}
+	return ""
+}
+
+// RouteName names the route the session runs over: "direct-host" (an
+// address the peer signalled for its machine), "direct-vpn" (one on a VPN or
+// overlay network), "direct-srflx" (its public address as STUN saw it),
+// "direct-prflx" (an address only its packets showed), "direct-predicted"
+// (a port predicted for its NAT), "direct-router" (a port its router
+// opened), "direct-ipv6", "relay-udp" or "relay-ws"; "" before the
+// handshake completed.
+func (p *NakamaP2P) RouteName() string {
 	p.mu.Lock()
 	m := p.mux
 	p.mu.Unlock()
 	if m == nil {
 		return ""
 	}
-	if r := m.activeRoute(); r.valid() {
-		return r.path.name()
+	r := m.activeRoute()
+	if !r.valid() {
+		return ""
 	}
-	return ""
+	return p.classifyRoute(r)
 }
 
-// startExtras opens the second and third ways to the peer: an IPv6 socket
-// for IPv6 host candidates, which reach the peer without NAT, and a port the
-// router opens to the IPv4 socket, which lets the peer through a NAT that
-// drops what it did not ask for. Each new candidate goes out in a signal at
-// once.
-func (p *NakamaP2P) startExtras() {
-	select {
-	case <-p.ready:
-		return
-	default:
+// Upgrades is how often the session moved to a higher-ranked route than the
+// one it ran on (off a relay to a direct route, or from the websocket relay
+// to the UDP relay); falls back to a relay, and moves between direct routes,
+// do not count.
+func (p *NakamaP2P) Upgrades() int {
+	p.mu.Lock()
+	m := p.mux
+	p.mu.Unlock()
+	if m == nil {
+		return 0
 	}
-	p.setStage("extras")
-	log.Printf("Nakama P2P: no direct path yet after %v; also trying IPv6 and a port the router opens", p.extrasDelay)
-	if p.openIPv6() {
-		p.resignal()
+	return m.upgradeCount()
+}
+
+// classifyRoute names a route as RouteName does.
+func (p *NakamaP2P) classifyRoute(r p2pRoute) string {
+	if _, ok := r.path.(*p2pRelayPath); ok {
+		return "relay-ws"
 	}
-	go p.openRouterPort()
+	if p2pIsRelay(r.path) {
+		return "relay-udp"
+	}
+	addr, ok := r.addr.(*net.UDPAddr)
+	if !ok || addr.IP == nil {
+		return "direct-prflx"
+	}
+	if p2pVPNAddress(addr.IP) {
+		return "direct-vpn"
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, c := range p.remote {
+		ip := net.ParseIP(c.Address)
+		if ip == nil || c.Port != addr.Port || !ip.Equal(addr.IP) {
+			continue
+		}
+		switch c.Type {
+		case "host":
+			return "direct-host"
+		case "host6":
+			return "direct-ipv6"
+		case "srflx":
+			return "direct-srflx"
+		case "pcp", "natpmp", "upnp":
+			return "direct-router"
+		}
+	}
+	if addr.IP.To4() == nil {
+		return "direct-ipv6"
+	}
+	if p.predicted[p2pAddrKey(addr)] {
+		return "direct-predicted"
+	}
+	return "direct-prflx"
+}
+
+// p2pVPNNets are the address ranges of the VPN and overlay networks players
+// use for netplay, which ordinary networks do not use: Hamachi
+// (25.0.0.0/8), Radmin VPN (26.0.0.0/8), Tailscale's IPv6 range
+// (fd7a:115c:a1e0::/48), and ZeroTier's usual managed ranges. Tailscale's
+// IPv4 addresses are in the shared CGNAT range (100.64.0.0/10), which
+// carriers give phones and hotspots too: it counts only on a machine whose
+// own VPN adapter is in it (vpnAdapterNets).
+var p2pVPNNets = func() []*net.IPNet {
+	var out []*net.IPNet
+	for _, cidr := range []string{"25.0.0.0/8", "26.0.0.0/8", "fd7a:115c:a1e0::/48",
+		"10.144.0.0/16", "10.147.0.0/16", "10.241.0.0/16", "10.242.0.0/16", "10.243.0.0/16", "10.244.0.0/16"} {
+		if _, n, err := net.ParseCIDR(cidr); err == nil {
+			out = append(out, n)
+		}
+	}
+	return out
+}()
+
+// p2pCGNATNet is the shared address space (RFC 6598) Tailscale takes its
+// IPv4 addresses from.
+var p2pCGNATNet = &net.IPNet{IP: net.IPv4(100, 64, 0, 0).To4(), Mask: net.CIDRMask(10, 32)}
+
+// p2pVPNAdapterNets lists the networks of this machine's VPN adapters (tests
+// replace it): an address in one of them is reached over the VPN. The list
+// is read again when a session starts (refreshVPNAdapterNets) and at most
+// every p2pVPNAdapterTTL otherwise, so a VPN that came up after the game
+// started counts.
+var p2pVPNAdapterNets = cachedVPNAdapterNets
+
+const p2pVPNAdapterTTL = 30 * time.Second
+
+type p2pVPNAdapterCache struct {
+	at   time.Time
+	nets []*net.IPNet
+}
+
+var p2pVPNAdapters atomic.Pointer[p2pVPNAdapterCache]
+
+func cachedVPNAdapterNets() []*net.IPNet {
+	if c := p2pVPNAdapters.Load(); c != nil && time.Since(c.at) < p2pVPNAdapterTTL {
+		return c.nets
+	}
+	return refreshVPNAdapterNets()
+}
+
+func refreshVPNAdapterNets() []*net.IPNet {
+	nets := vpnAdapterNets()
+	p2pVPNAdapters.Store(&p2pVPNAdapterCache{at: time.Now(), nets: nets})
+	return nets
+}
+
+// p2pVPNAdapterNames are what VPN and overlay adapters' names contain;
+// p2pVPNAdapterPrefixes what they start with, followed by a digit
+// (WireGuard's wg0) or, for ZeroTier, its network's id (ztXXXXXXXX). Generic
+// tunnel names (tun0, tap0, utun3) are not counted: the system and many
+// other programs use them.
+var (
+	p2pVPNAdapterNames    = []string{"hamachi", "radmin", "zerotier", "tailscale", "wireguard", "openvpn", "nordlynx", "vpn"}
+	p2pVPNAdapterPrefixes = []string{"wg", "zt"}
+)
+
+// p2pVPNAdapterName reports whether an adapter's name is a VPN's.
+func p2pVPNAdapterName(name string) bool {
+	name = strings.ToLower(name)
+	for _, n := range p2pVPNAdapterNames {
+		if strings.Contains(name, n) {
+			return true
+		}
+	}
+	for _, prefix := range p2pVPNAdapterPrefixes {
+		rest, ok := strings.CutPrefix(name, prefix)
+		if !ok || rest == "" {
+			continue
+		}
+		if prefix == "wg" && rest[0] >= '0' && rest[0] <= '9' {
+			return true
+		}
+		if prefix == "zt" && len(rest) >= 6 {
+			return true
+		}
+	}
+	return false
+}
+
+func vpnAdapterNets() []*net.IPNet {
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		return nil
+	}
+	var out []*net.IPNet
+	for _, iface := range interfaces {
+		if !p2pVPNAdapterName(iface.Name) || iface.Flags&net.FlagUp == 0 {
+			continue
+		}
+		addrs, _ := iface.Addrs()
+		for _, a := range addrs {
+			n, ok := a.(*net.IPNet)
+			if !ok {
+				continue
+			}
+			out = append(out, n)
+			if p2pCGNATNet.Contains(n.IP) {
+				// Tailscale gives its adapter a /32: its peers are
+				// elsewhere in the range.
+				out = append(out, p2pCGNATNet)
+			}
+		}
+	}
+	return out
+}
+
+// p2pVPNAddress reports whether ip is on a VPN or overlay network.
+func p2pVPNAddress(ip net.IP) bool {
+	for _, n := range p2pVPNNets {
+		if n.Contains(ip) {
+			return true
+		}
+	}
+	for _, n := range p2pVPNAdapterNets() {
+		if n.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+// startIPv6 opens the second way to the peer, once: an IPv6 socket for IPv6
+// host candidates, which reach the peer without NAT. The new candidates go
+// out in a signal at once.
+func (p *NakamaP2P) startIPv6() {
+	p.ipv6Once.Do(func() {
+		if p.openIPv6() {
+			p.resignal()
+		}
+	})
+}
+
+// startRouterPort opens the third way, once: a port the router opens to the
+// IPv4 socket, which lets the peer through a NAT that drops what it did not
+// ask for. Only a session without a direct route asks (after extrasDelay,
+// or once it runs on a relay), so the router does not hold a port for every
+// session.
+func (p *NakamaP2P) startRouterPort() {
+	p.routerOnce.Do(func() { go p.openRouterPort() })
 }
 
 // openIPv6 binds the IPv6 socket, on the IPv4 socket's port when it is free,
@@ -629,7 +1171,9 @@ func (p *NakamaP2P) openIPv6() bool {
 }
 
 // openRouterPort asks the router to forward a UDP port to the IPv4 socket
-// and offers the router's public address and that port as a candidate.
+// and offers the router's public address and that port as a candidate. A
+// session that already runs on a direct route does not need it; one that
+// runs on a relay keeps it, as a way to move off the relay.
 func (p *NakamaP2P) openRouterPort() {
 	port := p.LocalPort()
 	if port == 0 {
@@ -642,12 +1186,10 @@ func (p *NakamaP2P) openRouterPort() {
 		log.Printf("Nakama P2P: the router did not open a port: %v", err)
 		return
 	}
-	select {
-	case <-p.ready:
-		// Another way worked meanwhile: the router need not keep the port.
+	if path := p.activePath(); path != nil && !p2pIsRelay(path) {
+		// A direct way worked meanwhile: the router need not keep the port.
 		_ = p2pUnmapPort(m)
 		return
-	default:
 	}
 	p.mu.Lock()
 	if p.conn == nil {
@@ -662,39 +1204,96 @@ func (p *NakamaP2P) openRouterPort() {
 	p.resignal()
 }
 
-// startRelay joins the relay, in the background: joining waits for the
-// server's answer, and the handshake goes on meanwhile. It retries until
-// the peer has been heard from (confirmed) or the session closed.
+// startRelay joins the relays, in the background: joining waits for the
+// server's answer, and the handshake goes on meanwhile. It does nothing
+// while a join runs, or while the websocket relay is joined, unless the UDP
+// relay's path died (it then needs a new ticket).
 func (p *NakamaP2P) startRelay() {
 	p.mu.Lock()
 	relayer := p.relayer
-	p.mu.Unlock()
-	if relayer == nil {
+	udpDied := p.udpRelay != nil && p2pPathDead(p.udpRelay)
+	if relayer == nil || p.relayJoining || p.conn == nil || (p.relay != nil && !udpDied) {
+		p.mu.Unlock()
 		return
 	}
-	p.relayStart.Do(func() {
-		p.setStage("relay")
-		log.Printf("Nakama P2P: the other player has not been heard from after %v; also trying the relay through the server", p.relayDelay)
-		go p.joinRelay(relayer)
-	})
+	p.relayJoining = true
+	p.mu.Unlock()
+	p.setStage("relay")
+	log.Printf("Nakama P2P: no direct path to the other player yet; also trying the relay through the server")
+	go p.joinRelay(relayer)
 }
 
+// p2pPathDead reports whether a relay path stopped working for good (the
+// UDP relay's, see p2pUDPRelayPath.isDead).
+func p2pPathDead(path p2pPath) bool {
+	d, ok := path.(interface{ isDead() bool })
+	return ok && d.isDead()
+}
+
+// dropDeadUDPRelay forgets the UDP relay's path once it died, so the next
+// join asks for a new ticket, and reports whether it did.
+func (p *NakamaP2P) dropDeadUDPRelay() bool {
+	p.mu.Lock()
+	path, m, peerID := p.udpRelay, p.mux, p.peerID
+	if path == nil || !p2pPathDead(path) {
+		p.mu.Unlock()
+		return false
+	}
+	p.udpRelay = nil
+	p.mu.Unlock()
+	if m != nil {
+		m.forget(p2pRoute{path: path, addr: p2pUDPRelayRouteAddr(path, peerID)})
+	}
+	p2pClosePath(path)
+	log.Printf("Nakama P2P: the UDP relay path died; asking for a new ticket")
+	return true
+}
+
+// relayNotNeeded reports whether the session no longer needs to join a
+// relay: it closed, or runs on a working direct route.
+func (p *NakamaP2P) relayNotNeeded() bool {
+	select {
+	case <-p.closed:
+		return true
+	default:
+	}
+	return p.directWorks()
+}
+
+// joinRelay joins the server's UDP relay when the server has one, and the
+// relay over the Nakama websocket when the UDP relay does not carry the
+// handshake within p2pUDPRelayGrace (or the server has none). It retries
+// until joined, or the relay is not needed any more.
 func (p *NakamaP2P) joinRelay(relayer p2pRelayer) {
-	for {
-		select {
-		case <-p.confirmed:
-			return
-		case <-p.closed:
-			return
-		default:
-		}
+	defer func() {
 		p.mu.Lock()
-		keys, peerID, server := p.keys, p.peerID, p.peerServerRelay
+		p.relayJoining = false
+		p.mu.Unlock()
+	}()
+	triedUDP := false
+	for {
+		if p.relayNotNeeded() {
+			return
+		}
+		p.dropDeadUDPRelay()
+		p.mu.Lock()
+		keys, peerID, server, udpRelay, ws := p.keys, p.peerID, p.peerServerRelay, p.udpRelay, p.relay
 		p.mu.Unlock()
 		// The relay's name and keys come from the key exchange, so the peer's
 		// signal must have arrived; until then there is nobody to relay to.
 		// The signal also says which relay the peer's game joins.
 		if keys != nil {
+			if ur, ok := relayer.(p2pUDPRelayer); ok && server && !triedUDP && udpRelay == nil {
+				triedUDP = true
+				if p.joinUDPRelay(ur, peerID) {
+					return
+				}
+			}
+			if ws != nil {
+				// The websocket relay is joined already (the UDP relay
+				// died, and no new ticket worked).
+				return
+			}
 			path := &p2pRelayPath{crypt: &p.crypt}
 			route := p2pRoute{path: path, addr: p2pRelayAddr{peer: peerID}}
 			req := p2pRelayRequest{MatchID: p.matchID, Name: keys.relayName, Peer: peerID, Server: server}
@@ -717,13 +1316,71 @@ func (p *NakamaP2P) joinRelay(relayer p2pRelayer) {
 			log.Printf("Nakama P2P: could not join the relay: %v", err)
 		}
 		select {
-		case <-p.confirmed:
-			return
 		case <-p.closed:
 			return
 		case <-time.After(p2pRelayRetry):
 		}
 	}
+}
+
+// joinUDPRelay asks the server for a ticket to its UDP relay and joins it,
+// and reports whether the session then runs, or can run, without the
+// websocket relay: it waits up to p2pUDPRelayGrace for the handshake to
+// complete on some way.
+func (p *NakamaP2P) joinUDPRelay(ur p2pUDPRelayer, peerID string) bool {
+	ticket, err := ur.RequestUDPRelay(p.matchID, peerID)
+	if err != nil {
+		log.Printf("Nakama P2P: no UDP relay: %v", err)
+		return false
+	}
+	var route p2pRoute
+	var routeMu sync.Mutex
+	path, err := p2pDialUDPRelay(ticket, func(b []byte) {
+		routeMu.Lock()
+		r := route
+		routeMu.Unlock()
+		if r.valid() {
+			p.receive(b, r)
+		}
+	})
+	if err != nil {
+		log.Printf("Nakama P2P: could not join the UDP relay: %v", err)
+		return false
+	}
+	if u, ok := path.(interface {
+		setCrypt(*atomic.Pointer[p2pCrypt])
+	}); ok {
+		u.setCrypt(&p.crypt)
+	}
+	routeMu.Lock()
+	route = p2pRoute{path: path, addr: p2pUDPRelayRouteAddr(path, peerID)}
+	routeMu.Unlock()
+	p.mu.Lock()
+	if p.conn == nil {
+		p.mu.Unlock()
+		p2pClosePath(path)
+		return true
+	}
+	p.udpRelay = path
+	p.mu.Unlock()
+	log.Printf("Nakama P2P: joined the server's UDP relay")
+	p.sendPunches()
+	// It carries the handshake once the mux knows its route (verify).
+	deadline := time.Now().Add(p2pUDPRelayGrace)
+	for time.Now().Before(deadline) {
+		p.mu.Lock()
+		m := p.mux
+		p.mu.Unlock()
+		if p.relayNotNeeded() || (m != nil && m.isKnown(route)) {
+			return true
+		}
+		select {
+		case <-p.closed:
+			return true
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+	return p.relayNotNeeded()
 }
 
 // p2pCheckNonce is the nonce of a hello sent to addr. The ack that answers a
@@ -774,24 +1431,31 @@ func (p *NakamaP2P) validHandshake(data []byte) (p2PPacket, bool) {
 }
 
 // sendPunches checks every route to the peer with a hello: its candidates,
-// the routes its own handshake packets came on, and the relay once joined.
+// the routes its own handshake packets came on, the relays once joined, and
+// ports predicted for its NAT (predictTargets). Once the session runs, the
+// routes the mux knows are left out: they work, and the mux pings them.
 // Before the session is ready it then reads the IPv4 socket for a while.
 func (p *NakamaP2P) sendPunches() {
 	p.mu.Lock()
 	conn, keys := p.conn, p.keys
-	udp4, udp6, relay := p.udp4, p.udp6, p.relay
+	udp4, udp6, relay, udpRelay := p.udp4, p.udp6, p.relay, p.udpRelay
 	remote := append([]P2PCandidate(nil), p.remote...)
 	checks := make([]p2pRoute, 0, len(p.checks))
 	for _, c := range p.checks {
 		checks = append(checks, c.route)
 	}
 	peerID := p.peerID
+	m := p.mux
+	predicted := p.predictTargetsLocked(udp4)
 	p.mu.Unlock()
 	if conn == nil || keys == nil {
 		return
 	}
 	var targets []p2pRoute
 	add := func(r p2pRoute) {
+		if m != nil && m.isKnown(r) {
+			return
+		}
 		for _, t := range targets {
 			if t.equal(r) {
 				return
@@ -819,13 +1483,76 @@ func (p *NakamaP2P) sendPunches() {
 			add(r)
 		}
 	}
+	if udpRelay != nil {
+		add(p2pRoute{path: udpRelay, addr: p2pUDPRelayRouteAddr(udpRelay, peerID)})
+	}
 	if relay != nil {
 		add(p2pRoute{path: relay, addr: p2pRelayAddr{peer: peerID}})
 	}
 	for _, r := range targets {
 		_ = r.send(p.handshakePacket(p2pHello, p2pCheckNonce(keys.handshake, r.addr)))
 	}
+	// Predicted ports are not routes until the peer answers on one, and do
+	// not count against p2pMaxRoutes.
+	for _, r := range predicted {
+		_ = r.send(p.handshakePacket(p2pHello, p2pCheckNonce(keys.handshake, r.addr)))
+	}
 	_ = p.readHandshake()
+}
+
+// predictTargetsLocked returns the predicted ports hellos go to now, when
+// the peer signalled a NAT that maps each destination to a new port: its
+// mappings toward this side come after the last one STUN saw, by its step,
+// on the same address. They go out every p2pSprayInterval, for p2pSprayFor
+// after the peer's signal, while the session has no working direct route:
+// the sequence after the last mapping, and a few random ports around it
+// (the NAT may give ports at random, or others' traffic took some).
+func (p *NakamaP2P) predictTargetsLocked(udp4 *p2pUDPPath) []p2pRoute {
+	nat := p.peerNAT
+	if nat == nil || nat.Type != "symmetric" || udp4 == nil || p.keysAt.IsZero() {
+		return nil
+	}
+	now := time.Now()
+	if now.Sub(p.keysAt) > p2pSprayFor || now.Sub(p.lastSpray) < p2pSprayInterval {
+		return nil
+	}
+	if p.mux != nil {
+		if a := p.mux.activeRoute(); a.valid() && !p2pIsRelay(a.path) {
+			return nil
+		}
+	}
+	ip := net.ParseIP(nat.IP).To4()
+	if ip == nil || nat.Port <= 0 || nat.Port > 65535 {
+		return nil
+	}
+	p.lastSpray = now
+	step := nat.Delta
+	if step == 0 || step > p2pPredictMaxStep || step < -p2pPredictMaxStep {
+		step = 1
+	}
+	var out []p2pRoute
+	add := func(port int) {
+		if port < 1024 || port > 65535 {
+			return
+		}
+		addr := &net.UDPAddr{IP: ip, Port: port}
+		key := p2pAddrKey(addr)
+		if !p.predicted[key] && len(p.predicted) < p2pPredictedKeep {
+			p.predicted[key] = true
+		}
+		out = append(out, p2pRoute{path: udp4, addr: addr})
+	}
+	for k := 1; k <= p2pPredictSeq; k++ {
+		add(nat.Port + k*step)
+	}
+	var rnd [2 * p2pPredictRandom]byte
+	_, _ = rand.Read(rnd[:])
+	center := nat.Port + p2pPredictSeq*step/2
+	for i := 0; i < p2pPredictRandom; i++ {
+		off := int(binary.BigEndian.Uint16(rnd[2*i:])) % (2*p2pPredictSpread + 1)
+		add(center - p2pPredictSpread + off)
+	}
+	return out
 }
 
 // readHandshake reads the IPv4 socket for a short while, until the mux reads
@@ -1014,7 +1741,7 @@ func (p *NakamaP2P) verify(route p2pRoute) bool {
 	if m := p.mux; m != nil {
 		p.mu.Unlock()
 		m.addKnown(route)
-		m.prefer(route)
+		m.consider(route)
 		return true
 	}
 	remote := p.peerIPv4Locked(route)
@@ -1024,7 +1751,15 @@ func (p *NakamaP2P) verify(route p2pRoute) bool {
 		open:       p.openDatagram,
 		heard:      p.confirm,
 		unverified: p.recheck,
+		switched:   p.onSwitch,
+		lost:       p.onLost,
 	})
+	if p.muxProbe > 0 {
+		m.probeInterval = p.muxProbe
+	}
+	if p.muxQuiet > 0 {
+		m.routeQuiet = p.muxQuiet
+	}
 	p.mux = m
 	p.mu.Unlock()
 	log.Printf("Nakama P2P: connected to the other player over %s", route)
@@ -1167,9 +1902,12 @@ func (p *NakamaP2P) Close() {
 	p.closeOnce.Do(func() {
 		close(p.closed)
 		p.mu.Lock()
-		conn, conn6, relay, portMap := p.conn, p.conn6, p.relay, p.portMap
-		p.conn, p.conn6, p.relay, p.portMap = nil, nil, nil, nil
+		conn, conn6, relay, udpRelay, portMap := p.conn, p.conn6, p.relay, p.udpRelay, p.portMap
+		p.conn, p.conn6, p.relay, p.udpRelay, p.portMap = nil, nil, nil, nil, nil
 		p.mu.Unlock()
+		if udpRelay != nil {
+			p2pClosePath(udpRelay)
+		}
 		if conn != nil {
 			_ = conn.Close()
 		}
@@ -1202,18 +1940,54 @@ var (
 	p2pRouteAddress       = routeIPv4Address
 )
 
-// p2pIPv6Addresses lists this machine's global IPv6 addresses for IPv6 host
-// candidates, p2pMapPort asks the router to forward a UDP port to the IPv4
-// socket, p2pUnmapPort closes that port again, and p2pCloseAllPorts closes
-// every port still open (tests replace them).
-var (
-	p2pIPv6Addresses = globalIPv6Addresses
-	p2pMapPort       = func(ctx context.Context, port int) (*portmap.Mapping, error) {
-		return portmap.Map(ctx, port, portmap.Options{Description: "IKEMEN GO netplay", Lifetime: p2pPortMapLifetime, Logf: log.Printf})
+// p2pRouterHooks are how a session reaches the machine's network setup:
+// ipv6 lists this machine's global IPv6 addresses for IPv6 host candidates,
+// mapPort asks the router to forward a UDP port to the IPv4 socket, and
+// unmapPort closes that port again. Tests replace them (setP2PRouterHooks);
+// sessions read them through p2pIPv6Addresses, p2pMapPort and p2pUnmapPort,
+// which load them atomically, so a test's replacement never races with a
+// session still running in the background.
+type p2pRouterHooks struct {
+	ipv6      func() ([]net.IP, error)
+	mapPort   func(ctx context.Context, port int) (*portmap.Mapping, error)
+	unmapPort func(m *portmap.Mapping) error
+}
+
+var p2pRouterHooksNow atomic.Pointer[p2pRouterHooks]
+
+func init() {
+	p2pRouterHooksNow.Store(&p2pRouterHooks{
+		ipv6: globalIPv6Addresses,
+		mapPort: func(ctx context.Context, port int) (*portmap.Mapping, error) {
+			return portmap.Map(ctx, port, portmap.Options{Description: "IKEMEN GO netplay", Lifetime: p2pPortMapLifetime, Logf: log.Printf})
+		},
+		unmapPort: func(m *portmap.Mapping) error { return m.Close() },
+	})
+}
+
+// setP2PRouterHooks replaces the hooks that change (edit gets a copy of the
+// current ones) and returns the previous ones.
+func setP2PRouterHooks(edit func(h *p2pRouterHooks)) *p2pRouterHooks {
+	for {
+		prev := p2pRouterHooksNow.Load()
+		next := *prev
+		edit(&next)
+		if p2pRouterHooksNow.CompareAndSwap(prev, &next) {
+			return prev
+		}
 	}
-	p2pUnmapPort     = func(m *portmap.Mapping) error { return m.Close() }
-	p2pCloseAllPorts = portmap.CloseAll
-)
+}
+
+func p2pIPv6Addresses() ([]net.IP, error) { return p2pRouterHooksNow.Load().ipv6() }
+
+func p2pMapPort(ctx context.Context, port int) (*portmap.Mapping, error) {
+	return p2pRouterHooksNow.Load().mapPort(ctx, port)
+}
+
+func p2pUnmapPort(m *portmap.Mapping) error { return p2pRouterHooksNow.Load().unmapPort(m) }
+
+// p2pCloseAllPorts closes every port still open (tests replace it).
+var p2pCloseAllPorts = portmap.CloseAll
 
 // releaseRouterPorts asks the routers to close the ports P2P sessions had
 // them open (openRouterPort); the game calls it as it exits. A port it cannot
@@ -1372,52 +2146,88 @@ func uniqueCandidates(in []P2PCandidate) []P2PCandidate {
 }
 
 func stunBinding(ctx context.Context, conn *net.UDPConn, server *net.UDPAddr) (*net.UDPAddr, error) {
-	var tx [12]byte
-	if _, err := rand.Read(tx[:]); err != nil {
+	mapped, err := stunBindings(ctx, conn, []*net.UDPAddr{server})
+	if err != nil {
 		return nil, err
 	}
-	request := make([]byte, 20)
-	binary.BigEndian.PutUint16(request[0:2], stunBindingRequest)
-	binary.BigEndian.PutUint16(request[2:4], 0)
-	binary.BigEndian.PutUint32(request[4:8], stunMagicCookie)
-	copy(request[8:20], tx[:])
+	if mapped[0] == nil {
+		return nil, fmt.Errorf("no STUN answer from %s", server)
+	}
+	return mapped[0], nil
+}
+
+// stunBindings asks every server for this socket's mapped address at once,
+// in order, and returns each one's answer (nil for a server that did not
+// answer in time).
+func stunBindings(ctx context.Context, conn *net.UDPConn, servers []*net.UDPAddr) ([]*net.UDPAddr, error) {
+	requests := make([][]byte, len(servers))
+	for i := range servers {
+		request := make([]byte, 20)
+		binary.BigEndian.PutUint16(request[0:2], stunBindingRequest)
+		binary.BigEndian.PutUint16(request[2:4], 0)
+		binary.BigEndian.PutUint32(request[4:8], stunMagicCookie)
+		if _, err := rand.Read(request[8:20]); err != nil {
+			return nil, err
+		}
+		requests[i] = request
+	}
+	mapped := make([]*net.UDPAddr, len(servers))
 	deadline := time.Now().Add(p2pSTUNTimeout)
 	if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
 		deadline = d
 	}
 	defer conn.SetReadDeadline(time.Time{})
 	buf := make([]byte, 4096)
-	// UDP requests get lost; resend until an answer or the overall deadline.
-	for time.Now().Before(deadline) {
-		if _, err := conn.WriteToUDP(request, server); err != nil {
-			return nil, err
+	left := len(servers)
+	settled := false
+	// UDP requests get lost; resend the unanswered ones until the deadline.
+	for left > 0 && time.Now().Before(deadline) {
+		for i, server := range servers {
+			if mapped[i] == nil {
+				if _, err := conn.WriteToUDP(requests[i], server); err != nil {
+					return mapped, err
+				}
+			}
 		}
 		retry := time.Now().Add(p2pSTUNRetry)
 		if retry.After(deadline) {
 			retry = deadline
 		}
 		_ = conn.SetReadDeadline(retry)
-		for {
+		for left > 0 {
 			n, _, err := conn.ReadFromUDP(buf)
 			if err != nil {
 				var ne net.Error
 				if errors.As(err, &ne) && ne.Timeout() {
 					break
 				}
-				return nil, err
+				return mapped, err
 			}
-			if n < 20 || binary.BigEndian.Uint32(buf[4:8]) != stunMagicCookie || !equalBytes(buf[8:20], tx[:]) {
+			if n < 20 || binary.BigEndian.Uint32(buf[4:8]) != stunMagicCookie || binary.BigEndian.Uint16(buf[0:2]) != stunBindingSuccess {
 				continue
 			}
-			if binary.BigEndian.Uint16(buf[0:2]) != stunBindingSuccess {
-				continue
-			}
-			if addr, err := parseSTUNMappedAddress(buf[:n]); err == nil {
-				return addr, nil
+			for i := range servers {
+				if mapped[i] != nil || !equalBytes(buf[8:20], requests[i][8:20]) {
+					continue
+				}
+				if addr, err := parseSTUNMappedAddress(buf[:n]); err == nil {
+					mapped[i] = addr
+					left--
+					if !settled {
+						settled = true
+						if d := time.Now().Add(p2pSTUNSettle); d.Before(deadline) {
+							deadline = d
+							if retry.After(deadline) {
+								retry = deadline
+								_ = conn.SetReadDeadline(retry)
+							}
+						}
+					}
+				}
 			}
 		}
 	}
-	return nil, fmt.Errorf("no STUN answer from %s", server)
+	return mapped, nil
 }
 
 func parseSTUNMappedAddress(packet []byte) (*net.UDPAddr, error) {

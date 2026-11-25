@@ -5,13 +5,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net"
 	"strings"
 	"sync"
 	"testing"
 	"time"
-
-	"github.com/ikemen-engine/Ikemen-GO/src/portmap"
 )
 
 // A matchmade pair whose UDP paths do not work connects through the server's
@@ -34,10 +31,7 @@ func TestNakamaLive_MatchmakerP2PRelayedMatchSession(t *testing.T) {
 func relaySessionLive(t *testing.T, offerServerRelay bool) {
 	// Keep the test off this machine's IPv6 addresses (both clients run
 	// here, and would reach each other over them) and off the real router.
-	prevIPv6, prevMap := p2pIPv6Addresses, p2pMapPort
-	p2pIPv6Addresses = func() ([]net.IP, error) { return nil, nil }
-	p2pMapPort = func(context.Context, int) (*portmap.Mapping, error) { return nil, errors.New("no router in tests") }
-	t.Cleanup(func() { p2pIPv6Addresses, p2pMapPort = prevIPv6, prevMap })
+	noLadderExtras(t)
 
 	a, b := matchPair(t)
 	pa, _ := a.Pairing()

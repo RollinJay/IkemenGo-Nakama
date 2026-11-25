@@ -87,6 +87,11 @@ local function answer(context, state, data, is_pair)
     if user_id == "" or peer_id == "" or user_id == peer_id or not is_pair(user_id, peer_id) then
         return nk.json_encode({ error = "not_paired" })
     end
+    if signal.check == true then
+        -- The RPC only asks whether the match paired the two (for a ticket
+        -- to the UDP relay): no relay match is made.
+        return nk.json_encode({ paired = true })
+    end
     local made, id = pcall(relay_of, state, context.match_id, user_id, peer_id)
     if not made then
         nk.logger_error(string.format("ikemen relay: no relay for %s and %s in %s: %s", user_id, peer_id,
@@ -202,8 +207,61 @@ local function match_signal(context, dispatcher, tick, state, data)
     return state, nil
 end
 
--- ikemen_relay: {match_id, peer_id} -> {match_id}. The relay of the caller and
--- peer_id, whom the session or lobby match_id paired: the session or lobby
+-- The UDP relay (nakama/udp-relay), when the server has one: Nakama's
+-- runtime.env names its address, IKEMEN_UDP_RELAY_ADDR ("host:port", or
+-- ":port" on the Nakama server's host), and the secret it shares with this
+-- module, IKEMEN_UDP_RELAY_SECRET (16 characters or more). The relay forwards
+-- each player's datagrams to the other over UDP, without the websocket's
+-- stutter. A ticket's token joins one side of the pair's session until it
+-- expires (IKEMEN_UDP_RELAY_TTL seconds, default 14400: longer than a lobby
+-- session, since a game whose NAT maps it anew joins again with the same
+-- token); the format is the relay's (nakama/udp-relay/relay/relay.go, Sign).
+-- The answer also carries the TTL, which the game counts from its own clock.
+local UDP_TTL_DEFAULT = 14400
+local UDP_SECRET_MIN = 16
+
+local function udp_config(context)
+    local env = (context and context.env) or {}
+    local addr, secret = env.IKEMEN_UDP_RELAY_ADDR, env.IKEMEN_UDP_RELAY_SECRET
+    if type(addr) ~= "string" or addr == "" or type(secret) ~= "string" or #secret < UDP_SECRET_MIN then
+        return nil
+    end
+    local ttl = tonumber(env.IKEMEN_UDP_RELAY_TTL or "") or UDP_TTL_DEFAULT
+    if ttl < 10 then
+        ttl = UDP_TTL_DEFAULT
+    end
+    return { addr = addr, secret = secret, ttl = math.floor(ttl) }
+end
+
+local function udp_mac(secret, text)
+    return string.lower(nk.base16_encode(nk.hmac_sha256_hash(text, secret)))
+end
+
+-- The ticket of user_id, paired with peer_id by match_id.
+local function udp_ticket(config, match_id, user_id, peer_id)
+    local a, b, side = user_id, peer_id, 0
+    if b < a then
+        a, b, side = peer_id, user_id, 1
+    end
+    local session = string.sub(udp_mac(config.secret, "session|" .. match_id .. "|" .. a .. "|" .. b), 1, 32)
+    local expires = math.floor(nk.time() / 1000) + config.ttl
+    local payload = string.format("v1.%s.%d.%d", session, side, expires)
+    return {
+        addr = config.addr,
+        token = payload .. "." .. udp_mac(config.secret, payload),
+        expires = expires,
+        ttl = config.ttl,
+        session = session,
+    }
+end
+
+-- ikemen_relay: {match_id, peer_id[, udp]} -> {match_id}, or {udp = {addr,
+-- token, expires, ttl, session}} with udp = true on a server with a UDP relay
+-- (udp_config): the session or lobby then only checks the pairing, and the
+-- answer is the caller's ticket to the UDP relay; without one, the answer is
+-- the relay match as without udp, so a game falls back to it at once.
+--
+-- {match_id} is the relay of the caller and peer_id, whom the session or lobby match_id paired: the session or lobby
 -- answers the RPC's signal (see answer above) with the relay it made for the
 -- two before, while that runs, or a new one. Errors: 3 without both ids, 9
 -- when match_id is not a running session or lobby that paired the two, 13 when
@@ -224,14 +282,21 @@ local function rpc_relay(context, payload)
             error({ "match_id and peer_id are required", 3 })
         end
     end
+    local udp = nil
+    if request.udp == true then
+        udp = udp_config(context)
+    end
     local signalled, reply = pcall(nk.match_signal, request.match_id,
-        nk.json_encode({ kind = SIGNAL_KIND, user_id = context.user_id, peer_id = request.peer_id }))
+        nk.json_encode({ kind = SIGNAL_KIND, user_id = context.user_id, peer_id = request.peer_id, check = udp ~= nil }))
     local decoded, result = false, nil
     if signalled then
         decoded, result = pcall(nk.json_decode, reply or "")
     end
     if not decoded or type(result) ~= "table" then
         error({ "match_id is not a session or lobby that is running", 9 })
+    end
+    if udp ~= nil and result.paired == true then
+        return nk.json_encode({ udp = udp_ticket(udp, request.match_id, context.user_id, request.peer_id) })
     end
     if type(result.relay_id) == "string" and result.relay_id ~= "" then
         return nk.json_encode({ match_id = result.relay_id })

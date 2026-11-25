@@ -135,7 +135,7 @@ The player menu (`room.playermenu`) has `mute` (hides that member's chat on this
 | Lobby phase | The room shows |
 |---|---|
 | Before a match (waiting) | The status line says what the lobby waits for: `room.status.text.waithost` (the host has not started play), `notready` (this player is not ready), `waiting` (this player is ready; not enough other members are), `waitall` (a tournament that starts when everyone is ready), or `waitentrant` (a tournament match waits for the named entrant to ready up). |
-| In game (playing) | The in-game panel (`room.match`): both players' names, the time since the match started, the round trip over the players' direct connection once they have measured it and, in winner stays, the champion's streak. The badges show who is playing, who is watching and, in the queue formats, who plays next. |
+| In game (playing) | The in-game panel (`room.match`): both players' names, the time since the match started, the round trip over the players' direct connection once they have measured it and whether that connection runs directly or through the server's relay and, in winner stays, the champion's streak. The badges show who is playing, who is watching and, in the queue formats, who plays next. |
 | Between matches (results) | The results panel (`room.results`) for the lobby's interval: the winner and loser, or "no contest" and why; the next pairing when it is known; a countdown. The status line shows `room.status.text.results` when a next pairing is known and otherwise what the lobby waits for. |
 | Tournament over (finished) | The status line shows `room.status.text.finished` with the winner, or `finishedtie` with the entrants who share the most wins in a round robin. The results panel of the final match uses `room.results.title.text.finished` as its title. The end of a tournament sets every member not ready: members ready up again for the next one. |
 
@@ -319,6 +319,7 @@ Connection bars:
 | `room.match.time` | text | Time since the match started (%d minutes, %02d seconds). |
 | `room.match.streak` | text | Winner stays: the champion's straight wins and name (%d, %s). |
 | `room.match.link.*` | | The players' round trip over their direct connection, once measured: the keys of the connection bars (`thresholds`, `bars`, `offset`, `spacing`, `grow`, `on`, `off`, `directon`, `direct`, `level.<n>`, `text`, `unknown`), relative to `room.match.pos`. By default, bars and `%d MS`. |
+| `room.match.route.text.<key>` | text map | What the players' connection runs over, once their games report it (games and servers with the connection telemetry): `direct` when it runs directly between them, `relay` when it goes through the server's relay, which adds delay. By default `DIRECT` or `RELAY` beside the round trip. |
 | `room.results.pos` | | Position of the results panel. |
 | `room.results.bg` | element | Panel background. |
 | `room.results.title.text.<key>` | text map | `win`, `nocontest`, `finished` (the final of a tournament). |

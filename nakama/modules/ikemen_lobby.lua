@@ -1,5 +1,6 @@
 local nk = require("nakama")
 local p2p_relay = require("ikemen_relay")
+local telemetry = require("ikemen_telemetry")
 
 -- IKEMEN GO authoritative lobby.
 --
@@ -335,6 +336,14 @@ end
 local function link_rtt(state, a, b)
     local link = a ~= nil and b ~= nil and state.links[pair_key(a, b)] or nil
     return link and link.rtt or nil
+end
+
+-- The route of that connection ("direct-srflx", "relay-ws", ...; see
+-- ikemen_telemetry.lua): the lower of the two players' reports, "" when
+-- unknown.
+local function link_route(state, a, b)
+    local link = a ~= nil and b ~= nil and state.links[pair_key(a, b)] or nil
+    return link and link.route or ""
 end
 
 -- For each member, the members they have a measured direct connection with:
@@ -994,6 +1003,10 @@ local function state_payload(state, tick)
             -- The players' direct round trip, and whether the match's stream
             -- has started (members can watch it).
             link = link_rtt(state, p1, p2),
+            -- The route of that connection ("" before reported or from an
+            -- older game), and "direct" or "relay" for it.
+            link_route = link_route(state, p1, p2),
+            link_kind = telemetry.kind(link_route(state, p1, p2)),
             watch = state.stream ~= nil and state.stream.seq == state.match_seq,
         }
     end
@@ -1238,12 +1251,34 @@ local function handle_command(dispatcher, state, tick, sender_id, command)
             return
         end
         rtt = int_in(rtt, 0, 0, LINK_LIMIT_MS)
+        -- The route (and its changes) since the telemetry; an older game
+        -- sends neither, and its pair keeps the route it had.
+        local route = telemetry.route(command.route)
+        local upgrades = telemetry.upgrades(command.upgrades)
         local key = pair_key(sender_id, peer)
         local link = state.links[key]
-        if link == nil or link.rtt ~= rtt then
-            state.links[key] = { a = sender_id, b = peer, rtt = rtt }
+        if link == nil then
+            link = { a = sender_id, b = peer }
+            state.links[key] = link
+        end
+        -- The pair's route: relayed when either player's game is (each
+        -- picks its route on its own).
+        local first = sender_id
+        if peer < sender_id then
+            first = peer
+        end
+        local pair_route = telemetry.combine(link, state.match_seq or 0, sender_id, first, route)
+        if link.rtt ~= rtt or link.route ~= pair_route then
+            link.a, link.b, link.rtt = sender_id, peer, rtt
+            if pair_route ~= "" then
+                link.route = pair_route
+            end
             state.dirty = true
         end
+        -- One log line when the pairing's route is first reported, and one
+        -- when the pair's route changes.
+        telemetry.note(link, "lobby", state.lobby_id, state.match_seq or 0, username_of(state, current.player1),
+            username_of(state, current.player2), pair_route, rtt, upgrades)
     elseif kind == "watching" then
         -- The member is (or stops) watching the current match.
         local watching = command.watching == true
@@ -1449,7 +1484,8 @@ local function match_init(context, params)
         empty_ticks = 0,
         last_result = nil,
         version = 0,
-        -- pair_key -> {a, b, rtt}: direct round trips members reported.
+        -- pair_key -> {a, b, rtt, route}: direct round trips members
+        -- reported, and the route of each (ikemen_telemetry.lua).
         links = {},
         -- The current match's replay stream: {seq, player1, player2, sender,
         -- messages = {{op, data}}}, and the members catching up on it
@@ -1738,6 +1774,9 @@ local function send_backfill(dispatcher, state)
 end
 
 local function match_loop(context, dispatcher, tick, state, messages)
+    if state.lobby_id == nil and context ~= nil then
+        state.lobby_id = context.match_id
+    end
     for _, message in ipairs(messages) do
         local sender_id = message.sender and message.sender.user_id or ""
         if message.op_code == OP_LOBBY_RESULT then
