@@ -267,6 +267,9 @@ type vnet struct {
 	mu      sync.Mutex
 	nats    map[string]*vnat // by public IP
 	blocked atomic.Bool      // drop every datagram (the direct routes break)
+	// dropFrom, when set, is a public IP whose datagrams are dropped: one
+	// direction breaks, the other works.
+	dropFrom atomic.Pointer[string]
 }
 
 // vnat is one player's NAT. A cone NAT keeps one public port for every
@@ -350,6 +353,9 @@ func (x *vnat) stun() {
 
 func (x *vnat) send(b []byte, to *net.UDPAddr) {
 	if x.net.blocked.Load() {
+		return
+	}
+	if d := x.net.dropFrom.Load(); d != nil && *d == x.ip.String() {
 		return
 	}
 	x.net.mu.Lock()
@@ -604,8 +610,8 @@ func TestP2PFallsBackToTheRelayWhenTheDirectRouteGoesQuiet(t *testing.T) {
 	waitRoute(t, a, "direct", 5*time.Second)
 	waitRoute(t, b, "direct", 5*time.Second)
 	cross("direct again")
-	if a.Upgrades() != 3 {
-		t.Fatalf("%d route changes, want 3", a.Upgrades())
+	if a.Upgrades() != 2 {
+		t.Fatalf("%d upgrades, want 2 (the fall back to the relay does not count)", a.Upgrades())
 	}
 }
 
@@ -651,23 +657,26 @@ func TestP2PJoinsTheRelayAgainWhenTheDirectRouteIsLost(t *testing.T) {
 }
 
 // The relay's timer counts from the peer's keys, not from this side's
-// start, and IPv6 and the router's port are tried from the start.
+// start; IPv6 is tried from the start, and the router's port only once no
+// direct route worked within extrasDelay.
 func TestP2PLadderTimersCountFromThePeersKeys(t *testing.T) {
 	noLadderExtras(t)
 	var mu sync.Mutex
 	var ipv6At, mapAt time.Time
-	p2pIPv6Addresses = func() ([]net.IP, error) {
-		mu.Lock()
-		ipv6At = time.Now()
-		mu.Unlock()
-		return nil, nil
-	}
-	p2pMapPort = func(context.Context, int) (*portmap.Mapping, error) {
-		mu.Lock()
-		mapAt = time.Now()
-		mu.Unlock()
-		return nil, errors.New("no router in tests")
-	}
+	stubP2PRouter(t, func(h *p2pRouterHooks) {
+		h.ipv6 = func() ([]net.IP, error) {
+			mu.Lock()
+			ipv6At = time.Now()
+			mu.Unlock()
+			return nil, nil
+		}
+		h.mapPort = func(context.Context, int) (*portmap.Mapping, error) {
+			mu.Lock()
+			mapAt = time.Now()
+			mu.Unlock()
+			return nil, errors.New("no router in tests")
+		}
+	})
 	hub := newFakeRelayHub()
 	p, err := NewNakamaP2P("timer-match", 0, nil)
 	if err != nil {
@@ -677,14 +686,18 @@ func TestP2PLadderTimersCountFromThePeersKeys(t *testing.T) {
 	p.SetPeer("user-a", "user-b")
 	p.SetRelay(hub.relayer("user-a"))
 	p.relayDelay = 200 * time.Millisecond
+	p.extrasDelay = 300 * time.Millisecond
 	start := time.Now()
 	go p.punchLoop()
 	time.Sleep(600 * time.Millisecond)
 	mu.Lock()
 	ipv6, mapped := ipv6At, mapAt
 	mu.Unlock()
-	if ipv6.IsZero() || mapped.IsZero() || ipv6.Sub(start) > 100*time.Millisecond || mapped.Sub(start) > 100*time.Millisecond {
-		t.Fatalf("IPv6 after %v, router after %v; want both from the start", ipv6.Sub(start), mapped.Sub(start))
+	if ipv6.IsZero() || ipv6.Sub(start) > 100*time.Millisecond {
+		t.Fatalf("IPv6 after %v; want it from the start", ipv6.Sub(start))
+	}
+	if mapped.IsZero() || mapped.Sub(start) < p.extrasDelay || mapped.Sub(start) > p.extrasDelay+200*time.Millisecond {
+		t.Fatalf("router asked after %v; want it after the extras delay %v", mapped.Sub(start), p.extrasDelay)
 	}
 	hub.mu.Lock()
 	early := len(hub.joins)

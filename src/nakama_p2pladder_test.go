@@ -101,10 +101,10 @@ func (m *fakeRelayMember) Close() error {
 // addresses and router.
 func noLadderExtras(t *testing.T) {
 	t.Helper()
-	prevIPv6, prevMap := p2pIPv6Addresses, p2pMapPort
-	p2pIPv6Addresses = func() ([]net.IP, error) { return nil, nil }
-	p2pMapPort = func(context.Context, int) (*portmap.Mapping, error) { return nil, errors.New("no router in tests") }
-	t.Cleanup(func() { p2pIPv6Addresses, p2pMapPort = prevIPv6, prevMap })
+	stubP2PRouter(t, func(h *p2pRouterHooks) {
+		h.ipv6 = func() ([]net.IP, error) { return nil, nil }
+		h.mapPort = func(context.Context, int) (*portmap.Mapping, error) { return nil, errors.New("no router in tests") }
+	})
 }
 
 // deadUDPPort is a localhost port nothing listens on: datagrams to it are
@@ -343,7 +343,9 @@ func TestP2PLadderConnectsOverIPv6(t *testing.T) {
 	probe.Close()
 	noLadderExtras(t)
 	// Stand-ins for global addresses: the loopback reaches the other peer.
-	p2pIPv6Addresses = func() ([]net.IP, error) { return []net.IP{net.IPv6loopback}, nil }
+	stubP2PRouter(t, func(h *p2pRouterHooks) {
+		h.ipv6 = func() ([]net.IP, error) { return []net.IP{net.IPv6loopback}, nil }
+	})
 	a, b := ladderPair(t, nil)
 	go a.punchLoop()
 	go b.punchLoop()
@@ -382,10 +384,12 @@ func TestP2PLadderOffersTheRouterPort(t *testing.T) {
 	noLadderExtras(t)
 	var mapped sync.WaitGroup
 	mapped.Add(1)
-	p2pMapPort = func(_ context.Context, port int) (*portmap.Mapping, error) {
-		defer mapped.Done()
-		return &portmap.Mapping{Method: "upnp", ExternalIP: net.ParseIP("203.0.113.9"), ExternalPort: port + 1, InternalPort: port}, nil
-	}
+	stubP2PRouter(t, func(h *p2pRouterHooks) {
+		h.mapPort = func(_ context.Context, port int) (*portmap.Mapping, error) {
+			defer mapped.Done()
+			return &portmap.Mapping{Method: "upnp", ExternalIP: net.ParseIP("203.0.113.9"), ExternalPort: port + 1, InternalPort: port}, nil
+		}
+	})
 	signals := make(chan P2PSignal, 16)
 	p, err := NewNakamaP2P("map-match", 0, func(s P2PSignal) error { signals <- s; return nil })
 	if err != nil {
@@ -1130,25 +1134,26 @@ func TestP2PClosesTheRouterPort(t *testing.T) {
 	noLadderExtras(t)
 	var mu sync.Mutex
 	var closed []*portmap.Mapping
-	prevUnmap := p2pUnmapPort
-	p2pUnmapPort = func(m *portmap.Mapping) error {
-		mu.Lock()
-		closed = append(closed, m)
-		mu.Unlock()
-		return nil
-	}
-	t.Cleanup(func() { p2pUnmapPort = prevUnmap })
+	stubP2PRouter(t, func(h *p2pRouterHooks) {
+		h.unmapPort = func(m *portmap.Mapping) error {
+			mu.Lock()
+			closed = append(closed, m)
+			mu.Unlock()
+			return nil
+		}
+	})
 	closedNow := func() []*portmap.Mapping {
 		mu.Lock()
 		defer mu.Unlock()
 		return append([]*portmap.Mapping(nil), closed...)
 	}
 	var granted []*portmap.Mapping
-	p2pMapPort = func(_ context.Context, port int) (*portmap.Mapping, error) {
+	grant := func(_ context.Context, port int) (*portmap.Mapping, error) {
 		m := &portmap.Mapping{Method: "pcp", ExternalIP: net.ParseIP("203.0.113.9"), ExternalPort: port, InternalPort: port}
 		granted = append(granted, m)
 		return m, nil
 	}
+	stubP2PRouter(t, func(h *p2pRouterHooks) { h.mapPort = grant })
 
 	// Granted while the handshake goes on: the session keeps it until it
 	// closes.
@@ -1204,11 +1209,12 @@ func TestP2PClosesTheRouterPort(t *testing.T) {
 	// Granted after the session closed (the player gave up while the router
 	// answered): closed at once.
 	c, _ := signedPair(t)
-	grant := p2pMapPort
-	p2pMapPort = func(ctx context.Context, port int) (*portmap.Mapping, error) {
-		c.Close()
-		return grant(ctx, port)
-	}
+	stubP2PRouter(t, func(h *p2pRouterHooks) {
+		h.mapPort = func(ctx context.Context, port int) (*portmap.Mapping, error) {
+			c.Close()
+			return grant(ctx, port)
+		}
+	})
 	c.openRouterPort()
 	if got := closedNow(); len(granted) != 4 || len(got) != 4 || got[3] != granted[3] {
 		t.Fatalf("closed %v; want the port granted after the session closed closed at once", got)

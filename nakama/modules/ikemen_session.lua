@@ -572,8 +572,9 @@ local function match_leave(context, dispatcher, tick, state, presences)
 end
 
 -- A player's "link" report: the route of the players' P2P session. One log
--- line when the route is first known and when it changes; the pairing is
--- named by the session's set number (1 outside ranked play).
+-- line when the pair's route (the lower of the two players' reports) is
+-- first known and when it changes; the pairing is named by the session's set
+-- number (1 outside ranked play).
 local function note_link(state, message)
     local sender_id = message.sender and message.sender.user_id or ""
     local ok, command = pcall(nk.json_decode, message.data or "{}")
@@ -602,10 +603,11 @@ local function note_link(state, message)
         link = {}
         state.links[key] = link
     end
-    link.route = route
+    -- The pair's route: relayed when either player's game is.
+    link.route = telemetry.combine(link, state.set_no or 1, sender_id, a, route)
     local rtt = math.max(0, math.min(9999, math.floor(tonumber(command.rtt) or 0)))
     telemetry.note(link, "session", state.match_id, state.set_no or 1, state.players[a].username or a,
-        state.players[b].username or b, route, rtt, telemetry.upgrades(command.upgrades))
+        state.players[b].username or b, link.route, rtt, telemetry.upgrades(command.upgrades))
 end
 
 local function match_loop(context, dispatcher, tick, state, messages)

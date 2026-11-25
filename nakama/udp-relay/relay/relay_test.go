@@ -48,8 +48,21 @@ func (r *testRelay) take() []sent {
 	return out
 }
 
+// join joins side of the test session from from, through the cookie
+// exchange when the relay asks for it; the answers after the cookie stay in
+// r.out.
 func (r *testRelay) join(side int, from netip.AddrPort) {
-	r.Handle(append([]byte{MsgJoin}, Sign(testSecret, r.sess, side, r.now.Unix()+60)...), from)
+	r.joinToken(Sign(testSecret, r.sess, side, r.now.Unix()+60), from)
+}
+
+func (r *testRelay) joinToken(token string, from netip.AddrPort) {
+	before := len(r.out)
+	r.Handle(append([]byte{MsgJoin}, token...), from)
+	if len(r.out) == before+1 && r.out[before].b[0] == MsgCookie && r.out[before].to == from {
+		cookie := r.out[before].b[1:]
+		r.out = r.out[:before]
+		r.Handle([]byte(string(MsgJoin)+token+"|"+string(cookie)), from)
+	}
 }
 
 var (
@@ -150,7 +163,8 @@ func TestPairingAndForwarding(t *testing.T) {
 // No answer is ever larger than what it answers.
 func TestNoAmplification(t *testing.T) {
 	r := newTestRelay(t, Config{})
-	inputs := [][]byte{{MsgJoin}, {MsgJoin, 'x'}, []byte("Jv1.bad"), {MsgData}, {MsgData, 1}, {MsgKeepalive}, {'?', 1, 2}}
+	inputs := [][]byte{{MsgJoin}, {MsgJoin, 'x'}, []byte("Jv1.bad"), {MsgData}, {MsgData, 1}, {MsgKeepalive}, {MsgKeepalive, 0}, {'?', 1, 2},
+		append([]byte{MsgJoin}, Sign(testSecret, r.sess, 0, r.now.Unix()+60)...)}
 	for _, in := range inputs {
 		r.Handle(in, addrX)
 		for _, o := range r.take() {
@@ -230,7 +244,7 @@ func TestIdleAndCapacity(t *testing.T) {
 	}
 	// The relay is full: another session is refused.
 	other := SessionID(testSecret, "other.node", "c", "d")
-	r.Handle(append([]byte{MsgJoin}, Sign(testSecret, other, 0, r.now.Unix()+60)...), addrX)
+	r.joinToken(Sign(testSecret, other, 0, r.now.Unix()+60), addrX)
 	if out := r.take(); len(out) != 1 || !bytes.Equal(out[0].b, []byte{MsgError, ErrFull}) {
 		t.Fatalf("join of a full relay: %v", out)
 	}
@@ -246,8 +260,141 @@ func TestAnswerRate(t *testing.T) {
 	for i := 0; i < 10; i++ {
 		r.Handle([]byte("Jforged"), addrX)
 	}
-	if n := len(r.take()); n != 3 {
-		t.Fatalf("answered %d of 10 forged joins at 3/s", n)
+	if n := len(r.take()); n != 6 {
+		t.Fatalf("answered %d of 10 forged joins at 3/s, burst 6", n)
+	}
+}
+
+// Junk from one place (a flood of data and forged joins) uses up only that
+// place's answers: a valid join from elsewhere is still answered, and so is
+// a valid join from the flooded prefix.
+func TestJunkDoesNotStarveJoins(t *testing.T) {
+	r := newTestRelay(t, Config{})
+	for i := 0; i < 5000; i++ {
+		r.Handle([]byte("Djunk"), addrX)
+		r.Handle([]byte("Jforged"), addrX)
+	}
+	if n := len(r.take()); n > 10 {
+		t.Fatalf("answered %d junk datagrams from one address", n)
+	}
+	r.join(0, addrA)
+	if out := r.take(); len(out) != 1 || !bytes.Equal(out[0].b, []byte{MsgAck, StateWaiting}) {
+		t.Fatalf("a valid join during the flood: %v", out)
+	}
+	sameNet := netip.MustParseAddrPort("203.0.113.10:7000")
+	r.join(1, sameNet)
+	if out := r.take(); len(out) < 1 || !bytes.Equal(out[len(out)-1].b, []byte{MsgAck, StatePaired}) {
+		t.Fatalf("a valid join from the flooded prefix: %v", out)
+	}
+	// Many prefixes: the relay counts at most MaxPrefixes.
+	r2 := newTestRelay(t, Config{MaxPrefixes: 4})
+	for i := 0; i < 50; i++ {
+		r2.Handle([]byte("Djunk"), netip.AddrPortFrom(netip.AddrFrom4([4]byte{10, byte(i), 0, 1}), 9))
+	}
+	if n := len(r2.prefixes); n != 4 {
+		t.Fatalf("%d prefixes counted, want 4", n)
+	}
+	r2.now = r2.now.Add(11 * time.Second)
+	r2.Sweep()
+	if n := len(r2.prefixes); n != 0 {
+		t.Fatalf("%d prefixes left after a quiet spell", n)
+	}
+}
+
+// A join from an address must prove the address before it counts: a join
+// with a valid token from a forged source only gets the cookie, sent to that
+// source, and moves nothing; a cookie made for one address does not join
+// from another.
+func TestJoinProvesTheAddress(t *testing.T) {
+	r := newTestRelay(t, Config{})
+	r.join(0, addrA)
+	r.join(1, addrB)
+	r.take()
+	victim := netip.MustParseAddrPort("192.0.2.200:80")
+	token := Sign(testSecret, r.sess, 0, r.now.Unix()+60)
+	join := append([]byte{MsgJoin}, token...)
+	r.Handle(join, victim)
+	out := r.take()
+	if len(out) != 1 || out[0].to != victim || out[0].b[0] != MsgCookie || len(out[0].b) != 1+CookieLen || len(out[0].b) >= len(join) {
+		t.Fatalf("a join from a new address: %v", out)
+	}
+	// The side stays where it proved it was.
+	r.Handle([]byte("Dto a"), addrB)
+	if out := r.take(); len(out) != 1 || out[0].to != addrA {
+		t.Fatalf("data after a forged join went to %v", out)
+	}
+	// A cookie for another address does not prove this one.
+	r.Handle([]byte("J"+token+"|"+string(out[0].b[1:])), addrX)
+	if out := r.take(); len(out) != 1 || out[0].b[0] != MsgCookie || out[0].to != addrX {
+		t.Fatalf("a borrowed cookie: %v", out)
+	}
+	// An old cookie stops working.
+	cookie := string(r.Server.cookie(addrA2, r.now.Unix()/cookieWindow))
+	r.now = r.now.Add(2 * cookieWindow * time.Second)
+	r.Handle([]byte("J"+Sign(testSecret, r.sess, 0, r.now.Unix()+60)+"|"+cookie), addrA2)
+	if out := r.take(); len(out) != 1 || out[0].b[0] != MsgCookie {
+		t.Fatalf("a stale cookie: %v", out)
+	}
+	// The same side joining again from its address needs no cookie.
+	r.Handle(append([]byte{MsgJoin}, Sign(testSecret, r.sess, 0, r.now.Unix()+60)...), addrA)
+	if out := r.take(); len(out) != 1 || !bytes.Equal(out[0].b, []byte{MsgAck, StatePaired}) {
+		t.Fatalf("a rejoin from the same address: %v", out)
+	}
+}
+
+// An address that holds an active side of one session cannot be taken over
+// by a join for another session, even with a cookie: it is refused, and the
+// side stays. Once the side went quiet, the address moves on.
+func TestJoinDoesNotKickAnotherSession(t *testing.T) {
+	r := newTestRelay(t, Config{})
+	r.join(0, addrA)
+	r.join(1, addrB)
+	r.take()
+	other := SessionID(testSecret, "other.node", "c", "d")
+	r.joinToken(Sign(testSecret, other, 0, r.now.Unix()+60), addrA)
+	if out := r.take(); len(out) != 1 || !bytes.Equal(out[0].b, []byte{MsgError, ErrAddrInUse}) {
+		t.Fatalf("a join for another session from an active address: %v", out)
+	}
+	r.Handle([]byte("Dstill a"), addrB)
+	if out := r.take(); len(out) != 1 || out[0].to != addrA || string(out[0].b) != "Dstill a" {
+		t.Fatalf("the side was kicked: %v", out)
+	}
+	r.now = r.now.Add(addrReclaimIdle + time.Second)
+	r.Handle([]byte{MsgKeepalive, 0}, addrB)
+	r.take()
+	r.joinToken(Sign(testSecret, other, 0, r.now.Unix()+60), addrA)
+	if out := r.take(); len(out) != 1 || !bytes.Equal(out[0].b, []byte{MsgAck, StateWaiting}) {
+		t.Fatalf("a join from an address whose side went quiet: %v", out)
+	}
+	r.Handle([]byte("Dto a"), addrB)
+	if out := r.take(); len(out) != 0 {
+		t.Fatalf("data for the side that went away: %v", out)
+	}
+}
+
+// A 2-byte keepalive is answered with the side's state, or, from an address
+// that has not joined, with the word to join again.
+func TestKeepaliveAnswers(t *testing.T) {
+	r := newTestRelay(t, Config{})
+	r.join(0, addrA)
+	r.take()
+	r.Handle([]byte{MsgKeepalive, 0}, addrA)
+	if out := r.take(); len(out) != 1 || !bytes.Equal(out[0].b, []byte{MsgAck, StateWaiting}) {
+		t.Fatalf("keepalive alone: %v", out)
+	}
+	r.join(1, addrB)
+	r.take()
+	r.Handle([]byte{MsgKeepalive, 0}, addrA)
+	if out := r.take(); len(out) != 1 || !bytes.Equal(out[0].b, []byte{MsgAck, StatePaired}) {
+		t.Fatalf("keepalive paired: %v", out)
+	}
+	r.Handle([]byte{MsgKeepalive, 0}, addrX)
+	if out := r.take(); len(out) != 1 || !bytes.Equal(out[0].b, []byte{MsgError, ErrNotJoined}) {
+		t.Fatalf("keepalive from a stranger: %v", out)
+	}
+	r.Handle([]byte{MsgKeepalive}, addrX)
+	if out := r.take(); len(out) != 0 {
+		t.Fatalf("1-byte keepalive answered: %v", out)
 	}
 }
 
@@ -270,7 +417,15 @@ func TestServeUDP(t *testing.T) {
 			t.Fatal(err)
 		}
 		t.Cleanup(func() { c.Close() })
-		_, _ = c.Write(append([]byte{MsgJoin}, Sign(testSecret, sess, side, time.Now().Unix()+60)...))
+		token := Sign(testSecret, sess, side, time.Now().Unix()+60)
+		_, _ = c.Write(append([]byte{MsgJoin}, token...))
+		buf := make([]byte, 100)
+		_ = c.SetReadDeadline(time.Now().Add(2 * time.Second))
+		n, err := c.Read(buf)
+		if err != nil || n != 1+CookieLen || buf[0] != MsgCookie {
+			t.Fatalf("no cookie: %q %v", buf[:n], err)
+		}
+		_, _ = c.Write([]byte(string(MsgJoin) + token + "|" + string(buf[1:n])))
 		return c
 	}
 	read := func(c *net.UDPConn) []byte {

@@ -19,9 +19,16 @@ What it does not do:
 
 - It never reads the payloads: the games seal them end to end, so the relay
   cannot read or change them.
-- It forwards only to addresses that proved they hold a token, forwards what it
-  gets byte for byte, and answers anything else with at most 2 bytes (never
-  more than it got): it is no amplifier.
+- It forwards only to addresses that proved they hold a token and receive at
+  that address (a join from a new address is answered with a cookie the game
+  must send back), forwards what it gets byte for byte, and never answers with
+  more bytes than it got: it is no amplifier, and a forged source address can
+  neither take over a player's side nor point the relay's stream at a victim.
+- Answers are limited per source /24 (or /64): 5 a second to datagrams without
+  a valid token, 50 a second to joins with one, and 20 a second within a
+  session, so junk from one place cannot starve everybody else's joins.
+- An address that holds an active side of one session cannot join another
+  (it is refused until that side has been silent for 15 seconds).
 - Each side may send at most 500 datagrams and 256 KB a second (a fight sends
   about 125 and a few KB); more is dropped. A side silent for 60 seconds is
   forgotten. At most 4096 sessions at once.
@@ -58,7 +65,7 @@ It uses only Go's standard library, so it cross-compiles anywhere
      env:
        - "IKEMEN_UDP_RELAY_ADDR=:17360"      # ":port" = the Nakama host's address as the games know it
        - "IKEMEN_UDP_RELAY_SECRET=<the secret>"
-       # - "IKEMEN_UDP_RELAY_TTL=300"        # seconds a ticket can join (default 300)
+       # - "IKEMEN_UDP_RELAY_TTL=14400"      # seconds a ticket can join (default 14400, 4 hours)
    ```
 
    `IKEMEN_UDP_RELAY_ADDR` can also be `relay.example.com:17360` when the relay
@@ -107,11 +114,22 @@ journalctl --user -u ikemen-udp-relay -f
 
 ## Protocol
 
-Every datagram starts with a type byte. Game to relay: `J` + token (join, or
-join again from a new address), `D` + datagram (for the other side), `K`
-(keepalive). Relay to game: `A` + state (1 waiting for the other side,
-2 paired), `E` + code (1 bad token, 2 expired, 3 relay full, 4 this address
-has not joined: join again), `D` + datagram.
+Every datagram starts with a type byte. Game to relay: `J` + token [+ `|` +
+cookie] (join, or join again from a new address), `D` + datagram (for the
+other side), `K` + 0 (keepalive). Relay to game: `C` + cookie (32 hex digits:
+join again with it, from the same address; good for 30 to 60 seconds), `A` +
+state (1 waiting for the other side, 2 paired; also the answer to a
+keepalive), `E` + code (1 bad token, 2 expired, 3 relay full, 4 this address
+has not joined: join again, 5 this address holds another session's side),
+`D` + datagram. A join from the address the side already holds needs no
+cookie.
+
+The game sends a keepalive when nothing went out or came in for 5 seconds; a
+game that heard nothing from the relay for 20 seconds, or whose rejoin was
+refused (its ticket expired), drops the path and asks the server for a new
+ticket. The ticket's expiry is checked by the relay only, on the server's
+clock; the server also sends the TTL, which the game counts from its own
+clock.
 
 A token is `v1.<session>.<side>.<expires>.<mac>`: the session is the first
 32 hex digits of HMAC-SHA256(secret, `session|<match id>|<lesser user

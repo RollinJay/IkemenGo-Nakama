@@ -87,9 +87,11 @@ func TestTelemetryModulesParse(t *testing.T) {
 	}
 }
 
-// The lobby keeps the route of the current pairing, shows it in its state
-// and logs one line when the pairing's route is first reported and one when
-// it changes, whichever player reports it.
+// The lobby keeps each player's report of the current pairing's route; the
+// pair's route, which it shows and logs, is the lower of the two (relayed
+// while either side is), so it does not flip with whoever reported last. It
+// logs one line when the pair's route is first known and one when it
+// changes, at most 12 a pairing.
 func TestTelemetryLobbyLogsEachPairingsRoute(t *testing.T) {
 	m := loadRelayLua(t)
 	m.run(t, `
@@ -131,22 +133,41 @@ check(cur ~= nil and cur.link == 40 and cur.link_route == "" and cur.link_kind =
 cur = send_link("a", '{"kind":"link","peer":"b","rtt":90,"route":"relay-ws","upgrades":0}')
 check(cur ~= nil and cur.link_route == "relay-ws" and cur.link_kind == "relay", "relay report")
 send_link("b", '{"kind":"link","peer":"a","rtt":91,"route":"relay-ws","upgrades":0}')
+-- b moved off the relay, a not yet: the pair still counts as relayed.
 cur = send_link("b", '{"kind":"link","peer":"a","rtt":30,"route":"direct-prflx","upgrades":1}')
-check(cur ~= nil and cur.link_route == "direct-prflx" and cur.link_kind == "direct" and cur.link == 30, "direct report")
-send_link("a", '{"kind":"link","peer":"b","rtt":31,"route":"direct-prflx","upgrades":1}')
+check(cur ~= nil and cur.link_route == "relay-ws" and cur.link_kind == "relay" and cur.link == 30, "asymmetric report: %s", require("nakama").json_encode(cur or {}))
+cur = send_link("a", '{"kind":"link","peer":"b","rtt":31,"route":"direct-srflx","upgrades":1}')
+check(cur ~= nil and cur.link_route == "direct-srflx" and cur.link_kind == "direct" and cur.link == 31, "direct report")
+-- Both direct, named differently: the lesser user id's name holds, whoever
+-- reports.
+cur = send_link("b", '{"kind":"link","peer":"a","rtt":30,"route":"direct-prflx","upgrades":1}')
+check(cur == nil or cur.link_route == "direct-srflx", "the name flipped: %s", require("nakama").json_encode(cur or {}))
 -- Not playing, or not a route: ignored.
 send_link("c", '{"kind":"link","peer":"a","rtt":31,"route":"direct-host"}')
 send_link("a", '{"kind":"link","peer":"b","rtt":31,"route":"Direct host\nfake"}')
 -- The next pairing of the same players logs again.
 lstate.match_seq = 5
 send_link("b", '{"kind":"link","peer":"a","rtt":30,"route":"direct-prflx","upgrades":0}')
+-- A route that keeps flapping writes 12 lines, and one that says so.
+lstate.match_seq = 6
+for i = 1, 20 do
+    local r = "relay-ws"
+    if i % 2 == 0 then r = "direct-host" end
+    send_link("a", '{"kind":"link","peer":"b","rtt":30,"route":"' .. r .. '","upgrades":0}')
+end
 `)
-	if n := m.logged("logger_info", "ikemen lobby: pairing"); n != 3 {
+	if n := m.logged("logger_info", "ikemen lobby: pairing seq=6"); n != 13 {
+		t.Fatalf("%d lines for the flapping pairing, want 13: %q", n, m.logs)
+	}
+	if m.logged("logger_info", "ikemen lobby: pairing seq=6 a-b route keeps changing") != 1 {
+		t.Fatalf("no line about the flapping route: %q", m.logs)
+	}
+	if n := m.logged("logger_info", "ikemen lobby: pairing seq=4") + m.logged("logger_info", "ikemen lobby: pairing seq=5"); n != 3 {
 		t.Fatalf("%d lines, want 3: %q", n, m.logs)
 	}
 	for _, line := range []string{
 		"ikemen lobby: pairing seq=4 a-b route=relay-ws rtt=90 upgrades=0 id=lobby.node",
-		"ikemen lobby: pairing seq=4 a-b route=direct-prflx rtt=30 upgrades=1 id=lobby.node",
+		"ikemen lobby: pairing seq=4 a-b route=direct-srflx rtt=31 upgrades=1 id=lobby.node",
 		"ikemen lobby: pairing seq=5 a-b route=direct-prflx rtt=30 upgrades=0 id=lobby.node",
 	} {
 		if m.logged("logger_info", line) != 1 {
@@ -176,6 +197,7 @@ check(send("a", '{"kind":"link","peer":"b","rtt":40}') == 0, "an older report wa
 check(send("a", '{"kind":"link","peer":"b","rtt":80,"route":"relay-udp","upgrades":0}') == 0, "a report was passed on")
 send("b", '{"kind":"link","peer":"a","rtt":81,"route":"relay-udp","upgrades":0}')
 send("b", '{"kind":"link","peer":"a","rtt":20,"route":"direct-srflx","upgrades":1}')
+send("a", '{"kind":"link","peer":"b","rtt":21,"route":"direct-srflx","upgrades":1}')
 send("a", '{"kind":"link","peer":"stranger","rtt":20,"route":"direct-host"}')
 check(send("a", "other", 7) == 1, "other data was not passed on")
 `)
@@ -184,7 +206,7 @@ check(send("a", "other", 7) == 1, "other data was not passed on")
 	}
 	for _, line := range []string{
 		"ikemen session: pairing seq=1 a-b route=relay-udp rtt=80 upgrades=0 id=session.node",
-		"ikemen session: pairing seq=1 a-b route=direct-srflx rtt=20 upgrades=1 id=session.node",
+		"ikemen session: pairing seq=1 a-b route=direct-srflx rtt=21 upgrades=1 id=session.node",
 	} {
 		if m.logged("logger_info", line) != 1 {
 			t.Errorf("missing %q in %q", line, m.logs)

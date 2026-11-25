@@ -22,8 +22,9 @@ import (
 // relay forwards each one's data to the other. The datagrams are sealed
 // (p2pCrypt) like on every path: the relay cannot read or change them.
 //
-// Wire format (nakama/udp-relay/relay): game -> relay 'J'+token (join),
-// 'D'+datagram, 'K' (keepalive); relay -> game 'A'+state (1 waiting,
+// Wire format (nakama/udp-relay/relay): game -> relay 'J'+token['|'+cookie]
+// (join), 'D'+datagram, 'K'+0 (keepalive); relay -> game 'C'+cookie (join
+// again with it: the address must prove it receives), 'A'+state (1 waiting,
 // 2 paired), 'E'+code (refused), 'D'+datagram.
 
 const (
@@ -32,24 +33,35 @@ const (
 	udpRelayMsgKeepalive = 'K'
 	udpRelayMsgAck       = 'A'
 	udpRelayMsgError     = 'E'
+	udpRelayMsgCookie    = 'C'
 	udpRelayStatePaired  = 2
 	udpRelayErrNotJoined = 4
+	udpRelayCookieLen    = 32
 
 	// udpRelayDialTimeout bounds the wait for the relay's first answer.
 	udpRelayDialTimeout = 3 * time.Second
 	// udpRelayJoinEvery: joins are sent again this often until the other
-	// side is there too (a join can be lost), and udpRelayKeepEvery keeps
-	// the NAT's mapping and the relay's side alive after.
-	udpRelayJoinEvery = 300 * time.Millisecond
-	udpRelayKeepEvery = 5 * time.Second
+	// side is there too (a join can be lost), for udpRelayJoinFastFor, and
+	// every udpRelayJoinSlow after; udpRelayKeepEvery keeps the NAT's
+	// mapping and the relay's side alive after. The relay answers
+	// keepalives and joins: a path that heard nothing from the relay for
+	// udpRelayDeadAfter is dead (the relay forgot it, or went away), and the
+	// session asks for a new ticket (NakamaP2P.joinRelay).
+	udpRelayJoinEvery   = 300 * time.Millisecond
+	udpRelayJoinFastFor = 10 * time.Second
+	udpRelayJoinSlow    = 2 * time.Second
+	udpRelayKeepEvery   = 5 * time.Second
+	udpRelayDeadAfter   = 20 * time.Second
 	// udpRelayMaxDatagram: the relay forwards at most 2048 bytes.
 	udpRelayMaxDatagram = 2048
 	udpRelayMaxToken    = 256
 )
 
 // udpRelayTicket is the server's leave to use the UDP relay: its address,
-// the token that joins this player's side of the session until Expires (Unix
-// seconds), the other player (Peer) and the session's id.
+// the token that joins this player's side of the session until about Expires
+// (Unix seconds on this machine's clock: the server's TTL counted from when
+// its answer arrived), the other player (Peer) and the session's id. The
+// relay decides when the token expires; Expires is only informative.
 type udpRelayTicket struct {
 	Addr    string
 	Token   string
@@ -85,14 +97,16 @@ func (n *NakamaClient) RequestUDPRelay(matchID, peer string) (udpRelayTicket, er
 }
 
 // parseUDPRelayReply reads the RPC's answer {udp: {addr, token, expires,
-// session}}. An addr without a host (":17360") is on the Nakama server's
-// host (serverHost).
+// ttl, session}}. An addr without a host (":17360") is on the Nakama
+// server's host (serverHost). The client's clock may be off, so a ticket is
+// never refused for its expiry here: the relay checks it.
 func parseUDPRelayReply(body []byte, peer, serverHost string, now time.Time) (udpRelayTicket, error) {
 	var reply struct {
 		UDP *struct {
 			Addr    string          `json:"addr"`
 			Token   string          `json:"token"`
 			Expires json.RawMessage `json:"expires"`
+			TTL     json.RawMessage `json:"ttl"`
 			Session string          `json:"session"`
 		} `json:"udp"`
 	}
@@ -116,8 +130,8 @@ func parseUDPRelayReply(body []byte, peer, serverHost string, now time.Time) (ud
 		host = serverHost
 	}
 	t := udpRelayTicket{Addr: net.JoinHostPort(host, port), Token: u.Token, Expires: int64(exp), Peer: peer, Session: u.Session}
-	if t.Expires <= now.Unix() {
-		return udpRelayTicket{}, errors.New("the server's UDP relay ticket has expired already (is the clock right?)")
+	if ttl, err := strconv.ParseFloat(string(u.TTL), 64); err == nil && ttl > 0 {
+		t.Expires = now.Unix() + int64(ttl)
 	}
 	return t, nil
 }
@@ -145,6 +159,12 @@ type p2pUDPRelayPath struct {
 	done     chan struct{}
 	once     sync.Once
 	sent     atomic.Int64 // unix nanoseconds of the last datagram sent
+	recv     atomic.Int64 // unix nanoseconds of the last datagram from the relay
+	// unpairedAt is when the path last found itself without the other side
+	// (unix nanoseconds): joins go out often at first, then less.
+	unpairedAt atomic.Int64
+	// deadWhy says why the path died (isDead), once.
+	deadWhy atomic.Pointer[string]
 }
 
 // dialUDPRelay joins the UDP relay with ticket t, and returns the path once
@@ -181,6 +201,9 @@ func dialUDPRelayPath(t udpRelayTicket, onPacket func([]byte)) (*p2pUDPRelayPath
 	}
 	join := append([]byte{udpRelayMsgJoin}, t.Token...)
 	p.join = join
+	now := time.Now().UnixNano()
+	p.recv.Store(now)
+	p.unpairedAt.Store(now)
 	go p.read()
 	deadline := time.NewTimer(udpRelayDialTimeout)
 	defer deadline.Stop()
@@ -213,6 +236,26 @@ func (p *p2pUDPRelayPath) routeAddr() net.Addr { return p2pUDPRelayAddr{session:
 
 // isPaired reports whether the other side has joined the relay too.
 func (p *p2pUDPRelayPath) isPaired() bool { return p.paired.Load() }
+
+// isDead reports whether the path stopped working for good: closed, refused
+// by the relay (its ticket expired, or the relay is full), or the relay went
+// silent for udpRelayDeadAfter. The session then needs a new ticket.
+func (p *p2pUDPRelayPath) isDead() bool {
+	select {
+	case <-p.done:
+		return true
+	default:
+		return false
+	}
+}
+
+// die ends the path, saying why once.
+func (p *p2pUDPRelayPath) die(why string) {
+	if p.deadWhy.CompareAndSwap(nil, &why) {
+		log.Printf("Nakama P2P: the UDP relay path stopped: %s", why)
+	}
+	p.close()
+}
 
 func (p *p2pUDPRelayPath) write(b []byte, _ net.Addr) error {
 	select {
@@ -257,24 +300,45 @@ func (p *p2pUDPRelayPath) read() {
 		if n < 2 || n > udpRelayMaxDatagram {
 			continue
 		}
+		p.recv.Store(time.Now().UnixNano())
 		switch buf[0] {
 		case udpRelayMsgData:
 			if p.onPacket != nil {
 				p.onPacket(append([]byte(nil), buf[1:n]...))
 			}
+		case udpRelayMsgCookie:
+			// The relay asks this address to prove it receives: the join
+			// again, with the cookie.
+			if n == 1+udpRelayCookieLen {
+				out := make([]byte, 0, len(p.join)+1+udpRelayCookieLen)
+				out = append(append(append(out, p.join...), '|'), buf[1:n]...)
+				_, _ = p.conn.Write(out)
+			}
 		case udpRelayMsgAck:
-			if buf[1] == udpRelayStatePaired && !p.paired.Swap(true) {
-				log.Printf("Nakama P2P: the other player joined the UDP relay")
+			if buf[1] == udpRelayStatePaired {
+				if !p.paired.Swap(true) {
+					log.Printf("Nakama P2P: the other player joined the UDP relay")
+				}
+			} else if p.paired.Swap(false) {
+				// The relay forgot the other side (it left, or idled).
+				p.unpairedAt.Store(time.Now().UnixNano())
 			}
 			ackOnce.Do(func() { close(p.acked) })
 		case udpRelayMsgError:
 			if buf[1] == udpRelayErrNotJoined {
 				// The relay does not know this address (the NAT mapped
 				// the socket anew, or the relay forgot it): join again.
-				if time.Now().Unix() <= p.ticket.Expires {
-					_, _ = p.conn.Write(p.join)
-				}
+				// The relay decides whether the ticket still joins.
+				_, _ = p.conn.Write(p.join)
 				continue
+			}
+			select {
+			case <-p.acked:
+				// Refused after the dial (the ticket expired on a rejoin,
+				// or the address is another session's): the path is dead.
+				p.die(fmt.Sprintf("the relay refused it (code %d)", buf[1]))
+				return
+			default:
 			}
 			select {
 			case p.refused <- buf[1]:
@@ -290,20 +354,37 @@ func (p *p2pUDPRelayPath) read() {
 func (p *p2pUDPRelayPath) keepalive(join []byte) {
 	t := time.NewTicker(udpRelayJoinEvery)
 	defer t.Stop()
+	var lastKeep time.Time
 	for {
 		select {
 		case <-p.done:
 			return
 		case now := <-t.C:
+			if now.UnixNano()-p.recv.Load() >= int64(udpRelayDeadAfter) {
+				p.die(fmt.Sprintf("nothing from the relay for %v", udpRelayDeadAfter))
+				return
+			}
 			if !p.paired.Load() {
-				if now.Unix() <= p.ticket.Expires {
+				// Often at first, then every udpRelayJoinSlow: the other
+				// side may never come.
+				every := udpRelayJoinEvery
+				if now.UnixNano()-p.unpairedAt.Load() >= int64(udpRelayJoinFastFor) {
+					every = udpRelayJoinSlow
+				}
+				if now.UnixNano()-p.sent.Load() >= int64(every) {
+					p.sent.Store(now.UnixNano())
 					_, _ = p.conn.Write(join)
 				}
 				continue
 			}
-			if now.UnixNano()-p.sent.Load() >= int64(udpRelayKeepEvery) {
+			// When nothing went out, or nothing came, for a while: the relay
+			// answers, which shows it still has this side.
+			quiet := now.UnixNano()-p.sent.Load() >= int64(udpRelayKeepEvery) ||
+				now.UnixNano()-p.recv.Load() >= int64(udpRelayKeepEvery)
+			if quiet && now.Sub(lastKeep) >= udpRelayKeepEvery {
+				lastKeep = now
 				p.sent.Store(now.UnixNano())
-				_, _ = p.conn.Write([]byte{udpRelayMsgKeepalive})
+				_, _ = p.conn.Write([]byte{udpRelayMsgKeepalive, 0})
 			}
 		}
 	}

@@ -14,20 +14,31 @@
 // payloads, which the games seal end to end (p2pCrypt in src/nakama_p2ppath.go).
 //
 // The relay is no amplifier: it only forwards data to addresses that proved
-// they hold a token, forwards what it gets byte for byte, and answers a
-// datagram with at most 2 bytes, never more than the datagram it answers.
-// Each side is limited in datagrams and bytes per second, and a side that
-// sends nothing for Config.Idle is forgotten.
+// they hold a token and receive at that address, forwards what it gets byte
+// for byte, and never answers a datagram with more bytes than it got. An
+// address joins in two round trips: a join with a valid token from an
+// address the side does not hold yet is answered with a cookie (an HMAC of
+// the address and the time), and only a join that echoes it moves or pairs
+// the side, so a forged source address can neither take over a side nor
+// point the relay's stream at a victim. Answers are limited per source
+// prefix (a /24, or a /64 for IPv6) and per session, so junk from one place
+// cannot starve the answers to everybody else's joins. Each side is limited
+// in datagrams and bytes per second, and a side that sends nothing for
+// Config.Idle is forgotten.
 //
 // Wire format, every datagram starting with a type byte:
 //
-//	game -> relay   'J' token       join (or rejoin from a new address)
-//	                'D' payload     data for the other side
-//	                'K'             keepalive
-//	relay -> game   'A' state       join acknowledged: 1 waiting, 2 paired
-//	                'E' code        join refused, or data from an address
-//	                                that has not joined (Err* codes)
-//	                'D' payload     data from the other side
+//	game -> relay   'J' token ['|' cookie]  join (or rejoin from a new address)
+//	                'D' payload             data for the other side
+//	                'K' 0                   keepalive (answered with 'A')
+//	relay -> game   'C' cookie              prove the address: join again
+//	                                        with this cookie
+//	                'A' state               join acknowledged: 1 waiting,
+//	                                        2 paired
+//	                'E' code                join refused, or data from an
+//	                                        address that has not joined
+//	                                        (Err* codes)
+//	                'D' payload             data from the other side
 //
 // Token (ASCII): "v1.<session>.<side>.<expires>.<mac>", where session is 32
 // hex digits, side 0 or 1, expires the Unix time in seconds after which it no
@@ -55,6 +66,7 @@ const (
 	MsgKeepalive = 'K'
 	MsgAck       = 'A'
 	MsgError     = 'E'
+	MsgCookie    = 'C'
 )
 
 // Join states ('A').
@@ -72,7 +84,24 @@ const (
 	// game's NAT mapped it anew, or the relay forgot an idle side): the game
 	// joins again.
 	ErrNotJoined = 4
+	// ErrAddrInUse refuses a join from an address that holds a side of
+	// another session which is still active: the game joins from a new
+	// socket.
+	ErrAddrInUse = 5
 )
+
+// CookieLen is the length of a cookie ('C'), in hex digits. A join with a
+// valid token is always longer than 'C' and the cookie.
+const CookieLen = 32
+
+// cookieWindow: a cookie is good for the time window it was made in and the
+// one before.
+const cookieWindow = 30
+
+// addrReclaimIdle: a side of another session silent this long gives up its
+// address to a join that proved it (the game behind it went away and its
+// NAT gave the port to another game).
+const addrReclaimIdle = 15 * time.Second
 
 // MaxToken is the longest token the relay reads.
 const MaxToken = 256
@@ -94,9 +123,18 @@ type Config struct {
 	MaxSessions int
 	// MaxDatagram is the largest datagram read and forwarded. Default 2048.
 	MaxDatagram int
-	// AnswerRate bounds the answers ('A', 'E') to joins, a second, over all
-	// sources. Default 2000.
+	// AnswerRate bounds the answers to datagrams that hold no valid token
+	// ('E'), a second, for each source prefix (a /24, or a /64), with a
+	// burst of twice as many. Default 5.
 	AnswerRate float64
+	// JoinAnswerRate bounds the answers to joins with a valid token ('C',
+	// 'A') a second for each source prefix, and SessionAnswerRate the
+	// answers ('A') a second within each session. Defaults 50 and 20.
+	JoinAnswerRate, SessionAnswerRate float64
+	// MaxPrefixes bounds the source prefixes whose answers are counted at
+	// once; past it, datagrams without a valid token from new prefixes go
+	// unanswered until Sweep forgets quiet ones. Default 65536.
+	MaxPrefixes int
 	// Now is the clock (tests). Default time.Now.
 	Now func() time.Time
 }
@@ -124,7 +162,16 @@ func (c *Config) defaults() {
 		c.MaxDatagram = 2048
 	}
 	if c.AnswerRate <= 0 {
-		c.AnswerRate = 2000
+		c.AnswerRate = 5
+	}
+	if c.JoinAnswerRate <= 0 {
+		c.JoinAnswerRate = 50
+	}
+	if c.SessionAnswerRate <= 0 {
+		c.SessionAnswerRate = 20
+	}
+	if c.MaxPrefixes <= 0 {
+		c.MaxPrefixes = 65536
 	}
 	if c.Now == nil {
 		c.Now = time.Now
@@ -225,8 +272,15 @@ type side struct {
 }
 
 type session struct {
-	id    string
-	sides [2]side
+	id      string
+	sides   [2]side
+	answers bucket
+}
+
+// prefixLimit counts the answers to one source prefix.
+type prefixLimit struct {
+	errors, joins bucket
+	lastSeen      time.Time
 }
 
 type sideRef struct {
@@ -249,7 +303,7 @@ type Server struct {
 	mu       sync.Mutex
 	sessions map[string]*session
 	byAddr   map[netip.AddrPort]sideRef
-	answers  bucket
+	prefixes map[netip.Prefix]*prefixLimit
 	stats    Stats
 }
 
@@ -264,8 +318,8 @@ func New(conn *net.UDPConn, cfg Config) (*Server, error) {
 		conn:     conn,
 		sessions: map[string]*session{},
 		byAddr:   map[netip.AddrPort]sideRef{},
+		prefixes: map[netip.Prefix]*prefixLimit{},
 	}
-	s.answers = newBucket(cfg.AnswerRate, cfg.AnswerRate, cfg.Now())
 	if conn != nil {
 		s.send = func(b []byte, to netip.AddrPort) { _, _ = conn.WriteToUDPAddrPort(b, to) }
 	}
@@ -278,7 +332,11 @@ func (s *Server) Serve() error {
 	done := make(chan struct{})
 	defer close(done)
 	go func() {
-		t := time.NewTicker(s.cfg.Idle / 4)
+		every := s.cfg.Idle / 4
+		if every > 10*time.Second {
+			every = 10 * time.Second
+		}
+		t := time.NewTicker(every)
 		defer t.Stop()
 		for {
 			select {
@@ -328,11 +386,7 @@ func (s *Server) Handle(b []byte, from netip.AddrPort) {
 	case MsgData:
 		s.forward(b, from, now)
 	case MsgKeepalive:
-		s.mu.Lock()
-		if ref, ok := s.byAddr[from]; ok {
-			ref.s.sides[ref.side].lastSeen = now
-		}
-		s.mu.Unlock()
+		s.keepalive(b, from, now)
 	default:
 		s.mu.Lock()
 		s.stats.Dropped++
@@ -340,13 +394,77 @@ func (s *Server) Handle(b []byte, from netip.AddrPort) {
 	}
 }
 
-// answer sends a 2-byte answer to a datagram of 2 bytes or more, within
-// AnswerRate. Called with s.mu held.
-func (s *Server) answer(kind, code byte, to netip.AddrPort, now time.Time) {
-	if s.send == nil || !s.answers.take(1, now) {
+// prefixOf is the prefix answers to addr are counted under: its /24, or
+// its /64 for IPv6.
+func prefixOf(addr netip.Addr) netip.Prefix {
+	bits := 24
+	if !addr.Is4() {
+		bits = 64
+	}
+	p, _ := addr.Prefix(bits)
+	return p
+}
+
+// limitOf returns the answer counters of to's prefix, nil when the relay
+// counts MaxPrefixes already. Called with s.mu held.
+func (s *Server) limitOf(to netip.AddrPort, now time.Time) *prefixLimit {
+	key := prefixOf(to.Addr())
+	l := s.prefixes[key]
+	if l == nil {
+		if len(s.prefixes) >= s.cfg.MaxPrefixes {
+			return nil
+		}
+		l = &prefixLimit{
+			errors: newBucket(s.cfg.AnswerRate, 2*s.cfg.AnswerRate, now),
+			joins:  newBucket(s.cfg.JoinAnswerRate, s.cfg.JoinAnswerRate, now),
+		}
+		s.prefixes[key] = l
+	}
+	l.lastSeen = now
+	return l
+}
+
+// answerError sends a 2-byte refusal to a datagram of 2 bytes or more that
+// holds no valid token, within AnswerRate for to's prefix. Called with s.mu
+// held.
+func (s *Server) answerError(code byte, to netip.AddrPort, now time.Time) {
+	if s.send == nil {
 		return
 	}
-	s.send([]byte{kind, code}, to)
+	if l := s.limitOf(to, now); l == nil || !l.errors.take(1, now) {
+		return
+	}
+	s.send([]byte{MsgError, code}, to)
+}
+
+// answerJoin sends an answer to a join with a valid token, within
+// JoinAnswerRate for to's prefix (and within the session's allowance when
+// ses is not nil). It is never longer than the join. Called with s.mu held.
+func (s *Server) answerJoin(b []byte, to netip.AddrPort, ses *session, now time.Time) {
+	if s.send == nil {
+		return
+	}
+	if l := s.limitOf(to, now); l != nil && !l.joins.take(1, now) {
+		return
+	}
+	if ses != nil && !ses.answers.take(1, now) {
+		return
+	}
+	s.send(b, to)
+}
+
+// cookie is the proof that a game receives at from: an HMAC of the address
+// and a time window (cookieWindow seconds).
+func (s *Server) cookie(from netip.AddrPort, window int64) string {
+	return mac(s.cfg.Secret, "cookie|"+from.String()+"|"+strconv.FormatInt(window, 10))[:CookieLen]
+}
+
+func (s *Server) validCookie(c string, from netip.AddrPort, now time.Time) bool {
+	if len(c) != CookieLen {
+		return false
+	}
+	w := now.Unix() / cookieWindow
+	return hmac.Equal([]byte(c), []byte(s.cookie(from, w))) || hmac.Equal([]byte(c), []byte(s.cookie(from, w-1)))
 }
 
 func (s *Server) join(b []byte, from netip.AddrPort, now time.Time) {
@@ -356,58 +474,111 @@ func (s *Server) join(b []byte, from netip.AddrPort, now time.Time) {
 		s.stats.Refused++
 		return
 	}
-	id, sd, err := Verify(s.cfg.Secret, string(b[1:]), now)
+	token, cookie := string(b[1:]), ""
+	if cut := strings.IndexByte(token, '|'); cut >= 0 {
+		token, cookie = token[:cut], token[cut+1:]
+	}
+	id, sd, err := Verify(s.cfg.Secret, token, now)
 	if err != nil {
 		s.stats.Refused++
 		code := byte(ErrBadToken)
 		if errors.Is(err, ErrTokenExpired) {
 			code = ErrExpired
 		}
-		s.answer(MsgError, code, from, now)
+		s.answerError(code, from, now)
 		return
 	}
 	ses := s.sessions[id]
+	if ses != nil && ses.sides[sd].joined && ses.sides[sd].addr == from {
+		// The side joins again from its address (a lost answer): no proof
+		// needed, it gave it.
+		me := &ses.sides[sd]
+		me.lastSeen = now
+		s.answerJoin([]byte{MsgAck, s.stateOf(ses, sd)}, from, ses, now)
+		return
+	}
+	if !s.validCookie(cookie, from, now) {
+		// A first join from this address: prove it receives here first.
+		s.answerJoin(append([]byte{MsgCookie}, s.cookie(from, now.Unix()/cookieWindow)...), from, nil, now)
+		return
+	}
+	if old, ok := s.byAddr[from]; ok && old.s != ses {
+		// The address holds a side of another session. It moves on only
+		// when that side went quiet (its game is gone and the NAT gave the
+		// port away); an active side keeps it.
+		if now.Sub(old.s.sides[old.side].lastSeen) < addrReclaimIdle {
+			s.stats.Refused++
+			s.answerJoin([]byte{MsgError, ErrAddrInUse}, from, nil, now)
+			return
+		}
+		s.unjoin(old.s, old.side)
+	}
 	if ses == nil {
 		if len(s.sessions) >= s.cfg.MaxSessions {
 			s.stats.Refused++
-			s.answer(MsgError, ErrFull, from, now)
+			s.answerJoin([]byte{MsgError, ErrFull}, from, nil, now)
 			return
 		}
-		ses = &session{id: id}
+		ses = &session{id: id, answers: newBucket(s.cfg.SessionAnswerRate, s.cfg.SessionAnswerRate, now)}
 		s.sessions[id] = ses
 	}
+	if old, ok := s.byAddr[from]; ok && old.s == ses && old.side != sd {
+		// Both sides of one session from one address: the other side's game
+		// moved on.
+		s.unjoin(ses, old.side)
+		if s.sessions[id] == nil {
+			s.sessions[id] = ses
+		}
+	}
 	me := &ses.sides[sd]
-	if !me.joined || me.addr != from {
-		// A first join, or a rejoin from a new address (the NAT mapped the
-		// game anew): the old address gets nothing more.
-		if me.joined {
-			delete(s.byAddr, me.addr)
-		}
-		if old, ok := s.byAddr[from]; ok && (old.s != ses || old.side != sd) {
-			// The address held another side: it moved on.
-			s.unjoin(old.s, old.side)
-		}
-		wasJoined := me.joined
-		me.addr, me.joined = from, true
-		if !wasJoined {
-			me.packets = newBucket(s.cfg.PacketsPerSecond, s.cfg.PacketBurst, now)
-			me.bytes = newBucket(s.cfg.BytesPerSecond, s.cfg.ByteBurst, now)
-		}
-		s.byAddr[from] = sideRef{s: ses, side: sd}
-		s.stats.Joins++
-		other := &ses.sides[1-sd]
-		if other.joined && s.send != nil {
-			// The other side learns at once that its peer is here. It
-			// proved its address, and the answer is 2 bytes.
-			s.send([]byte{MsgAck, StatePaired}, other.addr)
-		}
+	// A first join, or a rejoin from a new address (the NAT mapped the game
+	// anew): the old address gets nothing more.
+	if me.joined {
+		delete(s.byAddr, me.addr)
 	}
+	wasJoined := me.joined
+	me.addr, me.joined = from, true
+	if !wasJoined {
+		me.packets = newBucket(s.cfg.PacketsPerSecond, s.cfg.PacketBurst, now)
+		me.bytes = newBucket(s.cfg.BytesPerSecond, s.cfg.ByteBurst, now)
+	}
+	s.byAddr[from] = sideRef{s: ses, side: sd}
+	s.stats.Joins++
 	me.lastSeen = now
-	state := byte(StateWaiting)
-	if ses.sides[1-sd].joined {
-		state = StatePaired
+	other := &ses.sides[1-sd]
+	if other.joined && s.send != nil && ses.answers.take(1, now) {
+		// The other side learns at once that its peer is here. It proved
+		// its address, and the answer is 2 bytes.
+		s.send([]byte{MsgAck, StatePaired}, other.addr)
 	}
-	s.answer(MsgAck, state, from, now)
+	s.answerJoin([]byte{MsgAck, s.stateOf(ses, sd)}, from, ses, now)
+}
+
+// stateOf is side sd's join state: paired when the other side joined.
+func (s *Server) stateOf(ses *session, sd int) byte {
+	if ses.sides[1-sd].joined {
+		return StatePaired
+	}
+	return StateWaiting
+}
+
+// keepalive keeps a side's address alive, and answers it with the side's
+// state, so the game knows the relay still has it; from an address that has
+// not joined, it says to join again. A 1-byte keepalive is not answered.
+func (s *Server) keepalive(b []byte, from netip.AddrPort, now time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ref, ok := s.byAddr[from]
+	if !ok {
+		if len(b) >= 2 {
+			s.answerError(ErrNotJoined, from, now)
+		}
+		return
+	}
+	ref.s.sides[ref.side].lastSeen = now
+	if len(b) >= 2 {
+		s.answerJoin([]byte{MsgAck, s.stateOf(ref.s, ref.side)}, from, ref.s, now)
+	}
 }
 
 func (s *Server) unjoin(ses *session, sd int) {
@@ -430,7 +601,7 @@ func (s *Server) forward(b []byte, from netip.AddrPort, now time.Time) {
 		// joins again.
 		s.stats.Dropped++
 		if len(b) >= 2 {
-			s.answer(MsgError, ErrNotJoined, from, now)
+			s.answerError(ErrNotJoined, from, now)
 		}
 		s.mu.Unlock()
 		return
@@ -451,8 +622,9 @@ func (s *Server) forward(b []byte, from netip.AddrPort, now time.Time) {
 	}
 }
 
-// Sweep forgets the sides idle for Config.Idle, and the sessions left
-// without sides. Serve calls it every Idle/4.
+// Sweep forgets the sides idle for Config.Idle, the sessions left without
+// sides, and the answer counters of quiet prefixes. Serve calls it every
+// Idle/4, and at least every 10 s.
 func (s *Server) Sweep() {
 	now := s.cfg.Now()
 	s.mu.Lock()
@@ -462,6 +634,12 @@ func (s *Server) Sweep() {
 			if ses.sides[sd].joined && now.Sub(ses.sides[sd].lastSeen) > s.cfg.Idle {
 				s.unjoin(ses, sd)
 			}
+		}
+	}
+	// The answer counters of prefixes quiet for 10 s are full again anyway.
+	for key, l := range s.prefixes {
+		if now.Sub(l.lastSeen) > 10*time.Second {
+			delete(s.prefixes, key)
 		}
 	}
 }

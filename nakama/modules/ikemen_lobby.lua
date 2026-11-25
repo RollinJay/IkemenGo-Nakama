@@ -338,8 +338,9 @@ local function link_rtt(state, a, b)
     return link and link.rtt or nil
 end
 
--- The route of that connection as the last of them reported it ("direct-srflx",
--- "relay-ws", ...; see ikemen_telemetry.lua), "" when unknown.
+-- The route of that connection ("direct-srflx", "relay-ws", ...; see
+-- ikemen_telemetry.lua): the lower of the two players' reports, "" when
+-- unknown.
 local function link_route(state, a, b)
     local link = a ~= nil and b ~= nil and state.links[pair_key(a, b)] or nil
     return link and link.route or ""
@@ -1260,17 +1261,24 @@ local function handle_command(dispatcher, state, tick, sender_id, command)
             link = { a = sender_id, b = peer }
             state.links[key] = link
         end
-        if link.rtt ~= rtt or (route ~= "" and link.route ~= route) then
+        -- The pair's route: relayed when either player's game is (each
+        -- picks its route on its own).
+        local first = sender_id
+        if peer < sender_id then
+            first = peer
+        end
+        local pair_route = telemetry.combine(link, state.match_seq or 0, sender_id, first, route)
+        if link.rtt ~= rtt or link.route ~= pair_route then
             link.a, link.b, link.rtt = sender_id, peer, rtt
-            if route ~= "" then
-                link.route = route
+            if pair_route ~= "" then
+                link.route = pair_route
             end
             state.dirty = true
         end
         -- One log line when the pairing's route is first reported, and one
-        -- when it changes (both players report it).
+        -- when the pair's route changes.
         telemetry.note(link, "lobby", state.lobby_id, state.match_seq or 0, username_of(state, current.player1),
-            username_of(state, current.player2), route, rtt, upgrades)
+            username_of(state, current.player2), pair_route, rtt, upgrades)
     elseif kind == "watching" then
         -- The member is (or stops) watching the current match.
         local watching = command.watching == true

@@ -319,6 +319,16 @@ func TestUDPRelayParseReply(t *testing.T) {
 	if err != nil || tk.Addr != "[2001:db8::1]:9" || tk.Expires != 1800000300 {
 		t.Fatalf("ticket %+v, %v", tk, err)
 	}
+	// A client whose clock is off: the ticket is taken all the same (the
+	// relay checks the expiry), and the server's TTL counts from now.
+	tk, err = parseUDPRelayReply([]byte(`{"udp":{"addr":"h:1","token":"t","expires":1700000000,"ttl":300,"session":"s"}}`), "bob", "h", now)
+	if err != nil || tk.Expires != now.Unix()+300 {
+		t.Fatalf("ticket from a server whose clock differs: %+v, %v", tk, err)
+	}
+	tk, err = parseUDPRelayReply([]byte(`{"udp":{"addr":"h:1","token":"t","expires":1799999999,"session":"s"}}`), "bob", "h", now)
+	if err != nil || tk.Expires != 1799999999 {
+		t.Fatalf("ticket past its expiry on this clock: %+v, %v", tk, err)
+	}
 	if _, err := parseUDPRelayReply([]byte(`{"match_id":"x.node"}`), "bob", "h", now); !errors.Is(err, errNakamaNoUDPRelay) {
 		t.Fatalf("websocket relay answer: %v", err)
 	}
@@ -328,7 +338,6 @@ func TestUDPRelayParseReply(t *testing.T) {
 		`{"udp":{"addr":"h:1","token":"","expires":1800000300}}`,
 		`{"udp":{"addr":"h","token":"t","expires":1800000300}}`,
 		`{"udp":{"addr":"h:1","token":"t"}}`,
-		`{"udp":{"addr":"h:1","token":"t","expires":1799999999}}`,
 		`{"udp":{"addr":"h:1","token":"` + strings.Repeat("t", 300) + `","expires":1800000300}}`,
 	} {
 		if _, err := parseUDPRelayReply([]byte(body), "bob", "h", now); err == nil || errors.Is(err, errNakamaNoUDPRelay) {

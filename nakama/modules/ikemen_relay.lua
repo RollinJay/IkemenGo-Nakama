@@ -213,9 +213,11 @@ end
 -- module, IKEMEN_UDP_RELAY_SECRET (16 characters or more). The relay forwards
 -- each player's datagrams to the other over UDP, without the websocket's
 -- stutter. A ticket's token joins one side of the pair's session until it
--- expires (IKEMEN_UDP_RELAY_TTL seconds, default 300); the format is the
--- relay's (nakama/udp-relay/relay/relay.go, Sign).
-local UDP_TTL_DEFAULT = 300
+-- expires (IKEMEN_UDP_RELAY_TTL seconds, default 14400: longer than a lobby
+-- session, since a game whose NAT maps it anew joins again with the same
+-- token); the format is the relay's (nakama/udp-relay/relay/relay.go, Sign).
+-- The answer also carries the TTL, which the game counts from its own clock.
+local UDP_TTL_DEFAULT = 14400
 local UDP_SECRET_MIN = 16
 
 local function udp_config(context)
@@ -248,12 +250,13 @@ local function udp_ticket(config, match_id, user_id, peer_id)
         addr = config.addr,
         token = payload .. "." .. udp_mac(config.secret, payload),
         expires = expires,
+        ttl = config.ttl,
         session = session,
     }
 end
 
 -- ikemen_relay: {match_id, peer_id[, udp]} -> {match_id}, or {udp = {addr,
--- token, expires, session}} with udp = true on a server with a UDP relay
+-- token, expires, ttl, session}} with udp = true on a server with a UDP relay
 -- (udp_config): the session or lobby then only checks the pairing, and the
 -- answer is the caller's ticket to the UDP relay; without one, the answer is
 -- the relay match as without udp, so a game falls back to it at once.
