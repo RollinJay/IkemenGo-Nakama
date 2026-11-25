@@ -670,6 +670,12 @@ static NSString * const RestartFolderPickKey = @"ShouldDisplayRestartFolderPicke
     return isDifferent;
 }
 
+// Installs the bundled files in the game folder without touching the game's
+// own, as the Android app's AssetExtractor does: external/script, which must
+// match the engine, is always replaced; every other file is written only where
+// the folder has none. A game's data (system.def, select.def, fight.def), its
+// chars, stages, sounds and so on stay as they are, whatever triggered the
+// extraction (first run, a new CurrentAssetsVersion, or changed scripts).
 - (BOOL)extractZipAssetsToURL:(NSURL *)destinationFolderURL error:(NSError **)error {
     NSURL *zipURL = [[NSBundle mainBundle] URLForResource:@"DefaultAssets" withExtension:@"zip"];
     if (!zipURL) {
@@ -681,17 +687,70 @@ static NSString * const RestartFolderPickKey = @"ShouldDisplayRestartFolderPicke
     
     [self beginAccessingAssetsFolder];
     
-    @try {
-        BOOL success = [SSZipArchive unzipFileAtPath:zipURL.path toDestination:destinationFolderURL.path];
-        
-        if (!success && error) {
+    // This runs off the main thread: its own file manager.
+    NSFileManager *fm = [[NSFileManager alloc] init];
+    NSString *tmpPath = [NSTemporaryDirectory() stringByAppendingPathComponent:@"DefaultAssetsInstall"];
+    [fm removeItemAtPath:tmpPath error:nil];
+    if (![SSZipArchive unzipFileAtPath:zipURL.path toDestination:tmpPath]) {
+        if (error) {
             *error = [NSError errorWithDomain:@"IKEMENErrorDomain" code:500 userInfo:@{NSLocalizedDescriptionKey: @"SSZipArchive failed to extract DefaultAssets.zip"}];
         }
-        return success;
+        return NO;
     }
-    @finally {
+    
+    NSString *scriptDir = @"external/script/";
+    NSError *firstError = nil;
+    NSUInteger replaced = 0, added = 0, kept = 0;
+    // Paths relative to the zip's root, as the game folder has them.
+    NSDirectoryEnumerator<NSString *> *enumerator = [fm enumeratorAtPath:tmpPath];
+    for (NSString *relativePath in enumerator) {
+        if (relativePath.length == 0) {
+            continue;
+        }
+        NSURL *srcURL = [NSURL fileURLWithPath:[tmpPath stringByAppendingPathComponent:relativePath]];
+        NSURL *dstURL = [destinationFolderURL URLByAppendingPathComponent:relativePath];
         
+        if ([enumerator.fileAttributes[NSFileType] isEqualToString:NSFileTypeDirectory]) {
+            // Folders the game lacks, such as an empty external/mods.
+            [fm createDirectoryAtURL:dstURL withIntermediateDirectories:YES attributes:nil error:nil];
+            continue;
+        }
+        
+        BOOL isScript = [relativePath hasPrefix:scriptDir];
+        BOOL exists = [fm fileExistsAtPath:dstURL.path];
+        if (exists && !isScript) {
+            kept++;
+            continue;
+        }
+        NSError *copyError = nil;
+        [fm createDirectoryAtURL:[dstURL URLByDeletingLastPathComponent] withIntermediateDirectories:YES attributes:nil error:nil];
+        if (exists && ![fm removeItemAtURL:dstURL error:&copyError]) {
+            NSLog(@"Could not replace %@: %@", relativePath, copyError);
+            firstError = firstError ?: copyError;
+            continue;
+        }
+        if (![fm copyItemAtURL:srcURL toURL:dstURL error:&copyError]) {
+            NSLog(@"Could not install %@: %@", relativePath, copyError);
+            firstError = firstError ?: copyError;
+            continue;
+        }
+        if (exists) {
+            replaced++;
+        } else {
+            added++;
+        }
     }
+    [fm removeItemAtPath:tmpPath error:nil];
+    NSLog(@"Bundled files: %lu scripts replaced, %lu added, %lu of the game's kept",
+          (unsigned long)replaced, (unsigned long)added, (unsigned long)kept);
+    
+    if (firstError) {
+        if (error) {
+            *error = firstError;
+        }
+        return NO;
+    }
+    return YES;
 }
 
 - (BOOL)saveBookmarkForURL:(NSURL *)folderURL {

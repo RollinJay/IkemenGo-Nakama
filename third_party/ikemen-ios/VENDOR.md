@@ -24,5 +24,6 @@ They make the on-screen buttons work as the Android app's do (see `third_party/i
   - **To the game:** `IkemenShowKeyboard`, and `IkemenSetKeyboardCover` with how much of the game's view the keyboard covers; the game draws itself above it.
   - **Text field:** SDL's text field is in SDL's window, under the app's, so SDL's window is the key window while a text box is open.
   - Nothing in it goes through the main dispatch queue, which the game holds while it runs.
+- **Bundled files (`ViewController extractZipAssetsToURL:`):** the same triggers as before (first run, a new `CurrentAssetsVersion`, or `external/script` differing from the app's), but no longer an unzip over the game folder. `DefaultAssets.zip` goes to a temporary folder; `external/script` is always replaced from it, and every other file is copied only where the game folder has none, as the Android app's `AssetExtractor` does. A game's own `data/system.def`, `select.def`, `fight.def`, chars, stages, sounds and the rest are never overwritten, a version bump included.
 - **`ViewController`:** gives the game `IkemenTouchControlsMessage` (`IkemenSetAppMessageHandler`) before `SDL_main`, and hides the status bar.
 - **`TouchOverlayViewController`:** hands the overlay to `TouchControls` once the xib is loaded.
