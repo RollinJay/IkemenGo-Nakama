@@ -1,0 +1,26 @@
+# Libraries
+libikemen.h
+libikemen.a
+*.a
+
+# Assets
+DefaultAssets.zip
+DefaultAssets/chars/*
+DefaultAssets/data/*
+DefaultAssets/external/*
+DefaultAssets/font/*
+DefaultAssets/sound/*
+DefaultAssets/stages/*
+DefaultAssets/video/*
+DefaultAssets/LICENSES.txt
+
+# Frameworks
+Frameworks/MoltenVK.xcframework
+Frameworks/SDL2.xcframework
+
+# XCode crap
+xcuserdata/
+*.xcworkspace/xcuserdata
+
+# macOS system crap
+.DS_Store
