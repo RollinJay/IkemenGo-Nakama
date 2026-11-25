@@ -402,7 +402,7 @@ Every way carries the same datagrams, so the netplay stream and GGPO run on whic
 
 The router is asked with PCP and NAT-PMP first, and with UPnP only when neither maps the port, so a router that speaks both does not open two ports. A port the router opened lasts 15 minutes, is renewed while the session lasts, and is removed when the session ends or the game exits, including through the scripts' `os.exit`; a request that went out without an answer, which the router may have granted all the same, is undone. The game never asks for a permanent UPnP mapping, which would outlive a game that crashed (a router that takes only those gets none), and a router whose own public address is private or shared (another NAT in front of it, as with carrier-grade NAT) gets no mapping, or has it removed again, since it would not help. Only the router is asked: PCP and NAT-PMP go to the default gateway where the system tells it (Linux, Windows, and Android where it allows it) and otherwise to the first and last address of each local network, and a UPnP answer counts only from that gateway, where the system tells it, and only when its description and control URLs are on the device that answered; redirects are not followed.
 
-`nakama.status()` reports the ladder: `st.p2p_stage` is `direct`, `extras` (IPv6 and a router port as well) or `relay` (the relay as well), `st.p2p_route` is `direct`, `ipv6` or `relay` once connected, and `st.p2p_error` is `old_peer` when the handshake ended because the other player's game is an older version. While the stage is past `direct`, the matchmaker's connecting screen says "Opponent found. Trying another way to connect..." (`online.text.found_other`); the lobby screens draw their own texts. The log names each step and the way the session connected over (`Nakama P2P: connected to the other player over relay ...`).
+`nakama.status()` reports the ladder: `st.p2p_stage` is `direct`, `extras` (IPv6 and a router port as well) or `relay` (the relay as well), `st.p2p_route` is `direct`, `ipv6` or `relay` once connected, `st.p2p_route_name` names the route by kind (see [Connection telemetry](#connection-telemetry)) and `st.p2p_upgrades` counts its changes after the first, and `st.p2p_error` is `old_peer` when the handshake ended because the other player's game is an older version. While the stage is past `direct`, the matchmaker's connecting screen says "Opponent found. Trying another way to connect..." (`online.text.found_other`); the lobby screens draw their own texts. The log names each step and the way the session connected over (`Nakama P2P: connected to the other player over relay ...`).
 
 ## Online sessions
 
@@ -449,6 +449,9 @@ local st = nakama.status()
 -- st.p2p: none | connecting | ready | failed | closed
 -- st.p2p_stage: direct | extras | relay (the connection ladder's latest step)
 -- st.p2p_route: direct | ipv6 | relay once connected, "" before
+-- st.p2p_route_name: the route by kind (direct-host, direct-vpn, direct-srflx, direct-prflx,
+--   direct-predicted, direct-router, direct-ipv6, relay-udp, relay-ws), "" before
+-- st.p2p_upgrades: route changes after the first (a relayed session that found a direct path)
 -- st.p2p_error: old_peer when the other player's game is an older version, "" otherwise
 -- st.netplay: none | connecting | connected | failed
 -- st.host and st.peer once the pairing is known; st.error, st.netplay_error
@@ -877,6 +880,45 @@ The connection type is `wired`, `wifi`, `mobile`, or empty when unknown. The eng
 
 Each player's game reports its own type; the server does not verify it. The type describes the link from the player's machine to the next device only: a machine wired to a Wi-Fi extender or a powerline adapter reports wired, a laptop on a phone's hotspot reports Wi-Fi, a phone shared over USB appears as the Ethernet adapter it presents, and a connection through a VPN is usually unknown. The `-nakama-connection wired|wifi|mobile` command-line option replaces the detected type, for testing several clients on one machine.
 
+### Connection telemetry
+
+The `link` command also names the route the players' P2P session runs over, and how many times it changed route after the first (`upgrades`: a session that started on the relay and later found a direct path counts one). The route names say which way connected:
+
+| Route | Way |
+|---|---|
+| `direct-host` | a host candidate: the other player's local address (same network) |
+| `direct-vpn` | a host candidate on an overlay network or VPN (Hamachi, Radmin, Tailscale, ZeroTier) |
+| `direct-srflx` | the address a STUN server saw (server-reflexive): ordinary hole punching |
+| `direct-prflx` | an address learnt from the other player's own packets (peer-reflexive) |
+| `direct-predicted` | a port guessed for a NAT that gives each destination a port of its own |
+| `direct-router` | a port the router opened (PCP, NAT-PMP or UPnP) |
+| `direct-ipv6` | the IPv6 socket |
+| `relay-udp` | the server's UDP relay |
+| `relay-ws` | the relay over the realtime socket (the server's relay match, or a Nakama relayed match) |
+
+The game sends the command when the route is first known (after three pings) and again at once whenever it changes. In a lobby it goes to the lobby as before; in a ranked or quick-match session it goes to the session match, on the lobby command op code, and the session keeps it to itself. A game from before the telemetry sends no route, and a server from before it ignores the field (a session from before it passes the command on to the other player, whose game ignores it).
+
+The lobby keeps the route with the pair's round trip and adds it to the current match in its state (`current.link_route`, and `current.link_kind`: `direct`, `relay` or `""`), which the lobby screens show beside the round trip (`room.match.route`, see [lobby-screenpack.md](lobby-screenpack.md)). Both the lobby and the session log one line at INFO level, in the server's log, when a pairing's route is first reported and each time it changes (`nakama/modules/ikemen_telemetry.lua`):
+
+```
+ikemen lobby: pairing seq=3 alice-bob route=direct-srflx rtt=42 upgrades=0 id=<lobby match id>
+ikemen session: pairing seq=1 carol-dave route=relay-ws rtt=95 upgrades=0 id=<session match id>
+```
+
+`seq` is the lobby's pairing number (a session's set number in a session), followed by the two players' usernames. A pairing that moved from the relay to a direct path logs a second line with the new route and `upgrades=1`. To count how matches connect, take the server's log (Nakama writes JSON lines; the message is the `msg` field):
+
+```sh
+# every route reported, first and changed
+grep -o 'pairing seq=[^"]*' server.log | grep -o 'route=[a-z0-9-]*' | sort | uniq -c
+# the route each pairing ended on: the last line of each lobby or session and seq
+grep -o 'ikemen [a-z]*: pairing seq=[^"]*' server.log |
+  awk '{ id = $NF; key = $2 " " $4 " " id; route[key] = $6 } END { for (k in route) print route[k] }' | sort | uniq -c
+# pairings that started on a relay and moved to a direct path
+grep -c 'pairing seq=.*route=direct-[a-z0-9]* .*upgrades=[1-9]' server.log
+```
+
+Both players report, so a pairing logs one line for its first route however many of them report it. A pairing that never connects logs nothing. The route is what the games report; the server does not verify it.
+
 ### A lobby match
 
 When the lobby's current pairing (`state.current`) names this player and has a new `seq`, the lobby screens:
@@ -1003,6 +1045,7 @@ Commands (`nakama.lobbySend(kind, fields)`):
 - `ikemen_ranked.lua` — the ranked sets' records and their replays, shared by the modules above and the next one; it registers nothing itself.
 - `ikemen_moderation.lua` — the moderator RPCs `ikemen_ranked_list`, `ikemen_ranked_replay` and `ikemen_ranked_settle`, called with the runtime HTTP key (see [Moderator RPCs](#moderator-rpcs)).
 - `ikemen_relay.lua` — the relay match of a P2P session's two players (see [The connection ladder](#the-connection-ladder)), which the session and lobby modules make, and the `ikemen_relay` RPC (`{match_id, peer_id}` → `{match_id}`): the caller's relay with `peer_id`, made by the session or lobby `match_id` when it paired the two, error 9 otherwise. It never answers "not found", which a game takes for a server without it. A relay ends when one of its players leaves it, and after 30 seconds without data.
+- `ikemen_telemetry.lua` — the route of each pairing's P2P session as the games report it, for the lobby and session modules, which log it (see [Connection telemetry](#connection-telemetry)); it registers nothing itself.
 - `ikemen_account.lua` — the `ikemen_account_name` RPC (`{name}` → `{display_name}`), which sets the player's online name, a before-hook that applies the same rules to Nakama's account update, and before-hooks that keep a username Nakama would refuse from failing a sign-in (see [Online names](#online-names)).
 
 The individual Lua modules explicitly import Nakama's `nakama` runtime module; they do not rely on an implicit global.

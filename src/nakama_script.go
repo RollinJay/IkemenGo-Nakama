@@ -417,6 +417,14 @@ func nakamaScriptInit(l *lua.LState) {
 		// made: direct, ipv6 or relay; "" before.
 		t.RawSetString("p2p_stage", lua.LString(st.P2PStage))
 		t.RawSetString("p2p_route", lua.LString(st.P2PRoute))
+		// p2p_route_name: the route by kind ("direct-host", "direct-vpn",
+		// "direct-srflx", "direct-prflx", "direct-predicted",
+		// "direct-router", "direct-ipv6", "relay-udp", "relay-ws"; "" before
+		// one works), and p2p_upgrades: how many times the session changed
+		// route after the first (a relayed match that found a direct path).
+		routeName, upgrades := sys.nakama.p2pRoute()
+		t.RawSetString("p2p_route_name", lua.LString(routeName))
+		t.RawSetString("p2p_upgrades", lua.LNumber(upgrades))
 		// p2p_error: why the P2P handshake failed, when known: "old_peer"
 		// (the other player's game is an older version); "" otherwise.
 		t.RawSetString("p2p_error", lua.LString(st.P2PError))

@@ -1,6 +1,7 @@
 local nk = require("nakama")
 local ranked = require("ikemen_ranked")
 local p2p_relay = require("ikemen_relay")
+local telemetry = require("ikemen_telemetry")
 
 -- IKEMEN GO matchmaking/session coordination match.
 -- This match is a Nakama relay for P2P signaling and delayed replay chunks.
@@ -23,6 +24,10 @@ local p2p_relay = require("ikemen_relay")
 local MAX_PLAYERS = 8
 local OP_REMATCH_CHOICE = 1229673027
 local OP_REMATCH_DECISION = 1229673028
+-- The lobby command op code (ikemen_lobby.lua): a session takes only its
+-- "link" command, the route the players' P2P session runs over
+-- (src/nakama_watch.go reportLink), which it logs (ikemen_telemetry.lua).
+local OP_LOBBY_COMMAND = 0x494B4C13
 
 -- Replay stream messages (src/nakama_client.go) and the largest of each
 -- kept: a header is about 6 KB (more with the players' start state), a
@@ -566,9 +571,49 @@ local function match_leave(context, dispatcher, tick, state, presences)
     return state
 end
 
+-- A player's "link" report: the route of the players' P2P session. One log
+-- line when the route is first known and when it changes; the pairing is
+-- named by the session's set number (1 outside ranked play).
+local function note_link(state, message)
+    local sender_id = message.sender and message.sender.user_id or ""
+    local ok, command = pcall(nk.json_decode, message.data or "{}")
+    if not ok or type(command) ~= "table" or command.kind ~= "link" then
+        return
+    end
+    local peer = command.peer
+    if state.players[sender_id] == nil or type(peer) ~= "string" or peer == sender_id or state.players[peer] == nil then
+        return
+    end
+    local route = telemetry.route(command.route)
+    if route == "" then
+        return
+    end
+    -- (Not "a, b = b, a": gopher-lua, which Nakama's Lua forks, swaps
+    -- two locals wrongly.)
+    local a, b = sender_id, peer
+    if peer < sender_id then
+        a = peer
+        b = sender_id
+    end
+    state.links = state.links or {}
+    local key = a .. "|" .. b
+    local link = state.links[key]
+    if link == nil then
+        link = {}
+        state.links[key] = link
+    end
+    link.route = route
+    local rtt = math.max(0, math.min(9999, math.floor(tonumber(command.rtt) or 0)))
+    telemetry.note(link, "session", state.match_id, state.set_no or 1, state.players[a].username or a,
+        state.players[b].username or b, route, rtt, telemetry.upgrades(command.upgrades))
+end
+
 local function match_loop(context, dispatcher, tick, state, messages)
     for _, message in ipairs(messages) do
-        if message.op_code == OP_REMATCH_CHOICE then
+        if message.op_code == OP_LOBBY_COMMAND then
+            -- Telemetry for the server's log; not passed on.
+            note_link(state, message)
+        elseif message.op_code == OP_REMATCH_CHOICE then
             local sender_id = message.sender and message.sender.user_id or ""
             if sender_id ~= "" and state.players[sender_id] ~= nil then
                 local ok, command = pcall(nk.json_decode, message.data or "{}")

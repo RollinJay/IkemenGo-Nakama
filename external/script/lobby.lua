@@ -1762,9 +1762,16 @@ local function drawPhase(watching)
 		if s.streak ~= nil and (s.streak.count or 0) > 0 then
 			drawText(mt.streak, fmt(mt.streak.text, s.streak.count, nameOf(s.streak.user_id)), x, y)
 		end
-		-- The players' round trip over their direct connection.
+		-- The players' round trip over their direct connection, and whether it
+		-- runs direct or through the server's relay (link_kind, from servers
+		-- with the connection telemetry).
 		if tonumber(s.current.link) ~= nil then
 			drawPing(mt.link, x, y, tonumber(s.current.link), true)
+		end
+		local kind = s.current.link_kind
+		if (kind == 'direct' or kind == 'relay') and mt.route ~= nil then
+			local routes = mt.route.text or {}
+			drawText(mt.route, routes[kind] or '', x, y)
 		end
 		return
 	end
