@@ -11,15 +11,18 @@ import (
 
 // touchGlyphsKey is what the app's button images were last written from, and
 // touchGlyphsWait the frames until the next check.
+// touchButtonsSent is the set of on-screen buttons the app last got, -1
+// before the first.
 var (
-	touchGlyphsKey  string
-	touchGlyphsWait int
+	touchGlyphsKey   string
+	touchGlyphsWait  int
+	touchButtonsSent = -1
 )
 
 // touchControlsUpdate keeps the app's on-screen buttons showing the glyphs of
-// the game buttons they play, in <internal storage>/touch-glyphs. It checks
-// twice a second, since the screenpack, the controller mapping and the touch
-// controls' player can change.
+// the game buttons they play, in <internal storage>/touch-glyphs, and tells it
+// which of them to show. It checks twice a second, since the screenpack, the
+// options, the controller mapping and the touch controls' player can change.
 func touchControlsUpdate() {
 	if touchGlyphsWait > 0 {
 		touchGlyphsWait--
@@ -27,6 +30,11 @@ func touchControlsUpdate() {
 	}
 	touchGlyphsWait = 30
 	m := &sys.motif
+	set := touchButtonsShown(sys.cfg.Input.TouchButtons, m.TouchControls.Buttons)
+	if msg := touchButtonsMessage(set, touchStartSlot(m.TouchControls.Start.Slot, set), m.TouchControls.Layout); msg != touchButtonsSent {
+		touchButtonsSent = msg
+		sendToApp(appMsgTouchButtons, msg)
+	}
 	storage := sdl.AndroidGetInternalStoragePath()
 	if m.GlyphsSff == nil || m.GlyphsSff.filename == "" || storage == "" {
 		return

@@ -26,7 +26,19 @@ var touchButtons = []struct{ name, pad string }{
 // TouchControlsProperties is [Touch Controls]: for each game button, the
 // [Glyphs] tokens that Android's on-screen buttons try, in order, to show it.
 type TouchControlsProperties struct {
-	Glyph struct {
+	// Buttons are the on-screen buttons shown (touchButtonTokens); empty
+	// shows them all.
+	Buttons []string `ini:"buttons"`
+	// Start.Slot is a grid button (a, b, c, x, y, z, d or w) whose place
+	// Start takes while that button is hidden; empty keeps Start beside Menu.
+	Start struct {
+		Slot string `ini:"slot"`
+	} `ini:"start"`
+	// Layout is how the grid is arranged: "arcade" (the default) staggers
+	// it, "grid" puts each punch straight above its kick
+	// (touchLayoutGrid).
+	Layout string `ini:"layout"`
+	Glyph  struct {
 		A     []string `ini:"a"`
 		B     []string `ini:"b"`
 		C     []string `ini:"c"`
@@ -42,6 +54,86 @@ type TouchControlsProperties struct {
 		Left  []string `ini:"left"`
 		Right []string `ini:"right"`
 	} `ini:"glyph"`
+}
+
+// touchButtonTokens name the on-screen buttons that [Touch Controls] buttons
+// and config.ini's [Input] TouchButtons can show, by the letters they carry
+// without a glyph, s and m being Start and Menu. Button i is bit i of the
+// set the app gets (appMsgTouchButtons).
+var touchButtonTokens = []string{"a", "b", "c", "x", "y", "z", "d", "w", "s", "m"}
+
+// touchButtonsAll is the set of every on-screen button.
+const touchButtonsAll = 1<<10 - 1
+
+// parseTouchButtons reads a list of touchButtonTokens ("start" and "menu" may
+// be spelled out, and "all" means every button) into a set. ok is false if
+// the list names no button, which then shows none.
+func parseTouchButtons(tokens []string) (set int, ok bool) {
+	for _, tok := range tokens {
+		switch tok = strings.ToLower(strings.TrimSpace(tok)); tok {
+		case "all":
+			return touchButtonsAll, true
+		case "start":
+			tok = "s"
+		case "menu":
+			tok = "m"
+		}
+		for i, name := range touchButtonTokens {
+			if tok == name {
+				set |= 1 << i
+				ok = true
+			}
+		}
+	}
+	return set, ok
+}
+
+// touchButtonsShown is the set of on-screen buttons to show: those that the
+// player's option (config.ini's [Input] TouchButtons, a comma-separated list)
+// names, or if it names none, as when it is empty, the screenpack's
+// [Touch Controls] buttons, or if those name none, all of them.
+func touchButtonsShown(option string, screenpack []string) int {
+	if set, ok := parseTouchButtons(strings.Split(option, ",")); ok {
+		return set
+	}
+	if set, ok := parseTouchButtons(screenpack); ok {
+		return set
+	}
+	return touchButtonsAll
+}
+
+// touchGridButtons is how many of touchButtonTokens, from the first, sit in
+// the attack grid, where Start can take a hidden button's place.
+const touchGridButtons = 8
+
+// touchStartSlot is the index in touchButtonTokens of the grid button whose
+// place Start takes, from [Touch Controls] start.slot, or -1 if it keeps its
+// own: the slot must name a grid button that set hides, and Start must show.
+func touchStartSlot(slot string, set int) int {
+	slot = strings.ToLower(strings.TrimSpace(slot))
+	for i, name := range touchButtonTokens[:touchGridButtons] {
+		if slot == name && set&(1<<i) == 0 && set&(1<<8) != 0 {
+			return i
+		}
+	}
+	return -1
+}
+
+// touchLayoutGrid is bit 14 of appMsgTouchButtons' parameter: the grid's
+// buttons in two straight rows, x, y and z above a, b and c, with d and w in
+// a fourth column and Start, when it is in the grid, apart on the right.
+const touchLayoutGrid = 1 << 14
+
+// touchButtonsMessage is the parameter of appMsgTouchButtons: the set of
+// buttons shown in bits 0 to 9, in bits 10 to 13 one more than the grid
+// place Start takes (touchStartSlot), 0 for none, and touchLayoutGrid for
+// [Touch Controls] layout = grid.
+func touchButtonsMessage(set, startSlot int, layout string) int {
+	msg := set | (startSlot+1)<<10
+	if strings.EqualFold(strings.TrimSpace(layout), "grid") {
+		msg |= touchLayoutGrid
+	}
+	return msg
 }
 
 // touchGlyphTokens picks, for each on-screen button, the glyph of the game

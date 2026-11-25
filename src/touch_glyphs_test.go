@@ -243,3 +243,92 @@ func TestWriteTouchGlyphs(t *testing.T) {
 		t.Errorf("z.png, whose button has no glyph now, stayed (%v)", err)
 	}
 }
+
+func TestTouchButtonsParse(t *testing.T) {
+	const a, b, c, x, y, z, d, w, s, m = 1, 2, 4, 8, 16, 32, 64, 128, 256, 512
+	for _, tc := range []struct {
+		tokens []string
+		set    int
+		ok     bool
+	}{
+		{[]string{"a", "b", "c", "x", "y", "z", "d", "w", "s", "m"}, touchButtonsAll, true},
+		{[]string{"a", " B", "c ", "x", "y", "z", "s"}, a | b | c | x | y | z | s, true},
+		{[]string{"start", "Menu"}, s | m, true},
+		{[]string{"d", "w"}, d | w, true},
+		{[]string{"ALL"}, touchButtonsAll, true},
+		{[]string{"a", "up", "lp", "q"}, a, true},
+		{[]string{"up", ""}, 0, false},
+		{[]string{""}, 0, false},
+		{nil, 0, false},
+	} {
+		set, ok := parseTouchButtons(tc.tokens)
+		if set != tc.set || ok != tc.ok {
+			t.Errorf("parseTouchButtons(%q) = %#x, %v; want %#x, %v", tc.tokens, set, ok, tc.set, tc.ok)
+		}
+	}
+}
+
+func TestTouchButtonsShown(t *testing.T) {
+	noDW := touchButtonsAll &^ (1<<6 | 1<<7)
+	hdbz := []string{"a", "b", "c", "x", "y", "z", "s", "m"}
+	defaults := defaultTouchControls(t).Buttons
+	if set, ok := parseTouchButtons(defaults); set != touchButtonsAll || !ok {
+		t.Errorf("default motif buttons %q = %#x, want all", defaults, set)
+	}
+	for _, tc := range []struct {
+		option     string
+		screenpack []string
+		want       int
+	}{
+		// The option's values in options.lua: Default, All, No D and W.
+		{"", hdbz, noDW},
+		{"", defaults, touchButtonsAll},
+		{"a, b, c, x, y, z, d, w, s, m", hdbz, touchButtonsAll},
+		{"a, b, c, x, y, z, s, m", defaults, noDW},
+		{"all", hdbz, touchButtonsAll},
+		{"  ", hdbz, noDW},
+		// Neither names a button: all show.
+		{"", nil, touchButtonsAll},
+		{"nonsense", []string{""}, touchButtonsAll},
+	} {
+		if got := touchButtonsShown(tc.option, tc.screenpack); got != tc.want {
+			t.Errorf("touchButtonsShown(%q, %q) = %#x, want %#x", tc.option, tc.screenpack, got, tc.want)
+		}
+	}
+}
+
+func TestTouchStartSlot(t *testing.T) {
+	noDW := touchButtonsAll &^ (1<<6 | 1<<7)
+	for _, tc := range []struct {
+		slot string
+		set  int
+		want int
+	}{
+		{"", noDW, -1},
+		{"d", noDW, 6},
+		{" W ", noDW, 7},
+		{"d", touchButtonsAll, -1},  // D shows: Start keeps its place
+		{"d", noDW &^ (1 << 8), -1}, // Start hidden
+		{"s", noDW, -1},             // not a grid button
+		{"m", noDW &^ (1 << 9), -1}, // not a grid button
+	} {
+		if got := touchStartSlot(tc.slot, tc.set); got != tc.want {
+			t.Errorf("touchStartSlot(%q, %#x) = %d, want %d", tc.slot, tc.set, got, tc.want)
+		}
+	}
+	if got := touchButtonsMessage(noDW, 6, ""); got != noDW|7<<10 {
+		t.Errorf("touchButtonsMessage = %#x", got)
+	}
+	if got := touchButtonsMessage(touchButtonsAll, -1, "arcade"); got != touchButtonsAll {
+		t.Errorf("touchButtonsMessage without a slot = %#x", got)
+	}
+	if got := touchButtonsMessage(noDW, 6, " Grid "); got != noDW|7<<10|touchLayoutGrid {
+		t.Errorf("touchButtonsMessage with the grid layout = %#x", got)
+	}
+	if l := defaultTouchControls(t).Layout; l != "arcade" {
+		t.Errorf("default layout = %q, want arcade", l)
+	}
+	if s := defaultTouchControls(t).Start.Slot; s != "" {
+		t.Errorf("default start.slot = %q, want empty", s)
+	}
+}

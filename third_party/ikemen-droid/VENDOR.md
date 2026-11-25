@@ -14,15 +14,17 @@ This folder holds the Android app that `build/build.sh Android` packages the gam
   - The on-screen buttons play as a controller named "IKEMEN Touch Controls", with no vendor or product ID and a fixed device ID. SDL keeps that name, so the game can recognise it, and the ID can't collide with a real device.
   - The buttons can be hidden, which also removes their controller.
   - Each button shows the glyph image the game writes for it, or its letter where there is none.
+  - The game chooses which of the ten buttons show (`setButtonsShown`). Hidden grid buttons keep their place in the layout, and the shown ones in their row move right over the gaps; Start and Menu close up. Hidden buttons take no touches and are never a TV remote's targets. The game can also move Start into the grid, in a hidden button's place (`[Touch Controls] start.slot`), for a game whose Start is an attack. With `[Touch Controls] layout = grid` the grid drops its stagger: each punch sits straight above its kick, and Start, in the grid, stands apart on the right.
   - A TV remote can press the buttons (`navigationTargets`, `pressTarget`).
 - **`TouchControls`** (new):
   - **Setting:** Automatic, Always show or Always hide, chosen from a small settings button. Automatic hides the buttons while a real controller is connected.
   - **Keyboard button:** shown while the game has a text box open and its keyboard is closed.
   - **TV remote:** never a controller (the engine sets `SDL_TV_REMOTE_AS_JOYSTICK` to 0). Its arrows move a highlight (`FocusRing`) between the buttons on the screen, the settings, keyboard and game folder buttons included. OK presses an on-screen button for as long as it's held (60 ms at least, so that a frame sees it), and clicks any other when it comes up. Keys from gamepads and full keyboards still reach the game.
 - **`SDLActivity`:**
-  - **From the game:** it handles commands 0x8001 (a text box opened or closed) and 0x8002 (the glyph images changed) in `onUnhandledMessage`.
+  - **From the game:** it handles commands 0x8001 (a text box opened or closed), 0x8002 (the glyph images changed) and 0x8003 (the buttons to show, one bit each, remembered for the next start) in `onUnhandledMessage`.
   - **To the game:** it calls `nativeShowKeyboard`, and `nativeSetKeyboardCover` with how much of the game's surface the on-screen keyboard covers; the game draws itself above it. SDL's text field sits at the top of the screen, so that Android doesn't pan the window instead.
   - **Keys:** `dispatchKeyEvent` hands a TV remote's arrows and OK to `TouchControls.onRemoteKey` first. A remote's key, like a touch, shows the faded controls again (`showControls`).
+  - **Full screen:** the game always fills the screen edge to edge, display cutouts included, with the system bars hidden; a swipe shows them for a moment over the game (`applyImmersive`, with `WindowInsetsController` on Android 11 and later and the immersive sticky flags before). It is applied again on resume and focus, and whatever window style the game asks for. While the bars are shown for good, the on-screen buttons keep clear of them.
   - **Text field:** SDL's `DummyEdit` lives in a layer of its own (`mTextLayout`), which the 5 s fade of the controls leaves alone, and asks the keyboard for no suggestions or corrections.
 - **`AssetExtractor`:**
   - It always replaces `external/script`.

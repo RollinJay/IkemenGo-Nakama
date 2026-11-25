@@ -45,6 +45,8 @@ import android.view.View;
 import android.view.ViewGroup;
 import android.view.ViewTreeObserver;
 import android.view.Window;
+import android.view.WindowInsets;
+import android.view.WindowInsetsController;
 import android.view.WindowManager;
 import android.view.inputmethod.BaseInputConnection;
 import android.view.inputmethod.EditorInfo;
@@ -534,7 +536,19 @@ public class SDLActivity extends Activity implements View.OnSystemUiVisibilityCh
             return v.onApplyWindowInsets(insets);
         });
 
-        setWindowStyle(false);
+        // The game always fills the screen, the system bars hidden.
+        applyImmersive();
+        // While the system bars are shown for good (not swiped in over the
+        // game), the on-screen buttons keep clear of them.
+        mControllerOverlay.setOnApplyWindowInsetsListener((v, insets) -> {
+            int l = 0, t = 0, r = 0, b = 0;
+            if (Build.VERSION.SDK_INT >= 30 && insets.isVisible(WindowInsets.Type.systemBars())) {
+                android.graphics.Insets i = insets.getInsets(WindowInsets.Type.systemBars());
+                l = i.left; t = i.top; r = i.right; b = i.bottom;
+            }
+            v.setPadding(l, t, r, b);
+            return insets;
+        });
 
         View dv = getWindow().getDecorView();
         dv.setOnSystemUiVisibilityChangeListener(this);
@@ -815,6 +829,7 @@ public class SDLActivity extends Activity implements View.OnSystemUiVisibilityCh
     protected void onResume() {
         Log.v(TAG, "onResume()");
         super.onResume();
+        applyImmersive();
 
         // If we were waiting for the "All Files Access" permission...
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
@@ -894,6 +909,7 @@ public class SDLActivity extends Activity implements View.OnSystemUiVisibilityCh
 
         mHasFocus = hasFocus;
         if (hasFocus) {
+           applyImmersive();
            mNextNativeState = NativeState.RESUMED;
            SDLActivity.getMotionListener().reclaimRelativeMouseModeIfNeeded();
 
@@ -1104,6 +1120,7 @@ public class SDLActivity extends Activity implements View.OnSystemUiVisibilityCh
     // Commands from the game (src/util_android.go).
     static final int COMMAND_TEXT_ENTRY = COMMAND_USER + 1;   // 1: a text box opened, 0: closed
     static final int COMMAND_TOUCH_GLYPHS = COMMAND_USER + 2; // the buttons' glyph images changed
+    static final int COMMAND_TOUCH_BUTTONS = COMMAND_USER + 3; // the buttons to show, bit i for ControllerOverlay's REMOTE_VIEWS[i]
 
     protected static boolean mFullscreenModeActive;
 
@@ -1125,6 +1142,11 @@ public class SDLActivity extends Activity implements View.OnSystemUiVisibilityCh
                 return true;
             case COMMAND_TOUCH_GLYPHS:
                 mTouchControls.reloadGlyphs();
+                return true;
+            case COMMAND_TOUCH_BUTTONS:
+                if (param instanceof Integer) {
+                    mTouchControls.setButtons((Integer) param);
+                }
                 return true;
         }
         return false;
@@ -1156,7 +1178,11 @@ public class SDLActivity extends Activity implements View.OnSystemUiVisibilityCh
                     if (context instanceof Activity) {
                         Window window = ((Activity) context).getWindow();
                         if (window != null) {
-                            if ((msg.obj instanceof Integer) && ((Integer) msg.obj != 0)) {
+                            if (context instanceof SDLActivity) {
+                                // A window on a phone or TV is the whole
+                                // screen, whatever the game asks for.
+                                ((SDLActivity) context).applyImmersive();
+                            } else if ((msg.obj instanceof Integer) && ((Integer) msg.obj != 0)) {
                                 int flags = View.SYSTEM_UI_FLAG_FULLSCREEN |
                                         View.SYSTEM_UI_FLAG_HIDE_NAVIGATION |
                                         View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY |
@@ -2040,21 +2066,45 @@ public class SDLActivity extends Activity implements View.OnSystemUiVisibilityCh
         dialog.show();
     }
 
-    private final Runnable rehideSystemUi = new Runnable() {
-        @Override
-        public void run() {
-            if (Build.VERSION.SDK_INT >= 19 /* Android 4.4 (KITKAT) */) {
-                int flags = View.SYSTEM_UI_FLAG_FULLSCREEN |
-                        View.SYSTEM_UI_FLAG_HIDE_NAVIGATION |
-                        View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY |
-                        View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN |
-                        View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION |
-                        View.SYSTEM_UI_FLAG_LAYOUT_STABLE | View.INVISIBLE;
+    private final Runnable rehideSystemUi = this::applyImmersive;
 
-                SDLActivity.this.getWindow().getDecorView().setSystemUiVisibility(flags);
+    /**
+     * Full screen, edge to edge: the game draws under the system bars and
+     * any display cutout, and the bars stay hidden. A swipe from the edge
+     * shows them for a moment, over the game. It is applied again when the
+     * activity resumes or regains the focus (after a dialog or the keyboard).
+     */
+    void applyImmersive() {
+        Window window = getWindow();
+        if (window == null) {
+            return;
+        }
+        if (Build.VERSION.SDK_INT >= 28 /* Android 9 (Pie) */) {
+            WindowManager.LayoutParams attrs = window.getAttributes();
+            if (attrs.layoutInDisplayCutoutMode != WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES) {
+                attrs.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
+                window.setAttributes(attrs);
             }
         }
-    };
+        window.addFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN);
+        window.clearFlags(WindowManager.LayoutParams.FLAG_FORCE_NOT_FULLSCREEN);
+        if (Build.VERSION.SDK_INT >= 30 /* Android 11 (R) */) {
+            window.setDecorFitsSystemWindows(false);
+            WindowInsetsController controller = window.getInsetsController();
+            if (controller != null) {
+                controller.setSystemBarsBehavior(WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
+                controller.hide(WindowInsets.Type.systemBars());
+            }
+        } else if (Build.VERSION.SDK_INT >= 19 /* Android 4.4 (KITKAT) */) {
+            window.getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_FULLSCREEN |
+                    View.SYSTEM_UI_FLAG_HIDE_NAVIGATION |
+                    View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY |
+                    View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN |
+                    View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION |
+                    View.SYSTEM_UI_FLAG_LAYOUT_STABLE);
+        }
+        mFullscreenModeActive = true;
+    }
 
     public void onSystemUiVisibilityChange(int visibility) {
         if (SDLActivity.mFullscreenModeActive && ((visibility & View.SYSTEM_UI_FLAG_FULLSCREEN) == 0 || (visibility & View.SYSTEM_UI_FLAG_HIDE_NAVIGATION) == 0)) {
