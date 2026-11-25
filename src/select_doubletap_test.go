@@ -1,9 +1,11 @@
 package main
 
 import (
+	"os"
 	"reflect"
 	"testing"
 
+	"github.com/yuin/gopher-lua/parse"
 	"gopkg.in/ini.v1"
 )
 
@@ -52,5 +54,20 @@ func TestSelectSlotDoubleTapParsed(t *testing.T) {
 	dt := selectInfoWith(t, "cell.slot.doubletap.key", "s", "cell.slot.doubletap.time", "12").SelectInfo.Cell.Slot.DoubleTap
 	if !reflect.DeepEqual(dt.Key, []string{"s"}) || dt.Time != 12 {
 		t.Errorf("doubletap = %+v, want key [s] time 12", dt)
+	}
+}
+
+// The select screen scripts holding the double tap and [Codes] still parse.
+func TestSelectScriptsParse(t *testing.T) {
+	for _, name := range []string{"../external/script/main.lua", "../external/script/start.lua"} {
+		f, err := os.Open(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = parse.Parse(f, name)
+		f.Close()
+		if err != nil {
+			t.Errorf("%s: %v", name, err)
+		}
 	}
 }

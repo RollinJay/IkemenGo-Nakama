@@ -1611,6 +1611,10 @@ local function slotDoubleTap(cell, cmd, player)
 	if dt == nil or dt.key == nil or #dt.key == 0 or dt.key[1] == '' then
 		return false
 	end
+	if start.f_selectCodeArmed(player) then
+		t_slotTap[player] = nil
+		return false
+	end
 	local now = getFrameCount()
 	local window = math.max(dt.time or 15, 1)
 	local t = t_slotTap[player]
@@ -1637,6 +1641,151 @@ local function slotDoubleTap(cell, cmd, player)
 	end
 	t_slotTap[player] = t
 	return false
+end
+
+--select.def [Codes] (see main.f_addSelectCode): per player cursor history
+local t_codeState = {}
+local t_attackKeys = {a = true, b = true, c = true, x = true, y = true, z = true}
+
+--true while some code's path is complete for this player
+function start.f_selectCodeArmed(player)
+	return t_codeState[player] ~= nil and t_codeState[player].armed ~= nil
+end
+
+local function cellHas(cell, ref)
+	local grid = main.t_selGrid[cell]
+	if grid == nil then
+		return false
+	end
+	for _, r in ipairs(grid.chars) do
+		if main.t_selChars[r] ~= nil and main.t_selChars[r].char_ref == ref then
+			return true
+		end
+	end
+	return false
+end
+
+--true when the player highlighted the code's path in order and is still
+--on its last character
+local function codePathDone(code, st, side, now, cell)
+	local refs = code['p' .. side .. 'pathrefs'] or code.pathrefs
+	if refs == nil or #refs == 0 then
+		return false
+	end
+	if now - st.from + 1 < code.hold or not cellHas(cell, refs[#refs]) then
+		return false
+	end
+	local idx = #refs - 1
+	for i = #st.hist, 1, -1 do
+		if idx == 0 then
+			break
+		end
+		local h = st.hist[i]
+		if h.frames >= code.hold then
+			if not cellHas(h.cell, refs[idx]) then
+				return false
+			end
+			idx = idx - 1
+		end
+	end
+	return idx == 0
+end
+
+--hold times of the code's buttons; nil unless all are held
+local function codeChord(code, cmd)
+	local newest, oldest = math.huge, 0
+	for _, k in ipairs(code.input) do
+		local t = getInput(cmd, k) and 1 or getInputTime(cmd, k)
+		if t <= 0 then
+			return nil
+		end
+		newest, oldest = math.min(newest, t), math.max(oldest, t)
+	end
+	return newest, oldest
+end
+
+--Tracks the cursor and the code buttons. Returns:
+--  'fire', ref, pal, fresh: the code's character is chosen (each frame
+--    until the selection goes through or the cursor moves)
+--  'wait': a code button was pressed with its path done; the normal
+--    selection waits up to inputtime frames for the rest of the buttons
+--  'select', pal: the wait ran out, the normal selection goes through
+--  nil: nothing to do
+function start.f_selectCode(side, cmd, player, cell, selected)
+	if #main.t_selCodes == 0 or cmd == nil then
+		return nil
+	end
+	local now = getFrameCount()
+	local st = t_codeState[player]
+	if st == nil or st.cell ~= cell or now - st.last > 1 then
+		local hist = st ~= nil and st.hist or {}
+		if st ~= nil and now - st.last <= 1 then
+			table.insert(hist, {cell = st.cell, frames = now - st.from})
+			if #hist > 32 then
+				table.remove(hist, 1)
+			end
+		elseif st ~= nil then
+			hist = {}
+		end
+		st = {cell = cell, from = now, hist = hist}
+		t_codeState[player] = st
+	end
+	st.last = now
+	if st.pending ~= nil then
+		return 'fire', st.pending.ref, st.pending.pal, false
+	end
+	st.armed = nil
+	for _, code in ipairs(main.t_selCodes) do
+		if codePathDone(code, st, side, now, cell) then
+			if st.armed == nil then
+				st.armed = code
+				main.f_preloadBoostChar(code.ref)
+			end
+			local newest, oldest = codeChord(code, cmd)
+			if newest == 1 and oldest <= code.inputtime then
+				local pal = code.pal
+				if pal == nil and st.wait ~= nil and st.wait.pal > 0 then
+					pal = st.wait.pal
+				end
+				if pal == nil or pal <= 0 then
+					pal = main.f_btnPalNo(cmd)
+				end
+				st.pending = {ref = code.ref, pal = pal}
+				st.wait = nil
+				return 'fire', code.ref, pal, true
+			end
+		end
+	end
+	if st.armed == nil then
+		st.wait = nil
+		return nil
+	end
+	if st.wait ~= nil then
+		if now - st.wait.frame >= st.armed.inputtime then
+			local pal = st.wait.pal
+			st.wait = nil
+			return 'select', pal
+		end
+		return 'wait'
+	end
+	if selected then
+		-- an attack button of the code was pressed: wait for the others
+		for _, k in ipairs(st.armed.input) do
+			if t_attackKeys[k] and getInput(cmd, k) then
+				st.wait = {frame = now, pal = main.f_btnPalNo(cmd)}
+				return 'wait'
+			end
+		end
+	end
+	return nil
+end
+
+--forget the chosen code once the selection went through
+function start.f_selectCodeDone(player)
+	if t_codeState[player] ~= nil then
+		t_codeState[player].pending = nil
+		t_codeState[player].wait = nil
+	end
 end
 
 --return true if slot is selected, update start.t_grid
@@ -4070,6 +4219,18 @@ function start.f_selectMenu(side, cmd, player, member, selectState)
 			else
 				local updateAnim = false
 				local slotSelected,slotChanged = start.f_slotSelected(start.c[player].cell + 1, side, cmd, player, start.c[player].selX, start.c[player].selY)
+				-- select.def [Codes]
+				local codeAct, codeRef, codePal, codeFresh = start.f_selectCode(side, cmd, player, start.c[player].cell + 1, slotSelected)
+				if codeAct == 'fire' then
+					slotSelected = true
+					start.c[player].selRef = codeRef
+					updateAnim = updateAnim or codeFresh
+				elseif codeAct == 'wait' then
+					slotSelected = false
+				elseif codeAct == 'select' then
+					slotSelected = true
+					codePal = codeRef
+				end
 				local timerExpired = motif.select_info.timer.count ~= -1 and timerSelect == -1
 				needUpdateDrawList = slotChanged
 				local velCopy = false
@@ -4153,7 +4314,7 @@ function start.f_selectMenu(side, cmd, player, member, selectState)
 						end
 					end
 					if not preloadReady then
-						if slotSelected then
+						if slotSelected and codeAct ~= 'fire' then
 							sndPlay(motif.Snd, motif.select_info.cancel.snd[1], motif.select_info.cancel.snd[2])
 						end
 						canConfirm = false
@@ -4171,6 +4332,10 @@ function start.f_selectMenu(side, cmd, player, member, selectState)
 						resetCursorData(player, 'done')
 					end
 					start.p[side].t_selTemp[member].pal = main.f_btnPalNo(cmd)
+					if (codeAct == 'fire' or codeAct == 'select') and codePal ~= nil and codePal > 0 then
+						start.p[side].t_selTemp[member].pal = codePal
+					end
+					start.f_selectCodeDone(player)
 					start.p[side].t_selTemp[member].inRandom = false
 					start.p[side].t_selTemp[member].slotConfirmed = true
 					if not gameOption('Options.Team.Duplicates') then
