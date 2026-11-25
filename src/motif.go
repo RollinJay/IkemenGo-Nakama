@@ -743,6 +743,12 @@ type SelectInfoProperties struct {
 			Previous struct {
 				Key []string `ini:"key"`
 			} `ini:"previous"`
+			// Pressing a key twice within Time frames over a slot
+			// steps to the next character, like Next.Key.
+			DoubleTap struct {
+				Key  []string `ini:"key"`
+				Time int32    `ini:"time"`
+			} `ini:"doubletap"`
 		} `ini:"slot"`
 	} `ini:"cell"`
 	P1      PlayerSelectProperties `ini:"p1"`

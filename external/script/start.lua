@@ -1599,6 +1599,46 @@ local function slotCycle(cell, dir)
 	return false
 end
 
+--[Select Info] cell.slot.doubletap: per player progress of a double tap
+local t_slotTap = {}
+
+--true when the key is tapped twice over the same cell: press, release,
+--press, release, each press released and the second press started within
+--cell.slot.doubletap.time frames. A press held longer (Start held for
+--palettes 7-12) or an attack button pressed in between cancels it.
+local function slotDoubleTap(cell, cmd, player)
+	local dt = motif.select_info.cell.slot.doubletap
+	if dt == nil or dt.key == nil or #dt.key == 0 or dt.key[1] == '' then
+		return false
+	end
+	local now = getFrameCount()
+	local window = math.max(dt.time or 15, 1)
+	local t = t_slotTap[player]
+	if t ~= nil and (t.cell ~= cell or now - t.frame > window or main.f_btnPalNo(cmd) > 0) then
+		t = nil
+	end
+	local pressed = getInput(cmd, dt.key)
+	local held = pressed or getInputTime(cmd, dt.key) > 0
+	if t == nil then
+		if pressed then
+			t = {cell = cell, frame = now, taps = 1, down = true}
+		end
+	elseif t.down then
+		if not held then
+			-- released in time
+			if t.taps == 2 then
+				t_slotTap[player] = nil
+				return true
+			end
+			t.down, t.frame = false, now
+		end
+	elseif pressed then
+		t.taps, t.down, t.frame = 2, true, now
+	end
+	t_slotTap[player] = t
+	return false
+end
+
 --return true if slot is selected, update start.t_grid
 function start.f_slotSelected(cell, side, cmd, player, x, y)
 	if cmd == nil then
@@ -1631,6 +1671,13 @@ function start.f_slotSelected(cell, side, cmd, player, x, y)
 					break
 				end
 			end
+		end
+		-- [Select Info] cell.slot.doubletap
+		if not pressed and #grid.chars > 1 and slotDoubleTap(cell, cmd, player) then
+			if slotCycle(cell, 1) then
+				sndPlay(motif.Snd, motif.select_info['p' .. side].swap.snd[1], motif.select_info['p' .. side].swap.snd[2])
+			end
+			pressed = true
 		end
 		if pressed then
 			start.t_grid[y + 1][x + 1].char = start.f_selGrid(cell).char
