@@ -212,7 +212,7 @@ func Java_org_libsdl_app_SDLActivity_nativeSetKeyboardCover(env *C.JNIEnv, clazz
 const (
 	appMsgTextEntry    = 0x8001 // a text box opened (1) or closed (0)
 	appMsgTouchGlyphs  = 0x8002 // the touch buttons' glyph images changed
-	appMsgTouchButtons = 0x8003 // the touch buttons to show: bit i is touchButtonTokens[i]
+	appMsgTouchButtons = 0x8003 // the touch buttons to show, and Start's place (touchButtonsMessage)
 )
 
 // sendToApp sends the app a command, which it handles on its own thread.

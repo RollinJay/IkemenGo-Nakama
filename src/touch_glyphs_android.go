@@ -30,9 +30,10 @@ func touchControlsUpdate() {
 	}
 	touchGlyphsWait = 30
 	m := &sys.motif
-	if set := touchButtonsShown(sys.cfg.Input.TouchButtons, m.TouchControls.Buttons); set != touchButtonsSent {
-		touchButtonsSent = set
-		sendToApp(appMsgTouchButtons, set)
+	set := touchButtonsShown(sys.cfg.Input.TouchButtons, m.TouchControls.Buttons)
+	if msg := touchButtonsMessage(set, touchStartSlot(m.TouchControls.Start.Slot, set)); msg != touchButtonsSent {
+		touchButtonsSent = msg
+		sendToApp(appMsgTouchButtons, msg)
 	}
 	storage := sdl.AndroidGetInternalStoragePath()
 	if m.GlyphsSff == nil || m.GlyphsSff.filename == "" || storage == "" {

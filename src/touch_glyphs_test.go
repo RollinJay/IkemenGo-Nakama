@@ -296,3 +296,33 @@ func TestTouchButtonsShown(t *testing.T) {
 		}
 	}
 }
+
+func TestTouchStartSlot(t *testing.T) {
+	noDW := touchButtonsAll &^ (1<<6 | 1<<7)
+	for _, tc := range []struct {
+		slot string
+		set  int
+		want int
+	}{
+		{"", noDW, -1},
+		{"d", noDW, 6},
+		{" W ", noDW, 7},
+		{"d", touchButtonsAll, -1},  // D shows: Start keeps its place
+		{"d", noDW &^ (1 << 8), -1}, // Start hidden
+		{"s", noDW, -1},             // not a grid button
+		{"m", noDW &^ (1 << 9), -1}, // not a grid button
+	} {
+		if got := touchStartSlot(tc.slot, tc.set); got != tc.want {
+			t.Errorf("touchStartSlot(%q, %#x) = %d, want %d", tc.slot, tc.set, got, tc.want)
+		}
+	}
+	if got := touchButtonsMessage(noDW, 6); got != noDW|7<<10 {
+		t.Errorf("touchButtonsMessage = %#x", got)
+	}
+	if got := touchButtonsMessage(touchButtonsAll, -1); got != touchButtonsAll {
+		t.Errorf("touchButtonsMessage without a slot = %#x", got)
+	}
+	if s := defaultTouchControls(t).Start.Slot; s != "" {
+		t.Errorf("default start.slot = %q, want empty", s)
+	}
+}

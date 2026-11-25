@@ -58,6 +58,12 @@ public class ControllerOverlay extends RelativeLayout {
     private static final int[][] GRID_ROWS = {{R.id.btn_w, R.id.btn_z, R.id.btn_y, R.id.btn_x},
             {R.id.btn_d, R.id.btn_c, R.id.btn_b, R.id.btn_a}};
     private int shownButtons = ALL_BUTTONS;
+    // The grid button whose place Start takes (an index in REMOTE_VIEWS),
+    // or -1 while Start sits beside Menu, where startParent holds it.
+    private int startSlot = -1;
+    private ViewGroup startParent;
+    private int startIndex;
+    private ViewGroup.LayoutParams startParams;
     private final Map<Integer, CharSequence> plainText = new HashMap<>();
     private final Map<Integer, Drawable> plainBackground = new HashMap<>();
     private int hatX, hatY = 0;
@@ -512,11 +518,16 @@ public class ControllerOverlay extends RelativeLayout {
      * together, close up; in the grid, the buttons move right over the gaps.
      */
     public void setButtonsShown(int set) {
+        int slot = ((set >> 10) & 0xF) - 1;
         set &= ALL_BUTTONS;
-        if (set == shownButtons) {
+        if (slot >= 8 || (set & (1 << slot)) != 0 || (set & (1 << 8)) == 0) {
+            slot = -1;
+        }
+        if (set == shownButtons && slot == startSlot) {
             return;
         }
         shownButtons = set;
+        placeStart(slot);
         for (int i = 0; i < REMOTE_VIEWS.length; i++) {
             View v = findViewById(REMOTE_VIEWS[i]);
             if (v == null) continue;
@@ -530,6 +541,36 @@ public class ControllerOverlay extends RelativeLayout {
         }
         closeGaps();
         requestLayout();
+    }
+
+    // Moves Start into the grid, over the hidden button REMOTE_VIEWS[slot],
+    // or back beside Menu for -1.
+    private void placeStart(int slot) {
+        if (slot == startSlot) {
+            return;
+        }
+        View start = findViewById(R.id.btn_start);
+        if (start == null) {
+            return;
+        }
+        if (startParent == null) {
+            startParent = (ViewGroup) start.getParent();
+            startIndex = startParent.indexOfChild(start);
+            startParams = start.getLayoutParams();
+        }
+        ((ViewGroup) start.getParent()).removeView(start);
+        start.setTranslationX(0);
+        start.setTranslationY(0);
+        if (slot < 0) {
+            startParent.addView(start, startIndex, startParams);
+        } else {
+            View place = findViewById(REMOTE_VIEWS[slot]);
+            RelativeLayout.LayoutParams params = new RelativeLayout.LayoutParams(place.getLayoutParams().width, place.getLayoutParams().height);
+            params.addRule(RelativeLayout.ALIGN_LEFT, REMOTE_VIEWS[slot]);
+            params.addRule(RelativeLayout.ALIGN_TOP, REMOTE_VIEWS[slot]);
+            ((ViewGroup) findViewById(R.id.button_grid)).addView(start, params);
+        }
+        startSlot = slot;
     }
 
     // Lets go of code wherever a finger holds it.
@@ -548,12 +589,13 @@ public class ControllerOverlay extends RelativeLayout {
     }
 
     // Moves each row's shown buttons, keeping their order, to the row's
-    // rightmost places.
+    // rightmost places. Start, in the grid, holds the place it took.
     private void closeGaps() {
+        int startId = startSlot >= 0 ? REMOTE_VIEWS[startSlot] : View.NO_ID;
         for (int[] row : GRID_ROWS) {
             int place = 0;
             for (int id : row) {
-                View v = findViewById(id);
+                View v = findViewById(id == startId ? R.id.btn_start : id);
                 if (v == null) continue;
                 if (v.getVisibility() != View.VISIBLE) {
                     v.setTranslationX(0);

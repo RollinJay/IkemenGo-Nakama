@@ -29,7 +29,12 @@ type TouchControlsProperties struct {
 	// Buttons are the on-screen buttons shown (touchButtonTokens); empty
 	// shows them all.
 	Buttons []string `ini:"buttons"`
-	Glyph   struct {
+	// Start.Slot is a grid button (a, b, c, x, y, z, d or w) whose place
+	// Start takes while that button is hidden; empty keeps Start beside Menu.
+	Start struct {
+		Slot string `ini:"slot"`
+	} `ini:"start"`
+	Glyph struct {
 		A     []string `ini:"a"`
 		B     []string `ini:"b"`
 		C     []string `ini:"c"`
@@ -91,6 +96,30 @@ func touchButtonsShown(option string, screenpack []string) int {
 		return set
 	}
 	return touchButtonsAll
+}
+
+// touchGridButtons is how many of touchButtonTokens, from the first, sit in
+// the attack grid, where Start can take a hidden button's place.
+const touchGridButtons = 8
+
+// touchStartSlot is the index in touchButtonTokens of the grid button whose
+// place Start takes, from [Touch Controls] start.slot, or -1 if it keeps its
+// own: the slot must name a grid button that set hides, and Start must show.
+func touchStartSlot(slot string, set int) int {
+	slot = strings.ToLower(strings.TrimSpace(slot))
+	for i, name := range touchButtonTokens[:touchGridButtons] {
+		if slot == name && set&(1<<i) == 0 && set&(1<<8) != 0 {
+			return i
+		}
+	}
+	return -1
+}
+
+// touchButtonsMessage is the parameter of appMsgTouchButtons: the set of
+// buttons shown in bits 0 to 9, and in bits 10 to 13 one more than the grid
+// place Start takes (touchStartSlot), 0 for none.
+func touchButtonsMessage(set, startSlot int) int {
+	return set | (startSlot+1)<<10
 }
 
 // touchGlyphTokens picks, for each on-screen button, the glyph of the game
