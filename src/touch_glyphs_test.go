@@ -316,11 +316,17 @@ func TestTouchStartSlot(t *testing.T) {
 			t.Errorf("touchStartSlot(%q, %#x) = %d, want %d", tc.slot, tc.set, got, tc.want)
 		}
 	}
-	if got := touchButtonsMessage(noDW, 6); got != noDW|7<<10 {
+	if got := touchButtonsMessage(noDW, 6, ""); got != noDW|7<<10 {
 		t.Errorf("touchButtonsMessage = %#x", got)
 	}
-	if got := touchButtonsMessage(touchButtonsAll, -1); got != touchButtonsAll {
+	if got := touchButtonsMessage(touchButtonsAll, -1, "arcade"); got != touchButtonsAll {
 		t.Errorf("touchButtonsMessage without a slot = %#x", got)
+	}
+	if got := touchButtonsMessage(noDW, 6, " Grid "); got != noDW|7<<10|touchLayoutGrid {
+		t.Errorf("touchButtonsMessage with the grid layout = %#x", got)
+	}
+	if l := defaultTouchControls(t).Layout; l != "arcade" {
+		t.Errorf("default layout = %q, want arcade", l)
 	}
 	if s := defaultTouchControls(t).Start.Slot; s != "" {
 		t.Errorf("default start.slot = %q, want empty", s)

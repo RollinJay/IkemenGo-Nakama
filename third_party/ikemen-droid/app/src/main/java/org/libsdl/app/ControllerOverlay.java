@@ -64,6 +64,12 @@ public class ControllerOverlay extends RelativeLayout {
     private ViewGroup startParent;
     private int startIndex;
     private ViewGroup.LayoutParams startParams;
+    // The grid layout (set by the game): each punch straight above its kick,
+    // and Start, in the grid, apart on the right. Otherwise the grid keeps
+    // the layout file's staggered rows, saved in arcadeParams.
+    static final int LAYOUT_GRID = 1 << 14;
+    private boolean gridLayout;
+    private RelativeLayout.LayoutParams[] arcadeParams;
     private final Map<Integer, CharSequence> plainText = new HashMap<>();
     private final Map<Integer, Drawable> plainBackground = new HashMap<>();
     private int hatX, hatY = 0;
@@ -519,14 +525,16 @@ public class ControllerOverlay extends RelativeLayout {
      */
     public void setButtonsShown(int set) {
         int slot = ((set >> 10) & 0xF) - 1;
+        boolean grid = (set & LAYOUT_GRID) != 0;
         set &= ALL_BUTTONS;
         if (slot >= 8 || (set & (1 << slot)) != 0 || (set & (1 << 8)) == 0) {
             slot = -1;
         }
-        if (set == shownButtons && slot == startSlot) {
+        if (set == shownButtons && slot == startSlot && grid == gridLayout) {
             return;
         }
         shownButtons = set;
+        gridLayout = grid;
         placeStart(slot);
         for (int i = 0; i < REMOTE_VIEWS.length; i++) {
             View v = findViewById(REMOTE_VIEWS[i]);
@@ -539,8 +547,58 @@ public class ControllerOverlay extends RelativeLayout {
             boolean inGrid = REMOTE_VIEWS[i] != R.id.btn_start && REMOTE_VIEWS[i] != R.id.btn_back;
             v.setVisibility(show ? View.VISIBLE : inGrid ? View.INVISIBLE : View.GONE);
         }
+        arrangeGrid();
         closeGaps();
         requestLayout();
+    }
+
+    // Lays the grid out as gridLayout says (see LAYOUT_GRID).
+    private void arrangeGrid() {
+        if (arcadeParams == null) {
+            arcadeParams = new RelativeLayout.LayoutParams[8];
+            for (int i = 0; i < 8; i++) {
+                arcadeParams[i] = new RelativeLayout.LayoutParams((RelativeLayout.LayoutParams) findViewById(REMOTE_VIEWS[i]).getLayoutParams());
+            }
+        }
+        View start = findViewById(R.id.btn_start);
+        if (!gridLayout) {
+            for (int i = 0; i < 8; i++) {
+                findViewById(REMOTE_VIEWS[i]).setLayoutParams(new RelativeLayout.LayoutParams(arcadeParams[i]));
+            }
+            if (startSlot >= 0 && start != null) {
+                View place = findViewById(REMOTE_VIEWS[startSlot]);
+                RelativeLayout.LayoutParams params = new RelativeLayout.LayoutParams(place.getLayoutParams().width, place.getLayoutParams().height);
+                params.addRule(RelativeLayout.ALIGN_LEFT, REMOTE_VIEWS[startSlot]);
+                params.addRule(RelativeLayout.ALIGN_TOP, REMOTE_VIEWS[startSlot]);
+                start.setLayoutParams(params);
+            }
+            return;
+        }
+        int size = dpToPx(55), gap = dpToPx(6), top = dpToPx(20);
+        int right = 0;
+        if (startSlot >= 0 && start != null) {
+            start.setLayoutParams(gridParams(size, right, top + (size + gap) / 2));
+            right += size + dpToPx(20);
+        }
+        // Columns from the right: w over d (while either shows), z over c,
+        // y over b, x over a.
+        boolean dw = (shownButtons & (3 << 6)) != 0;
+        int[][] columns = {{R.id.btn_w, R.id.btn_d}, {R.id.btn_z, R.id.btn_c}, {R.id.btn_y, R.id.btn_b}, {R.id.btn_x, R.id.btn_a}};
+        for (int[] column : columns) {
+            if (column[0] == R.id.btn_w && !dw) continue;
+            findViewById(column[0]).setLayoutParams(gridParams(size, right, top));
+            findViewById(column[1]).setLayoutParams(gridParams(size, right, top + size + gap));
+            right += size + gap;
+        }
+    }
+
+    private RelativeLayout.LayoutParams gridParams(int size, int right, int top) {
+        RelativeLayout.LayoutParams params = new RelativeLayout.LayoutParams(size, size);
+        params.addRule(RelativeLayout.ALIGN_PARENT_RIGHT);
+        params.addRule(RelativeLayout.ALIGN_PARENT_TOP);
+        params.rightMargin = right;
+        params.topMargin = top;
+        return params;
     }
 
     // Moves Start into the grid, over the hidden button REMOTE_VIEWS[slot],
@@ -591,6 +649,17 @@ public class ControllerOverlay extends RelativeLayout {
     // Moves each row's shown buttons, keeping their order, to the row's
     // rightmost places. Start, in the grid, holds the place it took.
     private void closeGaps() {
+        if (gridLayout) {
+            // arrangeGrid placed every button already.
+            for (int id : REMOTE_VIEWS) {
+                View v = findViewById(id);
+                if (v != null) {
+                    v.setTranslationX(0);
+                    v.setTranslationY(0);
+                }
+            }
+            return;
+        }
         int startId = startSlot >= 0 ? REMOTE_VIEWS[startSlot] : View.NO_ID;
         for (int[] row : GRID_ROWS) {
             int place = 0;

@@ -31,7 +31,7 @@ func touchControlsUpdate() {
 	touchGlyphsWait = 30
 	m := &sys.motif
 	set := touchButtonsShown(sys.cfg.Input.TouchButtons, m.TouchControls.Buttons)
-	if msg := touchButtonsMessage(set, touchStartSlot(m.TouchControls.Start.Slot, set)); msg != touchButtonsSent {
+	if msg := touchButtonsMessage(set, touchStartSlot(m.TouchControls.Start.Slot, set), m.TouchControls.Layout); msg != touchButtonsSent {
 		touchButtonsSent = msg
 		sendToApp(appMsgTouchButtons, msg)
 	}

@@ -34,7 +34,11 @@ type TouchControlsProperties struct {
 	Start struct {
 		Slot string `ini:"slot"`
 	} `ini:"start"`
-	Glyph struct {
+	// Layout is how the grid is arranged: "arcade" (the default) staggers
+	// it, "grid" puts each punch straight above its kick
+	// (touchLayoutGrid).
+	Layout string `ini:"layout"`
+	Glyph  struct {
 		A     []string `ini:"a"`
 		B     []string `ini:"b"`
 		C     []string `ini:"c"`
@@ -115,11 +119,21 @@ func touchStartSlot(slot string, set int) int {
 	return -1
 }
 
+// touchLayoutGrid is bit 14 of appMsgTouchButtons' parameter: the grid's
+// buttons in two straight rows, x, y and z above a, b and c, with d and w in
+// a fourth column and Start, when it is in the grid, apart on the right.
+const touchLayoutGrid = 1 << 14
+
 // touchButtonsMessage is the parameter of appMsgTouchButtons: the set of
-// buttons shown in bits 0 to 9, and in bits 10 to 13 one more than the grid
-// place Start takes (touchStartSlot), 0 for none.
-func touchButtonsMessage(set, startSlot int) int {
-	return set | (startSlot+1)<<10
+// buttons shown in bits 0 to 9, in bits 10 to 13 one more than the grid
+// place Start takes (touchStartSlot), 0 for none, and touchLayoutGrid for
+// [Touch Controls] layout = grid.
+func touchButtonsMessage(set, startSlot int, layout string) int {
+	msg := set | (startSlot+1)<<10
+	if strings.EqualFold(strings.TrimSpace(layout), "grid") {
+		msg |= touchLayoutGrid
+	}
+	return msg
 }
 
 // touchGlyphTokens picks, for each on-screen button, the glyph of the game

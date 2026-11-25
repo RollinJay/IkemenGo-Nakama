@@ -14,7 +14,7 @@ This folder holds the Android app that `build/build.sh Android` packages the gam
   - The on-screen buttons play as a controller named "IKEMEN Touch Controls", with no vendor or product ID and a fixed device ID. SDL keeps that name, so the game can recognise it, and the ID can't collide with a real device.
   - The buttons can be hidden, which also removes their controller.
   - Each button shows the glyph image the game writes for it, or its letter where there is none.
-  - The game chooses which of the ten buttons show (`setButtonsShown`). Hidden grid buttons keep their place in the layout, and the shown ones in their row move right over the gaps; Start and Menu close up. Hidden buttons take no touches and are never a TV remote's targets. The game can also move Start into the grid, in a hidden button's place (`[Touch Controls] start.slot`), for a game whose Start is an attack.
+  - The game chooses which of the ten buttons show (`setButtonsShown`). Hidden grid buttons keep their place in the layout, and the shown ones in their row move right over the gaps; Start and Menu close up. Hidden buttons take no touches and are never a TV remote's targets. The game can also move Start into the grid, in a hidden button's place (`[Touch Controls] start.slot`), for a game whose Start is an attack. With `[Touch Controls] layout = grid` the grid drops its stagger: each punch sits straight above its kick, and Start, in the grid, stands apart on the right.
   - A TV remote can press the buttons (`navigationTargets`, `pressTarget`).
 - **`TouchControls`** (new):
   - **Setting:** Automatic, Always show or Always hide, chosen from a small settings button. Automatic hides the buttons while a real controller is connected.
