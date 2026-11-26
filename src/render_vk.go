@@ -2628,10 +2628,18 @@ func (r *Renderer_VK) CreateRenderTargetFramebuffer(width, height uint32, attach
 }
 
 func (r *Renderer_VK) createShadowMapTexture(widthHeight int32) *Texture_VK {
+	usage := vk.ImageUsageFlags(vk.ImageUsageDepthStencilAttachmentBit | vk.ImageUsageSampledBit)
+	if !r.enableShadow {
+		// No shadow pass will draw into it, but model drawing still binds it.
+		// Keep it tiny and sample-only: a layered depth attachment is exactly
+		// what GPUs without layered rendering refuse (vkCreateImageView).
+		widthHeight = 1
+		usage = vk.ImageUsageFlags(vk.ImageUsageSampledBit)
+	}
 	t := &Texture_VK{widthHeight, widthHeight, 96, false, 1, [2]int32{0, 0}, [4]float32{0, 0, 1, 1}, nil, nil, nil, nil, nil, ResidentDeviceLocal, 0, nil, false, false, false}
 	t.sampler = r.GetSampler(VulkanSamplerInfo{TextureSamplingFilterNearest, TextureSamplingFilterNearest, TextureSamplingWrapClampToEdge, TextureSamplingWrapClampToEdge})
 	format := r.FindSupportedDepthFormat()
-	t.img = r.CreateImage(uint32(widthHeight), uint32(widthHeight), format, 1, 6*4, vk.ImageUsageFlags(vk.ImageUsageDepthStencilAttachmentBit|vk.ImageUsageSampledBit), 1, vk.ImageTilingOptimal, true)
+	t.img = r.CreateImage(uint32(widthHeight), uint32(widthHeight), format, 1, 6*4, usage, 1, vk.ImageTilingOptimal, true)
 
 	alloc, err := r.allocator.AllocateImageMemory(t.img, vk.MemoryPropertyDeviceLocalBit)
 	if err != nil {
