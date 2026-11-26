@@ -56,10 +56,16 @@ typedef struct {
     CGFloat dpad;
 } TouchPanelPlacement;
 
+// Points to the mm on every panel in an area of size, as the Android app's
+// TouchPanels.scale: the largest scale at which each of the four panels, as
+// drawn, fits the width less margins and the bottom 45% of the height
+// (MaxHeight) less a margin. One scale for all, so a button is the same size
+// on each and a shorter panel just stands lower.
+CGFloat TouchPanelScale(CGSize size);
+
 // Lays panel layout out in area, as the Android app does in its pixels with
-// dp for points: the scale fits the whole panel as drawn in the width less
-// margins and the bottom 45% of the height (MaxHeight), and sizes the d-pad
-// and the buttons alike (buttons at least 48 points across, the d-pad 120);
+// dp for points: at TouchPanelScale, which sizes the d-pad and the buttons
+// alike (buttons at least 48 points across, the d-pad 120);
 // then the d-pad sits a margin from the left edge and the eight buttons, as
 // one block keeping the drawing's shape, a margin from the right, the
 // stick's row shared and the lower of them a margin from the bottom.

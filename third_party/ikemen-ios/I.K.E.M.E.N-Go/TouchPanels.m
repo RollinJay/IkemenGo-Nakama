@@ -74,6 +74,23 @@ const CGFloat (*TouchPanelMillimetres(int layout))[2] {
     return TouchLayoutIsPanel(layout) ? Panels[layout - TouchLayoutStraight] : NULL;
 }
 
+CGFloat TouchPanelScale(CGSize size) {
+    CGFloat r = ButtonMM / 2, rd = DPadMM / 2;
+    CGFloat availW = size.width - 2 * MarginPt, availH = size.height * MaxHeight - MarginPt;
+    CGFloat s = CGFLOAT_MAX;
+    for (int k = 0; k < 4; k++) {
+        CGFloat minX = -rd, maxX = rd, minY = -rd, maxY = rd;
+        for (int p = 0; p < TOUCH_PANEL_PLACES; p++) {
+            minX = MIN(minX, Panels[k][p][0] - r);
+            maxX = MAX(maxX, Panels[k][p][0] + r);
+            minY = MIN(minY, Panels[k][p][1] - r);
+            maxY = MAX(maxY, Panels[k][p][1] + r);
+        }
+        s = MIN(s, MIN(availW / (maxX - minX), availH / (maxY - minY)));
+    }
+    return MAX(0, s);
+}
+
 TouchPanelPlacement TouchPanelPlace(int layout, CGRect area) {
     TouchPanelPlacement out;
     memset(&out, 0, sizeof out);
@@ -81,21 +98,15 @@ TouchPanelPlacement TouchPanelPlace(int layout, CGRect area) {
         return out;
     }
     const CGFloat (*panel)[2] = Panels[layout - TouchLayoutStraight];
-    CGFloat r = ButtonMM / 2, rd = DPadMM / 2;
-    CGFloat minX = -rd, maxX = rd, minY = -rd, maxY = rd;
+    CGFloat rd = DPadMM / 2;
     // The rightmost and lowest button centres.
     CGFloat lastX = 0, lowY = -rd;
     for (int p = 0; p < TOUCH_PANEL_PLACES; p++) {
-        minX = MIN(minX, panel[p][0] - r);
-        maxX = MAX(maxX, panel[p][0] + r);
-        minY = MIN(minY, panel[p][1] - r);
-        maxY = MAX(maxY, panel[p][1] + r);
         lastX = MAX(lastX, panel[p][0]);
         lowY = MAX(lowY, panel[p][1]);
     }
     CGFloat w = area.size.width, h = area.size.height;
-    CGFloat availW = w - 2 * MarginPt, availH = h * MaxHeight - MarginPt;
-    CGFloat s = MAX(0, MIN(availW / (maxX - minX), availH / (maxY - minY)));
+    CGFloat s = TouchPanelScale(area.size);
     out.button = MAX(ButtonMM * s, MinButtonPt);
     out.dpad = MAX(DPadMM * s, MinDPadPt);
     // The stick's row; the block's stick, from which its buttons are
