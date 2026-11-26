@@ -15,13 +15,14 @@
 --               opens the app's layout editor over the buttons
 -- At each step it writes "STEP <name>" to ci/steps.log in the game folder,
 -- then waits until run.sh creates ci/ack-<name> (after its screenshot), or
--- for stepTimeout frames. Problems are written as "FAIL <what>", and "DONE"
+-- for stepTimeout seconds. Problems are written as "FAIL <what>", and "DONE"
 -- ends the run. Each line also goes to the game's stdout as [ios-ci].
 
 local ci = {
 	frame = 0,       -- frames drawn since the mod loaded (refresh calls)
 	step = 'title',  -- current step (see steps below)
 	stepFrame = nil, -- frame the current step's wait began
+	stepTime = 0,    -- and the time (os.time, seconds)
 	nextAction = 0,  -- no key press before this frame (menus animate)
 	press = nil,     -- menu key token pressed this frame
 	pressAt = -1,
@@ -30,7 +31,10 @@ local ci = {
 	layout = 0,      -- index in layouts of the On-screen Layout value shown (0: Default)
 	done = false,
 }
-local stepTimeout = 60 * 60 -- frames to wait for an ack (60 s at 60 fps)
+-- Seconds to wait for an ack, as run.sh waits for each step (STEP_TIMEOUT).
+-- Seconds, not frames: the frame rate follows the device (an iPhone 17 runs at
+-- 120 Hz), and a slow simulator screenshot can take a while.
+local stepTimeout = 120
 -- On-screen Layout's values after Default, in the menu's order
 -- (options.t_touchLayouts), and the frames to wait after choosing one: the
 -- game tells the app every 30 frames at most (touchControlsUpdate).
@@ -90,12 +94,13 @@ end
 local function stepReached(name)
 	if ci.stepFrame == nil then
 		ci.stepFrame = ci.frame
+		ci.stepTime = os.time()
 		log('STEP ' .. name)
 	end
 	if exists('ci/ack-' .. name) then
 		return true
 	end
-	if ci.frame - ci.stepFrame > stepTimeout then
+	if os.time() - ci.stepTime > stepTimeout then
 		log('FAIL no ack for ' .. name)
 		return true
 	end
