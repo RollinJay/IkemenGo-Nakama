@@ -2301,12 +2301,15 @@ func (r *Renderer_VK) NewVulkanDevice(appInfo *vk.ApplicationInfo) error {
 
 	// It's apparently best to not enable this on Android (fix Retroid Pocket 6 crash)
 	var vulkan12Features vk.PhysicalDeviceVulkan12Features
+	// The link that points at vulkan12Features, so it can be taken out again.
+	var vulkan12Link *unsafe.Pointer
 	if sys.cfg.Video.EnableModelShadow && runtime.GOOS != "android" {
 		vulkan12Features = vk.PhysicalDeviceVulkan12Features{
 			SType:                     vk.StructureTypePhysicalDeviceVulkan12Features,
 			ShaderOutputViewportIndex: vk.True,
 			ShaderOutputLayer:         vk.True,
 		}
+		vulkan12Link = lastPNext
 		*lastPNext = unsafe.Pointer(&vulkan12Features)
 		lastPNext = &vulkan12Features.PNext
 	}
@@ -2316,7 +2319,21 @@ func (r *Renderer_VK) NewVulkanDevice(appInfo *vk.ApplicationInfo) error {
 	}
 	deviceCreateInfo.PEnabledFeatures = []vk.PhysicalDeviceFeatures{enabledFeats}
 	var device vk.Device
-	err = vk.Error(vk.CreateDevice(r.gpuDevices[r.gpuIndex], deviceCreateInfo, nil, &device))
+	res := vk.CreateDevice(r.gpuDevices[r.gpuIndex], deviceCreateInfo, nil, &device)
+	if res == vk.ErrorFeatureNotPresent && vulkan12Link != nil {
+		// Layered rendering (shaderOutputLayer/shaderOutputViewportIndex) is
+		// only needed for model shadow maps. Some GPUs lack it (the iOS
+		// Simulator's, for one) even when they list
+		// VK_EXT_shader_viewport_index_layer, and the binding can't ask with
+		// vkGetPhysicalDeviceFeatures2. Try again without it, shadows off.
+		vulkan12Features.PNext = nil
+		*vulkan12Link = nil
+		LogMessage("Vulkan: layered rendering not supported, 3D model shadows turned off")
+		r.enableShadow = false
+		r.VKState.VulkanModelPipelineState.VulkanModelSpecializationConstants1.useShadowMap = false
+		res = vk.CreateDevice(r.gpuDevices[r.gpuIndex], deviceCreateInfo, nil, &device)
+	}
+	err = vk.Error(res)
 	if err != nil {
 		//r.gpuDevices = nil
 		vk.DestroySurface(r.instance, r.surface, nil)
