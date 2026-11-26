@@ -184,11 +184,14 @@ end
 local realRefresh = refresh
 refresh = function(...)
 	ci.frame = ci.frame + 1
-	-- Leaves the test's text box once run.sh has its screenshot.
+	-- refresh() itself returns nothing.
+	realRefresh(...)
+	-- Leaves the test's text box once run.sh has its screenshot. After the
+	-- frame, not before: refresh polls events (sys.eventUpdate), which clears
+	-- esc, so main.f_drawInput would never see it.
 	if ci.textbox and stepReached('textbox') then
 		esc(true)
 	end
-	return realRefresh(...)
 end
 
 -- One frame of the test, from the menus' draw call (t: items, item: the
