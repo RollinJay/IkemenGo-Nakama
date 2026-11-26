@@ -346,6 +346,8 @@ public class SDLActivity extends Activity implements View.OnSystemUiVisibilityCh
     private ControllerOverlay mControllerOverlay;
     private TouchControls mTouchControls;
     private final Runnable hideRunnable = () -> {
+        // The layout editor stays until the player closes it.
+        if (mTouchControls != null && mTouchControls.isEditing()) return;
         if (mLayout != null) mLayout.setVisibility(View.INVISIBLE);
     };
     // How many pixels at the bottom of the game's surface the on-screen
@@ -1120,7 +1122,10 @@ public class SDLActivity extends Activity implements View.OnSystemUiVisibilityCh
     // Commands from the game (src/util_android.go).
     static final int COMMAND_TEXT_ENTRY = COMMAND_USER + 1;   // 1: a text box opened, 0: closed
     static final int COMMAND_TOUCH_GLYPHS = COMMAND_USER + 2; // the buttons' glyph images changed
-    static final int COMMAND_TOUCH_BUTTONS = COMMAND_USER + 3; // the buttons to show, bit i for ControllerOverlay's REMOTE_VIEWS[i]
+    static final int COMMAND_TOUCH_BUTTONS = COMMAND_USER + 3; // the buttons to show, bit i for ControllerOverlay's REMOTE_VIEWS[i], and the layout
+    // COMMAND_USER + 4 is iOS's controller count.
+    static final int COMMAND_TOUCH_EDIT = COMMAND_USER + 5;    // open the on-screen buttons' layout editor
+    static final int COMMAND_TOUCH_PANEL = COMMAND_USER + 6;   // the attack buttons' places on an arcade panel (TouchPanels.DEFAULT_MAP)
 
     protected static boolean mFullscreenModeActive;
 
@@ -1146,6 +1151,14 @@ public class SDLActivity extends Activity implements View.OnSystemUiVisibilityCh
             case COMMAND_TOUCH_BUTTONS:
                 if (param instanceof Integer) {
                     mTouchControls.setButtons((Integer) param);
+                }
+                return true;
+            case COMMAND_TOUCH_EDIT:
+                mTouchControls.openEditor();
+                return true;
+            case COMMAND_TOUCH_PANEL:
+                if (param instanceof Integer) {
+                    mTouchControls.setPanel((Integer) param);
                 }
                 return true;
         }

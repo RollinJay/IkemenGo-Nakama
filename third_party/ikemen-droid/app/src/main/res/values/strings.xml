@@ -15,5 +15,13 @@
     <string name="touch_controls_show">Always Show</string>
     <string name="touch_controls_hide">Always Hide</string>
     <string name="touch_settings_button">Touch controls settings</string>
+    <string name="touch_edit_button">Edit layout</string>
+    <string name="touch_edit_title">Layout: %1$s. Drag a button or the d-pad; pinch or Smaller/Bigger to resize. Selected: %2$s</string>
+    <string name="touch_edit_smaller">Smaller</string>
+    <string name="touch_edit_bigger">Bigger</string>
+    <string name="touch_edit_opacity">Opacity</string>
+    <string name="touch_edit_reset">Reset</string>
+    <string name="touch_edit_cancel">Cancel</string>
+    <string name="touch_edit_save">Save</string>
     <string name="keyboard_button">Open the keyboard</string>
 </resources>

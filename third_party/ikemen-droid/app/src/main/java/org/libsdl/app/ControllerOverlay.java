@@ -1,6 +1,7 @@
 package org.libsdl.app;
 
 import android.content.Context;
+import android.content.SharedPreferences;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Canvas;
@@ -54,7 +55,8 @@ public class ControllerOverlay extends RelativeLayout {
     static final int ALL_BUTTONS = (1 << 10) - 1;
     // The rows of the button grid, right to left. A hidden button keeps its
     // place in the layout, since others are placed from it, and the buttons
-    // left of it move right to close the gap (closeGaps).
+    // left of it move right to close the gap (closeGaps). The other layouts
+    // move and scale the buttons from these places (applyLayout).
     private static final int[][] GRID_ROWS = {{R.id.btn_w, R.id.btn_z, R.id.btn_y, R.id.btn_x},
             {R.id.btn_d, R.id.btn_c, R.id.btn_b, R.id.btn_a}};
     private int shownButtons = ALL_BUTTONS;
@@ -70,6 +72,22 @@ public class ControllerOverlay extends RelativeLayout {
     static final int LAYOUT_GRID = 1 << 14;
     private boolean gridLayout;
     private RelativeLayout.LayoutParams[] arcadeParams;
+    // The layout (TouchPanels: classic, grid or an arcade panel), from bits
+    // 16 to 19 of the set the game sends, and where on a panel each button
+    // sits (TouchPanels.DEFAULT_MAP), from its panel message.
+    private int layout = TouchPanels.CLASSIC;
+    private int panelMap = TouchPanels.DEFAULT_MAP;
+    // What the player can move, resize and fade (TouchLayoutEditor), and the
+    // names the preferences keep them by (TouchPanels.Custom).
+    static final int[] EDIT_VIEWS = {R.id.dpad_container, R.id.btn_a, R.id.btn_b, R.id.btn_c, R.id.btn_x, R.id.btn_y,
+            R.id.btn_z, R.id.btn_d, R.id.btn_w, R.id.btn_start, R.id.btn_back};
+    static final String[] EDIT_NAMES = {"dpad", "a", "b", "c", "x", "y", "z", "d", "w", "start", "menu"};
+    // Each element's place in the layout, {centre x, centre y, size} in this
+    // view's pixels, before the player's changes (custom) move it.
+    private final float[][] layoutPlace = new float[EDIT_VIEWS.length][];
+    private SharedPreferences prefs;
+    private TouchPanels.Custom custom = new TouchPanels.Custom(EDIT_VIEWS.length);
+    private boolean editing;
     private final Map<Integer, CharSequence> plainText = new HashMap<>();
     private final Map<Integer, Drawable> plainBackground = new HashMap<>();
     private int hatX, hatY = 0;
@@ -315,10 +333,12 @@ public class ControllerOverlay extends RelativeLayout {
             View container = findViewById(R.id.dpad_container);
             if (container == null) return;
 
-            // Use Local coordinates to match event.getX()
-            float centerX = container.getLeft() + (container.getWidth() / 2f);
-            float centerY = container.getTop() + (container.getHeight() / 2f);
-            float radius = container.getWidth() / 2f;
+            // Where the player's layout draws it, in this view's coordinates
+            // as event.getX() is.
+            RectF drawn = drawnRect(container);
+            float centerX = drawn.centerX();
+            float centerY = drawn.centerY();
+            float radius = drawn.width() / 2f;
 
             for (int i = 0; i < event.getPointerCount(); i++) {
                 if (action == MotionEvent.ACTION_POINTER_UP && i == event.getActionIndex()) continue;
@@ -402,16 +422,12 @@ public class ControllerOverlay extends RelativeLayout {
         View v = findViewById(viewId);
         if (v == null || v.getVisibility() != View.VISIBLE) return;
 
-        int[] loc = new int[2];
-        int[] parentLoc = new int[2];
-        v.getLocationOnScreen(loc);
-        this.getLocationOnScreen(parentLoc);
-
-        // Calculate coordinates with padding
-        int left   = loc[0] - parentLoc[0] - pad;
-        int top    = loc[1] - parentLoc[1] - pad;
-        int right  = left + v.getWidth() + pad*2;
-        int bottom = top + v.getHeight() + pad*2;
+        // Where it is drawn, moved and resized as the layout says, with padding
+        RectF drawn = drawnRect(v);
+        float left   = drawn.left - pad;
+        float top    = drawn.top - pad;
+        float right  = drawn.right + pad;
+        float bottom = drawn.bottom + pad;
 
         // Add if in region + padding
         if (x >= left && x <= right && y >= top && y <= bottom) {
@@ -429,19 +445,34 @@ public class ControllerOverlay extends RelativeLayout {
     // Helper to check if a finger is inside a specific button's area
     private boolean isViewAtLocation(View v, float x, float y) {
         if (v == null || v.getVisibility() != View.VISIBLE) return false;
+        return drawnRect(v).contains(x, y);
+    }
 
-        int[] vLoc = new int[2];
-        v.getLocationOnScreen(vLoc); // Global position of button
+    /**
+     * Where v is drawn in this view's coordinates: its place in the layout
+     * file, moved by its translation and scaled about its centre (the
+     * layouts and the player's changes move and resize the buttons so).
+     */
+    RectF drawnRect(View v) {
+        float x = 0, y = 0;
+        for (View p = v; p != null && p != this; p = p.getParent() instanceof View ? (View) p.getParent() : null) {
+            x += p.getLeft() + p.getTranslationX();
+            y += p.getTop() + p.getTranslationY();
+        }
+        float w = v.getWidth(), h = v.getHeight();
+        float cx = x + w / 2f, cy = y + h / 2f;
+        float hw = w * v.getScaleX() / 2f, hh = h * v.getScaleY() / 2f;
+        return new RectF(cx - hw, cy - hh, cx + hw, cy + hh);
+    }
 
-        int[] parentLoc = new int[2];
-        this.getLocationOnScreen(parentLoc); // Global position of the overlay
-
-        // Get the position of the button RELATIVE to the overlay
-        int relativeLeft = vLoc[0] - parentLoc[0];
-        int relativeTop = vLoc[1] - parentLoc[1];
-
-        return x >= relativeLeft && x <= (relativeLeft + v.getWidth()) &&
-                y >= relativeTop && y <= (relativeTop + v.getHeight());
+    // v's centre in this view's coordinates, as the layout file places it.
+    private float[] fileCentre(View v) {
+        float x = 0, y = 0;
+        for (View p = v; p != null && p != this; p = p.getParent() instanceof View ? (View) p.getParent() : null) {
+            x += p.getLeft();
+            y += p.getTop();
+        }
+        return new float[] {x + v.getWidth() / 2f, y + v.getHeight() / 2f};
     }
 
     public ControllerOverlay(Context context) {
@@ -455,6 +486,8 @@ public class ControllerOverlay extends RelativeLayout {
         LayoutInflater inflater = LayoutInflater.from(context);
         View vc = inflater.inflate(R.layout.virtual_controller, this, true);
         disableAllTouches(vc);
+        setClipChildren(false);
+        setClipToPadding(false);
     }
 
     private void disableAllTouches(View v) {
@@ -462,6 +495,10 @@ public class ControllerOverlay extends RelativeLayout {
         v.setFocusable(false);
         if (v instanceof ViewGroup) {
             ViewGroup vg = (ViewGroup) v;
+            // The layouts move buttons out of the groups the layout file
+            // puts them in (applyLayout): they draw wherever they go.
+            vg.setClipChildren(false);
+            vg.setClipToPadding(false);
             for (int i = 0; i < vg.getChildCount(); i++) {
                 disableAllTouches(vg.getChildAt(i));
             }
@@ -525,16 +562,31 @@ public class ControllerOverlay extends RelativeLayout {
      */
     public void setButtonsShown(int set) {
         int slot = ((set >> 10) & 0xF) - 1;
-        boolean grid = (set & LAYOUT_GRID) != 0;
+        // The layout, or from a game that sends none, the grid bit.
+        int newLayout = (set >>> 16) & 0xF;
+        if (newLayout == 0) {
+            newLayout = (set & LAYOUT_GRID) != 0 ? TouchPanels.GRID : TouchPanels.CLASSIC;
+        } else if (newLayout > TouchPanels.STAGGERED) {
+            newLayout = TouchPanels.CLASSIC;
+        }
+        boolean grid = newLayout == TouchPanels.GRID;
         set &= ALL_BUTTONS;
         if (slot >= 8 || (set & (1 << slot)) != 0 || (set & (1 << 8)) == 0) {
             slot = -1;
         }
-        if (set == shownButtons && slot == startSlot && grid == gridLayout) {
+        if (set == shownButtons && slot == startSlot && newLayout == layout) {
             return;
         }
         shownButtons = set;
         gridLayout = grid;
+        if (newLayout != layout) {
+            layout = newLayout;
+            reloadCustom();
+        }
+        // The analog sticks sit where a panel's buttons go.
+        int sticks = TouchPanels.isPanel(layout) ? View.INVISIBLE : View.VISIBLE;
+        findViewById(R.id.left_analog).setVisibility(sticks);
+        findViewById(R.id.right_analog).setVisibility(sticks);
         placeStart(slot);
         for (int i = 0; i < REMOTE_VIEWS.length; i++) {
             View v = findViewById(REMOTE_VIEWS[i]);
@@ -548,7 +600,7 @@ public class ControllerOverlay extends RelativeLayout {
             v.setVisibility(show ? View.VISIBLE : inGrid ? View.INVISIBLE : View.GONE);
         }
         arrangeGrid();
-        closeGaps();
+        // onLayout places them (applyLayout).
         requestLayout();
     }
 
@@ -643,39 +695,225 @@ public class ControllerOverlay extends RelativeLayout {
     @Override
     protected void onLayout(boolean changed, int l, int t, int r, int b) {
         super.onLayout(changed, l, t, r, b);
-        closeGaps();
+        applyLayout();
     }
 
-    // Moves each row's shown buttons, keeping their order, to the row's
-    // rightmost places. Start, in the grid, holds the place it took.
-    private void closeGaps() {
-        if (gridLayout) {
-            // arrangeGrid placed every button already.
-            for (int id : REMOTE_VIEWS) {
-                View v = findViewById(id);
-                if (v != null) {
-                    v.setTranslationX(0);
-                    v.setTranslationY(0);
-                }
-            }
+    /**
+     * Places every element where the layout puts it (layoutPlace), then
+     * where the player moved it (custom), by moving and scaling it from its
+     * place in the layout file, and fades them as the player chose.
+     */
+    void applyLayout() {
+        int w = getWidth(), h = getHeight();
+        if (w == 0 || h == 0) {
             return;
         }
+        for (int i = 0; i < EDIT_VIEWS.length; i++) {
+            View v = findViewById(EDIT_VIEWS[i]);
+            if (v == null || v.getWidth() == 0) {
+                layoutPlace[i] = null;
+                continue;
+            }
+            float[] c = fileCentre(v);
+            layoutPlace[i] = new float[] {c[0], c[1], v.getWidth()};
+        }
+        if (TouchPanels.isPanel(layout)) {
+            placePanel(w, h);
+        } else if (!gridLayout) {
+            closeGaps();
+        }
+        for (int i = 0; i < EDIT_VIEWS.length; i++) {
+            View v = findViewById(EDIT_VIEWS[i]);
+            float[] place = layoutPlace[i];
+            if (v == null || place == null) continue;
+            float[] own = custom.pos[i];
+            float cx = place[0], cy = place[1], size = place[2];
+            if (own != null) {
+                cx = own[0] * w;
+                cy = own[1] * h;
+                size *= own[2];
+            }
+            float[] c = fileCentre(v);
+            v.setTranslationX(cx - c[0]);
+            v.setTranslationY(cy - c[1]);
+            float scale = size / v.getWidth();
+            v.setScaleX(scale);
+            v.setScaleY(scale);
+            v.setAlpha(custom.alpha);
+        }
+    }
+
+    // Classic: moves each row's shown buttons, keeping their order, to the
+    // row's rightmost places. Start, in the grid, holds the place it took.
+    private void closeGaps() {
         int startId = startSlot >= 0 ? REMOTE_VIEWS[startSlot] : View.NO_ID;
         for (int[] row : GRID_ROWS) {
             int place = 0;
             for (int id : row) {
                 View v = findViewById(id == startId ? R.id.btn_start : id);
-                if (v == null) continue;
-                if (v.getVisibility() != View.VISIBLE) {
-                    v.setTranslationX(0);
-                    v.setTranslationY(0);
-                    continue;
+                if (v == null || v.getVisibility() != View.VISIBLE) continue;
+                float[] slot = fileCentre(findViewById(row[place++]));
+                float[] p = layoutPlace[editIndex(v.getId())];
+                if (p != null) {
+                    p[0] = slot[0];
+                    p[1] = slot[1];
                 }
-                View slot = findViewById(row[place++]);
-                v.setTranslationX(slot.getLeft() - v.getLeft());
-                v.setTranslationY(slot.getTop() - v.getTop());
             }
         }
+    }
+
+    // An arcade panel: the d-pad where the stick is, each grid button in its
+    // place on the panel (panelMap), Start in its hidden button's place or,
+    // with Menu, in the top right corner.
+    private void placePanel(int w, int h) {
+        int pl = getPaddingLeft(), pt = getPaddingTop();
+        int cw = w - pl - getPaddingRight(), ch = h - pt - getPaddingBottom();
+        float density = getResources().getDisplayMetrics().density;
+        float[][] places = TouchPanels.place(layout, cw, ch, density);
+        for (float[] p : places) {
+            p[0] += pl;
+            p[1] += pt;
+        }
+        layoutPlace[0] = places[TouchPanels.PLACES];
+        float[] startPlace = null;
+        for (int b = 0; b < 8; b++) {
+            int p = TouchPanels.placeOf(panelMap, b);
+            if (p < 0) continue;
+            layoutPlace[1 + b] = places[p].clone();
+            if (b == startSlot) {
+                startPlace = places[p].clone();
+            }
+        }
+        float size = dpToPx(55), gap = dpToPx(10), margin = dpToPx(16);
+        float x = w - getPaddingRight() - margin - size / 2f, y = pt + margin + size / 2f;
+        if (startPlace != null) {
+            layoutPlace[9] = startPlace;
+        } else {
+            layoutPlace[9] = new float[] {x, y, size};
+            x -= size + gap;
+        }
+        layoutPlace[10] = new float[] {x, y, size};
+    }
+
+    private static int editIndex(int id) {
+        for (int i = 0; i < EDIT_VIEWS.length; i++) {
+            if (EDIT_VIEWS[i] == id) return i;
+        }
+        return -1;
+    }
+
+    /** The app's preferences, where the player's layouts are kept. */
+    void setPrefs(SharedPreferences prefs) {
+        this.prefs = prefs;
+        reloadCustom();
+    }
+
+    /** Reads the player's changes to the current layout again. */
+    void reloadCustom() {
+        custom = TouchPanels.Custom.load(prefs, layout, EDIT_NAMES);
+        requestLayout();
+        applyLayout();
+    }
+
+    /** The game placed the attack buttons on the panels (TouchPanels.DEFAULT_MAP). */
+    void setPanelMap(int map) {
+        if (map == 0) {
+            map = TouchPanels.DEFAULT_MAP;
+        }
+        if (map == panelMap) {
+            return;
+        }
+        panelMap = map;
+        requestLayout();
+        applyLayout();
+    }
+
+    int layout() {
+        return layout;
+    }
+
+    int panelMap() {
+        return panelMap;
+    }
+
+    // The editor's access (TouchLayoutEditor).
+
+    TouchPanels.Custom custom() {
+        return custom;
+    }
+
+    void setCustom(TouchPanels.Custom c) {
+        custom = c;
+        applyLayout();
+        invalidate();
+    }
+
+    void saveCustom() {
+        if (prefs != null) {
+            custom.save(prefs, layout, EDIT_NAMES);
+        }
+    }
+
+    /** The element (an index in EDIT_VIEWS) drawn at x, y, or -1. */
+    int elementAt(float x, float y) {
+        int best = -1;
+        float bestDist = Float.MAX_VALUE;
+        for (int i = 0; i < EDIT_VIEWS.length; i++) {
+            View v = findViewById(EDIT_VIEWS[i]);
+            if (v == null || v.getVisibility() != View.VISIBLE) continue;
+            RectF r = drawnRect(v);
+            if (!r.contains(x, y)) continue;
+            float d = (r.centerX() - x) * (r.centerX() - x) + (r.centerY() - y) * (r.centerY() - y);
+            if (d < bestDist) {
+                best = i;
+                bestDist = d;
+            }
+        }
+        return best;
+    }
+
+    /** Element i's {centre x, centre y, size} in the layout, before the player's changes. */
+    float[] layoutPlace(int i) {
+        return layoutPlace[i];
+    }
+
+    /** Where element i is drawn, or null while it is hidden. */
+    RectF elementRect(int i) {
+        View v = findViewById(EDIT_VIEWS[i]);
+        if (v == null || v.getVisibility() != View.VISIBLE) return null;
+        return drawnRect(v);
+    }
+
+    /**
+     * While the player edits the layout, the buttons play nothing: every
+     * button a finger or the remote holds is let go.
+     */
+    void setEditing(boolean on) {
+        editing = on;
+        releaseAll();
+    }
+
+    boolean isEditing() {
+        return editing;
+    }
+
+    /** Lets go of every button, the d-pad and the sticks. */
+    void releaseAll() {
+        for (Integer id : new ArrayList<>(pointerStates.keySet())) {
+            releasePointer(id);
+        }
+        leftJoyPointerId = -1;
+        rightJoyPointerId = -1;
+        if (isInitialized) {
+            resetJoystick(findViewById(R.id.left_analog));
+            resetJoystick(findViewById(R.id.right_analog));
+            if (hatX != 0 || hatY != 0) {
+                hatX = 0;
+                hatY = 0;
+                SDLControllerManager.onNativeHat(virtualDeviceId, 0, 0, 0);
+            }
+        }
+        updateDpadVisual(0, 0);
     }
 
     /** The buttons shown that a TV remote can press, the arrows included. */

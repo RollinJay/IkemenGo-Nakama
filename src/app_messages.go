@@ -7,6 +7,8 @@ package main
 const (
 	appMsgTextEntry    = 0x8001 // a text box opened (1) or closed (0)
 	appMsgTouchGlyphs  = 0x8002 // the touch buttons' glyph images changed
-	appMsgTouchButtons = 0x8003 // the touch buttons to show, and Start's place (touchButtonsMessage)
+	appMsgTouchButtons = 0x8003 // the touch buttons to show, Start's place and the layout (touchButtonsMessage)
 	appMsgControllers  = 0x8004 // the number of real controllers connected (iOS only: appWantsControllerCount)
+	appMsgTouchEdit    = 0x8005 // open the on-screen buttons' editor (1)
+	appMsgTouchPanel   = 0x8006 // the attack buttons' places on an arcade panel (touchPanelMessage)
 )

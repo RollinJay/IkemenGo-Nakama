@@ -316,13 +316,13 @@ func TestTouchStartSlot(t *testing.T) {
 			t.Errorf("touchStartSlot(%q, %#x) = %d, want %d", tc.slot, tc.set, got, tc.want)
 		}
 	}
-	if got := touchButtonsMessage(noDW, 6, ""); got != noDW|7<<10 {
+	if got := touchButtonsMessage(noDW, 6, touchLayoutClassic); got != noDW|7<<10|1<<16 {
 		t.Errorf("touchButtonsMessage = %#x", got)
 	}
-	if got := touchButtonsMessage(touchButtonsAll, -1, "arcade"); got != touchButtonsAll {
+	if got := touchButtonsMessage(touchButtonsAll, -1, touchLayoutClassic); got != touchButtonsAll|1<<16 {
 		t.Errorf("touchButtonsMessage without a slot = %#x", got)
 	}
-	if got := touchButtonsMessage(noDW, 6, " Grid "); got != noDW|7<<10|touchLayoutGrid {
+	if got := touchButtonsMessage(noDW, 6, touchLayoutGridID); got != noDW|7<<10|touchLayoutGrid|2<<16 {
 		t.Errorf("touchButtonsMessage with the grid layout = %#x", got)
 	}
 	if l := defaultTouchControls(t).Layout; l != "arcade" {
@@ -354,7 +354,7 @@ func TestRealControllerCount(t *testing.T) {
 
 func TestAppMessages(t *testing.T) {
 	seen := map[int]bool{}
-	for _, c := range []int{appMsgTextEntry, appMsgTouchGlyphs, appMsgTouchButtons, appMsgControllers} {
+	for _, c := range []int{appMsgTextEntry, appMsgTouchGlyphs, appMsgTouchButtons, appMsgControllers, appMsgTouchEdit, appMsgTouchPanel} {
 		// SDL's Android activity leaves commands from 0x8000 to apps.
 		if c < 0x8000 || seen[c] {
 			t.Errorf("app message %#x is SDL's or taken", c)
@@ -362,7 +362,83 @@ func TestAppMessages(t *testing.T) {
 		seen[c] = true
 	}
 	// The iOS app reads these numbers (third_party/ikemen-ios TouchControls.h).
-	if appMsgTextEntry != 0x8001 || appMsgTouchGlyphs != 0x8002 || appMsgTouchButtons != 0x8003 || appMsgControllers != 0x8004 {
+	if appMsgTextEntry != 0x8001 || appMsgTouchGlyphs != 0x8002 || appMsgTouchButtons != 0x8003 || appMsgControllers != 0x8004 ||
+		appMsgTouchEdit != 0x8005 || appMsgTouchPanel != 0x8006 {
 		t.Error("app message numbers changed: change the apps' too")
+	}
+}
+
+func TestTouchLayoutID(t *testing.T) {
+	for _, tc := range []struct {
+		option, screenpack string
+		want               int
+	}{
+		{"", "", touchLayoutClassic},
+		{"", "arcade", touchLayoutClassic},
+		{"", " Grid ", touchLayoutGridID},
+		{"", "vewlix", 4},
+		{"straight", "grid", 3},
+		{"Staggered", "", 6},
+		{"arch", "vewlix", 5},
+		{"classic", "vewlix", touchLayoutClassic},
+		{"nonsense", "vewlix", 4}, // an option the game doesn't know
+		{"", "nonsense", touchLayoutClassic},
+	} {
+		if got := touchLayoutID(tc.option, tc.screenpack); got != tc.want {
+			t.Errorf("touchLayoutID(%q, %q) = %d, want %d", tc.option, tc.screenpack, got, tc.want)
+		}
+	}
+	// The app numbers them alike (TouchPanels.java).
+	want := []string{"classic", "grid", "straight", "vewlix", "arch", "staggered"}
+	if !reflect.DeepEqual(touchLayouts, want) {
+		t.Errorf("touchLayouts = %q, want %q", touchLayouts, want)
+	}
+	if got := touchButtonsMessage(touchButtonsAll, -1, 4); got>>16&0xF != 4 || got&touchLayoutGrid != 0 {
+		t.Errorf("touchButtonsMessage for vewlix = %#x", got)
+	}
+}
+
+// panelPlaces reads a touchPanelMessage back as the button names in each
+// place, "" for a free one.
+func panelPlaces(msg int) []string {
+	var places []string
+	for p := 0; p < touchGridButtons; p++ {
+		v := msg >> (4 * p) & 0xF
+		if v == 0 {
+			places = append(places, "")
+		} else {
+			places = append(places, touchButtonTokens[v-1])
+		}
+	}
+	return places
+}
+
+func TestTouchPanelMessage(t *testing.T) {
+	tc := defaultTouchControls(t)
+	if !reflect.DeepEqual(tc.Panel.Top, []string{"x", "y", "z", "w"}) || !reflect.DeepEqual(tc.Panel.Bottom, []string{"a", "b", "c", "d"}) {
+		t.Errorf("default panel = %q / %q", tc.Panel.Top, tc.Panel.Bottom)
+	}
+	for _, c := range []struct {
+		top, bottom []string
+		want        []string
+	}{
+		{nil, nil, []string{"x", "y", "z", "w", "a", "b", "c", "d"}},
+		{tc.Panel.Top, tc.Panel.Bottom, []string{"x", "y", "z", "w", "a", "b", "c", "d"}},
+		// HDBZ: the punches and D (where Start goes) on top, the kicks below.
+		{[]string{"x", "y", "z", "d"}, []string{"a", "b", "c", "w"}, []string{"x", "y", "z", "d", "a", "b", "c", "w"}},
+		// Only the top row: the others go to the first free places.
+		{[]string{" A ", "B", "C", "D"}, nil, []string{"a", "b", "c", "d", "x", "y", "z", "w"}},
+		// Twice, unknown and a fifth: ignored, their places left free for
+		// the others (w's own place being y's).
+		{[]string{"x", "x", "q", "y", "z"}, []string{"a"}, []string{"x", "w", "z", "y", "a", "b", "c", "d"}},
+	} {
+		got := panelPlaces(touchPanelMessage(c.top, c.bottom))
+		if !reflect.DeepEqual(got, c.want) {
+			t.Errorf("touchPanelMessage(%q, %q) = %q, want %q", c.top, c.bottom, got, c.want)
+		}
+	}
+	// Every place filled, the eighth too (its nibble's high bit is bit 31).
+	if msg := touchPanelMessage(nil, []string{"", "", "", "w"}); msg>>28&0xF != 8 {
+		t.Errorf("w in the last place = %#x", msg)
 	}
 }

@@ -4109,6 +4109,14 @@ func systemScriptInit(l *lua.LState) {
 		l.Push(lua.LNumber(sys.maxRoundTime))
 		return 1
 	})
+	luaRegister(l, "touchEditButtons", func(l *lua.LState) int {
+		/*Open the Android or iOS app's editor of its on-screen buttons, where
+		the player moves, resizes and fades them for the current layout.
+		@function touchEditButtons
+		@treturn bool opened `true` if the app has one (Android and iOS only).*/
+		l.Push(lua.LBool(touchEditButtons()))
+		return 1
+	})
 	luaRegister(l, "getRuntimeOS", func(l *lua.LState) int {
 		/*Get the current runtime operating system identifier.
 		@function getRuntimeOS
