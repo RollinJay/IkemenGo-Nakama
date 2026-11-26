@@ -7,6 +7,12 @@
 --   textbox     a text box is open (main.f_drawInput, as JOIN's name box),
 --               which opens the on-screen keyboard
 --   touchbuttons  Options > Input Settings > On-screen Buttons is selected
+--   layout-<name> On-screen Layout set to each value in turn (R, the menu's
+--               add key): default (the screenpack's), straight, vewlix,
+--               arch, staggered, grid, classic; the app has the new layout
+--               once the game has sent it (within 30 frames)
+--   editor      back on default, Edit On-screen Buttons is confirmed, which
+--               opens the app's layout editor over the buttons
 -- At each step it writes "STEP <name>" to ci/steps.log in the game folder,
 -- then waits until run.sh creates ci/ack-<name> (after its screenshot), or
 -- for stepTimeout frames. Problems are written as "FAIL <what>", and "DONE"
@@ -21,9 +27,15 @@ local ci = {
 	pressAt = -1,
 	moves = 0,       -- cursor moves in the current menu, to give up on loops
 	textbox = false, -- inside the test's text box
+	layout = 0,      -- index in layouts of the On-screen Layout value shown (0: Default)
 	done = false,
 }
 local stepTimeout = 60 * 60 -- frames to wait for an ack (60 s at 60 fps)
+-- On-screen Layout's values after Default, in the menu's order
+-- (options.t_touchLayouts), and the frames to wait after choosing one: the
+-- game tells the app every 30 frames at most (touchControlsUpdate).
+local layouts = {'straight', 'vewlix', 'arch', 'staggered', 'grid', 'classic'}
+local layoutWait = 60
 
 local function log(msg)
 	print('[ios-ci] ' .. msg)
@@ -216,6 +228,42 @@ local function drive(t, item, sec)
 		end
 	elseif ci.step == 'touchbuttons' and sec == motif.option_info then
 		if goToItem(t, item, sec, 'touchbuttons', false) and stepReached('touchbuttons') then
+			nextStep('touchlayout')
+		end
+	elseif ci.step == 'touchlayout' and sec == motif.option_info then
+		if goToItem(t, item, sec, 'touchlayout', false) then
+			ci.layout = 0
+			nextStep('layouts')
+			ci.nextAction = ci.frame + layoutWait
+		end
+	elseif ci.step == 'layouts' and sec == motif.option_info and ci.frame >= ci.nextAction then
+		local name = layouts[ci.layout] or 'default'
+		if ci.stepFrame == nil then
+			local want = ci.layout == 0 and '' or name
+			local got = (gameOption('Input.TouchLayout') or ''):lower()
+			if got ~= want then
+				log('FAIL On-screen Layout is "' .. got .. '", want "' .. want .. '"')
+			end
+		end
+		if stepReached('layout-' .. name) then
+			local m = sec.menu or sec
+			-- The next value; after the last, Default again.
+			pressKey(firstKey(m.add.key))
+			if ci.layout < #layouts then
+				ci.layout = ci.layout + 1
+				ci.stepFrame = nil
+				ci.nextAction = ci.frame + layoutWait
+			else
+				nextStep('touchedit')
+			end
+		end
+	elseif ci.step == 'touchedit' and sec == motif.option_info then
+		if goToItem(t, item, sec, 'touchedit', true) then
+			nextStep('editor')
+			ci.nextAction = ci.frame + layoutWait
+		end
+	elseif ci.step == 'editor' and ci.frame >= ci.nextAction then
+		if stepReached('editor') then
 			log('DONE')
 			ci.done = true
 		end

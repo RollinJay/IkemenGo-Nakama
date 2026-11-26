@@ -5,7 +5,8 @@
 # the app with a test game folder (the engine's default assets, a test mod and
 # the default screenpack with HDBZ-like [Touch Controls]), and screenshots the
 # title screen with the touch controls, a text box with the on-screen keyboard,
-# and Options > Input Settings > On-screen Buttons. Screenshots and logs are
+# Options > Input Settings > On-screen Buttons, each On-screen Layout and the
+# layout editor. Screenshots and logs are
 # uploaded as the "ios-simulator-<run>" artifact. The job fails when the app
 # crashes or the title screen never comes up. See BUILDING.md ("iOS Simulator
 # test").

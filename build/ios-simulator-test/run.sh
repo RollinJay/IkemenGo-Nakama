@@ -16,7 +16,8 @@
 # a test hook that only simulator builds have) holding only the test's files:
 #   - external/mods/zz_ios_ci.lua, which walks the menus and logs each step;
 #   - data/ikemen1/system_ci.def, the default screenpack with HDBZ-like
-#     [Touch Controls] (grid layout, no D and W buttons, Start in D's place);
+#     [Touch Controls] (the vewlix panel with the punches and D over the
+#     kicks and W, no D and W buttons, Start in D's place);
 #   - save/config.ini choosing that screenpack.
 # The app installs the engine's default assets (DefaultAssets.zip) around them on
 # its first run, as it does on a device, keeping the test's files.
@@ -96,7 +97,8 @@ import re, sys
 src, dst = sys.argv[1], sys.argv[2]
 text = open(src, encoding="utf-8", errors="surrogateescape").read()
 ours = {
-    "touch controls": "[Touch Controls]\nlayout = grid\nbuttons = a, b, c, x, y, z, s, m\nstart.slot = d\n",
+    "touch controls": "[Touch Controls]\nlayout = vewlix\nbuttons = a, b, c, x, y, z, s, m\nstart.slot = d\n"
+        "panel.top = x, y, z, d\npanel.bottom = a, b, c, w\n",
     "demo mode": "[Demo Mode]\nenabled = 0\n",
 }
 lines, skip = [], False
@@ -175,16 +177,34 @@ case $? in
 	2) gh_error "the app exited before the title screen"; crashed=1; failed=1 ;;
 esac
 
-# Text box with the on-screen keyboard, then Options > Input Settings > On-screen Buttons
+# Text box with the on-screen keyboard, then Options > Input Settings >
+# On-screen Buttons, each On-screen Layout (the screenpack's vewlix first),
+# and Edit On-screen Buttons' layout editor.
+shot_name() {
+	case "$1" in
+		textbox) echo 03-textbox-keyboard ;;
+		touchbuttons) echo 04-options-onscreen-buttons ;;
+		layout-default) echo 05-layout-default-vewlix ;;
+		layout-straight) echo 06-layout-straight ;;
+		layout-vewlix) echo 07-layout-vewlix ;;
+		layout-arch) echo 08-layout-arch ;;
+		layout-staggered) echo 09-layout-staggered ;;
+		layout-grid) echo 10-layout-grid ;;
+		layout-classic) echo 11-layout-classic ;;
+		editor) echo 12-layout-editor ;;
+		*) echo "step-$1" ;;
+	esac
+}
 if (( ! failed )); then
-	for step in textbox touchbuttons; do
+	for step in textbox touchbuttons layout-default layout-straight layout-vewlix layout-arch \
+		layout-staggered layout-grid layout-classic editor; do
 		wait_step "$step" "$step_timeout"
 		case $? in
 			0)
 				note "step $step reached"
-				# The keyboard slides in.
+				# The keyboard slides in; the buttons move to their new places.
 				sleep "$settle"
-				[[ "$step" == textbox ]] && shot 03-textbox-keyboard || shot 04-options-onscreen-buttons
+				shot "$(shot_name "$step")"
 				step_done "$step"
 				;;
 			1) gh_warning "step $step not reached within $step_timeout s"; shot "missing-$step"; [[ "${STRICT:-0}" == 1 ]] && failed=1; break ;;
