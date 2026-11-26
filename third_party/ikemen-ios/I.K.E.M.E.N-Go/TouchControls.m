@@ -62,6 +62,14 @@ static NSString *Str(NSString *key, NSString *english) {
 }
 
 - (TouchControlsMode)mode {
+#if TARGET_OS_SIMULATOR
+    // Test hook, iOS Simulator builds only (see TouchOverlayView's hideOverlay):
+    // the simulator presents a virtual MFi gamepad, which would hide the
+    // buttons under Automatic, so test runs always show them.
+    if (getenv("IKEMEN_TEST_KEEP_TOUCH_CONTROLS") != NULL) {
+        return TouchControlsModeShow;
+    }
+#endif
     NSInteger m = [[NSUserDefaults standardUserDefaults] integerForKey:ModeKey];
     return (m >= TouchControlsModeAuto && m <= TouchControlsModeHide) ? (TouchControlsMode)m : TouchControlsModeAuto;
 }
