@@ -1674,6 +1674,40 @@ function ensure_ios_moltenvk_framework() {
 	rm -rf "$work"
 }
 
+# Adds to ikemen-ios's manifest.txt the files the desktop release ships that it
+# lacks. Like ikemen-droid's, it only knows upstream Ikemen GO's files, so the
+# fork's own scripts (online.lua, lobby.lua, ...), mods, fonts and server list
+# would be left out of DefaultAssets.zip, and main.lua stops at
+# require('external.script.online'). The app installs everything in the zip, so
+# the zip only has to hold them. Merging an already merged manifest (a wrapper
+# used in place through IOS_WRAPPER_DIR) changes nothing.
+function add_ios_extra_assets() {
+	local manifest="$1"
+	echo "==> Adding the desktop release's files to $manifest"
+	# (echo: the upstream file may lack a final newline)
+	{ cat "$manifest"; echo; android_apk_extra_assets; } | awk '{
+		gsub(/^[ \t\r]+|[ \t\r]+$/, "")
+		if ($0 == "" || seen[$0]++) next
+		print
+	}' > "$manifest.tmp"
+	mv "$manifest.tmp" "$manifest"
+}
+
+# Stops the build when an engine file from data, font or external did not make it
+# into the staged DefaultAssets folder.
+function check_ios_default_assets() {
+	local assets_dir="$1" missing
+	missing="$(list_tree_files "$REPO_ROOT" data font external | while IFS= read -r p; do
+		[[ -z "$p" || -f "$assets_dir/$p" ]] || printf '%s\n' "$p"
+	done)"
+	if [[ -n "$missing" ]]; then
+		echo "ERROR: These engine files are missing from DefaultAssets.zip:" >&2
+		printf '%s\n' "$missing" | sed 's/^/  /' >&2
+		exit 1
+	fi
+	echo "==> DefaultAssets: all $(list_tree_files "$REPO_ROOT" data font external | grep -c .) engine files from data, font and external staged"
+}
+
 # Package the wrapper into an unsigned IPA. Users sign it themselves when
 # sideloading (Apple requires a per-user signature outside the App Store).
 function build_ios_ipa() {
@@ -1689,8 +1723,10 @@ function build_ios_ipa() {
 		echo "ERROR: ikemen-ios manifest not found at: $manifest" >&2
 		exit 1
 	fi
+	add_ios_extra_assets "$manifest"
 	find "$assets_dir" -mindepth 1 -maxdepth 1 ! -name "manifest.txt" -exec rm -rf {} + 2>/dev/null || true
 	stage_manifest_assets "$manifest" "$assets_dir"
+	check_ios_default_assets "$assets_dir"
 	rm -f "$IOS_WRAPPER_DIR/DefaultAssets.zip"
 	( cd "$assets_dir" && zip -qr -X "$IOS_WRAPPER_DIR/DefaultAssets.zip" . )
 
