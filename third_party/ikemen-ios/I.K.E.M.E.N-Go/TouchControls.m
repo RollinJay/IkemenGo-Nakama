@@ -10,6 +10,7 @@
 //
 
 #import "TouchControls.h"
+#import "TouchLayoutEditor.h"
 #import "SDLWindowFix.h"
 #import <GameController/GameController.h>
 #import <SDL2/SDL.h>
@@ -18,6 +19,8 @@
 static NSString * const ModeKey = @"IKEMENTouchControlsMode";
 // The buttons the game last chose to show, for the next start.
 static NSString * const ButtonsKey = @"IKEMENTouchButtons";
+// And where on an arcade panel the attack buttons sit.
+static NSString * const PanelKey = @"IKEMENTouchPanel";
 static const int AllButtons = (1 << 10) - 1;
 
 NSString *IkemenTouchGlyphsDirectory(void) {
@@ -35,6 +38,9 @@ static NSString *Str(NSString *key, NSString *english) {
 @property (nonatomic, strong) UIButton *keyboardButton;
 @property (nonatomic, strong) UIView *settingsPanel;
 @property (nonatomic, strong) NSArray<UIButton *> *modeButtons;
+@property (nonatomic, strong) UIButton *editButton;
+// The player's editor of the buttons' layout, while it is open.
+@property (nonatomic, strong) TouchLayoutEditor *editor;
 @property (nonatomic, strong) NSTimer *timer;
 @property (nonatomic, assign) BOOL textEntry;
 @property (nonatomic, assign) BOOL keyboardShown;
@@ -69,7 +75,10 @@ static NSString *Str(NSString *key, NSString *english) {
     if (self.overlay == overlay) {
         return;
     }
-    // A new overlay, as for a new scene: the old one's timer and observers go.
+    // A new overlay, as for a new scene: the old one's timer, observers and
+    // editor go.
+    [self.editor cancel];
+    self.editor = nil;
     [self.timer invalidate];
     [[NSNotificationCenter defaultCenter] removeObserver:self];
     self.overlay = overlay;
@@ -88,6 +97,8 @@ static NSString *Str(NSString *key, NSString *english) {
     ]];
     [self buildSettingsPanel];
 
+    NSNumber *panel = [[NSUserDefaults standardUserDefaults] objectForKey:PanelKey];
+    [overlay setPanelMap:panel ? (uint32_t)panel.intValue : TouchPanelDefaultMap];
     NSNumber *buttons = [[NSUserDefaults standardUserDefaults] objectForKey:ButtonsKey];
     [overlay setButtonsShown:buttons ? buttons.intValue : AllButtons];
     [overlay loadGlyphsFromDirectory:IkemenTouchGlyphsDirectory()];
@@ -158,6 +169,17 @@ static NSString *Str(NSString *key, NSString *english) {
         [buttons addObject:b];
     }
     self.modeButtons = buttons;
+    // Then the layout editor.
+    UIButton *edit = [UIButton buttonWithType:UIButtonTypeSystem];
+    edit.contentHorizontalAlignment = UIControlContentHorizontalAlignmentLeading;
+    edit.titleLabel.font = [UIFont systemFontOfSize:17];
+    [edit setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    edit.backgroundColor = [UIColor colorWithWhite:0.2 alpha:0.9];
+    [edit setTitle:[@"       " stringByAppendingString:Str(@"touchEditLayoutStr", @"Edit layout")] forState:UIControlStateNormal];
+    [edit addTarget:self action:@selector(editTapped:) forControlEvents:UIControlEventTouchUpInside];
+    [edit.heightAnchor constraintEqualToConstant:44].active = YES;
+    [panel addArrangedSubview:edit];
+    self.editButton = edit;
     [self.overlay addSubview:panel];
     [NSLayoutConstraint activateConstraints:@[
         [panel.topAnchor constraintEqualToAnchor:self.settingsButton.bottomAnchor constant:6],
@@ -176,6 +198,38 @@ static NSString *Str(NSString *key, NSString *english) {
 - (void)modeTapped:(UIButton *)sender {
     self.settingsPanel.hidden = YES;
     self.mode = (TouchControlsMode)sender.tag;
+    [self.overlay resetHideTimer];
+}
+
+- (void)editTapped:(id)sender {
+    self.settingsPanel.hidden = YES;
+    [self openEditor];
+}
+
+- (BOOL)editing {
+    return self.editor != nil;
+}
+
+- (void)openEditor {
+    TouchOverlayView *overlay = self.overlay;
+    if (self.editor || !overlay) {
+        return;
+    }
+    self.settingsPanel.hidden = YES;
+    overlay.editing = YES;
+    __weak TouchControls *weakSelf = self;
+    self.editor = [[TouchLayoutEditor alloc] initWithOverlay:overlay onClose:^{
+        [weakSelf editorClosed];
+    }];
+    // The editor shows them whatever the setting.
+    [self update];
+    [overlay resetHideTimer];
+}
+
+- (void)editorClosed {
+    self.editor = nil;
+    self.overlay.editing = NO;
+    [self update];
     [self.overlay resetHideTimer];
 }
 
@@ -229,9 +283,23 @@ static NSString *Str(NSString *key, NSString *english) {
         case IkemenMsgTouchGlyphs:
             [self.overlay loadGlyphsFromDirectory:IkemenTouchGlyphsDirectory()];
             break;
-        case IkemenMsgTouchButtons:
+        case IkemenMsgTouchButtons: {
             [[NSUserDefaults standardUserDefaults] setInteger:param forKey:ButtonsKey];
+            int layout = self.overlay.layout;
             [self.overlay setButtonsShown:param];
+            if (self.editor && self.overlay.layout != layout) {
+                // The editor's changes were the old layout's, and the overlay
+                // has the new one's own now.
+                [self.editor discard];
+            }
+            break;
+        }
+        case IkemenMsgTouchPanel:
+            [[NSUserDefaults standardUserDefaults] setInteger:param forKey:PanelKey];
+            [self.overlay setPanelMap:(uint32_t)param];
+            break;
+        case IkemenMsgTouchEdit:
+            [self openEditor];
             break;
         case IkemenMsgControllers:
             self.gameControllers = param;
@@ -269,7 +337,9 @@ static NSString *Str(NSString *key, NSString *english) {
         return;
     }
     TouchControlsMode mode = self.mode;
-    [overlay setControlsShown:mode == TouchControlsModeShow || (mode == TouchControlsModeAuto && ![self realControllerConnected])];
+    // The editor shows them whatever the setting.
+    [overlay setControlsShown:self.editor != nil || mode == TouchControlsModeShow
+                              || (mode == TouchControlsModeAuto && ![self realControllerConnected])];
     BOOL closed = self.textEntry && !self.keyboardShown;
     self.keyboardButton.hidden = !closed;
     if (closed && !self.keyboardClosed) {

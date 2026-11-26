@@ -35,6 +35,21 @@ static const int LayoutGrid = 1 << 14;
 // button keeps its place, and the shown ones left of it move right over the
 // gap (arrangeButtons).
 static const int GridRows[2][4] = {{7, 5, 4, 3}, {6, 2, 1, 0}};
+// The pressed and resting looks of a button, before the player's opacity.
+static const CGFloat PressedAlpha = 0.3;
+static const CGFloat RestingAlpha = 0.75;
+// On a panel, Start and Menu at the top right: their size and spacing.
+static const CGFloat CornerButtonSize = 55;
+static const CGFloat CornerGap = 10;
+static const CGFloat CornerMargin = 16;
+
+// The views' own ways to let go (DPadView.m, AnalogJoystickView.m).
+@interface DPadView (TouchOverlayRelease)
+- (void)resetDPad;
+@end
+@interface AnalogJoystickView (TouchOverlayRelease)
+- (void)resetHandle;
+@end
 
 @interface TouchOverlayView ()
 @property (nonatomic, assign) GamepadButton activeButtons;
@@ -46,12 +61,21 @@ static const int GridRows[2][4] = {{7, 5, 4, 3}, {6, 2, 1, 0}};
 @property (nonatomic, assign) int shownButtons;
 @property (nonatomic, assign) int startSlot;
 @property (nonatomic, assign) BOOL gridLayout;
+@property (nonatomic, assign, readwrite) int layout;
+@property (nonatomic, assign) uint32_t panelMap;
+@property (nonatomic, strong) TouchCustomLayout *customLayout;
 // Each button's glyph, over its background, and the title it has without one.
 @property (nonatomic, strong) NSMutableDictionary<NSNumber *, UIImageView *> *glyphViews;
 @property (nonatomic, strong) NSMutableDictionary<NSNumber *, NSString *> *plainTitles;
 @end
 
-@implementation TouchOverlayView
+@implementation TouchOverlayView {
+    // Each element's place in the layout (layoutPlace:centre:size:), in this
+    // view's coordinates, before the player's changes.
+    BOOL _placeKnown[TOUCH_EDIT_ELEMENTS];
+    CGPoint _placeCentre[TOUCH_EDIT_ELEMENTS];
+    CGFloat _placeSize[TOUCH_EDIT_ELEMENTS];
+}
 
 static int virtualJoystickIndex = -1;
 static SDL_Joystick *virtualJoystick;
@@ -77,7 +101,7 @@ static SDL_JoystickID virtualJoystickID = -1;
         btn.exclusiveTouch = NO;
         btn.userInteractionEnabled = NO;
         // A held button keeps its pressed look.
-        btn.alpha = [self.currentlyPressedButtons containsObject:btn] ? 0.3f : 0.75f;
+        btn.alpha = [self buttonAlpha:[self.currentlyPressedButtons containsObject:btn]];
     }
     
     // Reset timer and wake the overlay up when the device rotates
@@ -133,6 +157,9 @@ static SDL_JoystickID virtualJoystickID = -1;
     _shownButtons = AllButtons;
     _startSlot = -1;
     _gridLayout = NO;
+    _layout = TouchLayoutClassic;
+    _panelMap = TouchPanelDefaultMap;
+    _customLayout = [TouchCustomLayout loadForLayout:_layout];
     _glyphViews = [NSMutableDictionary dictionary];
     _plainTitles = [NSMutableDictionary dictionary];
 }
@@ -159,6 +186,10 @@ static SDL_JoystickID virtualJoystickID = -1;
 }
 
 - (void)hideOverlay {
+    // The layout editor keeps them shown until the player closes it.
+    if (self.editing) {
+        return;
+    }
     // Fade out smoothly
     [UIView animateWithDuration:0.3 animations:^{
         self.alpha = 0.025f;
@@ -233,7 +264,7 @@ static SDL_JoystickID virtualJoystickID = -1;
     // Evaluate active touch locations across the view. Hidden buttons take
     // none, and none do while the controls are hidden.
     for (UITouch *touch in touches) {
-        if (!self.controlsShown) {
+        if (!self.controlsShown || self.editing) {
             break;
         }
         if (touch.phase == UITouchPhaseBegan || touch.phase == UITouchPhaseMoved || touch.phase == UITouchPhaseStationary) {
@@ -269,8 +300,13 @@ static SDL_JoystickID virtualJoystickID = -1;
             [self.currentlyPressedButtons removeObject:btn];
         }
         
-        btn.alpha = isPressed ? 0.3f : 0.75f;
+        btn.alpha = [self buttonAlpha:isPressed];
     }
+}
+
+// A button's look, pressed or not, faded as the player chose.
+- (CGFloat)buttonAlpha:(BOOL)pressed {
+    return (pressed ? PressedAlpha : RestingAlpha) * self.customLayout.alpha;
 }
 
 - (void)initVirtualJoystick {
@@ -332,6 +368,11 @@ static SDL_JoystickID virtualJoystickID = -1;
 
 #pragma mark - AnalogJoystickDelegate
 - (void)joystick:(AnalogJoystickView *)joystick didMoveX:(CGFloat)x y:(CGFloat)y {
+    if (self.editing) {
+        // Held from before the editor opened: centred.
+        x = 0;
+        y = 0;
+    }
     [self initVirtualJoystick];
     [self resetHideTimer];
     if (virtualJoystick == NULL) {
@@ -437,7 +478,7 @@ static SDL_JoystickID virtualJoystickID = -1;
 - (void)releaseAllButtons {
     for (UIButton *btn in [self.currentlyPressedButtons allObjects]) {
         [self handleButtonState:btn isPressed:NO];
-        btn.alpha = 0.75f;
+        btn.alpha = [self buttonAlpha:NO];
     }
     [self.currentlyPressedButtons removeAllObjects];
 }
@@ -457,25 +498,37 @@ static SDL_JoystickID virtualJoystickID = -1;
 
 - (void)setButtonsShown:(int)message {
     int slot = ((message >> 10) & 0xF) - 1;
-    BOOL grid = (message & LayoutGrid) != 0;
+    // The layout, or from a game that sends none, the grid bit.
+    int layout = (int)(((uint32_t)message >> 16) & 0xF);
+    if (layout == 0) {
+        layout = (message & LayoutGrid) != 0 ? TouchLayoutGrid : TouchLayoutClassic;
+    } else if (layout > TouchLayoutStaggered) {
+        layout = TouchLayoutClassic;
+    }
+    BOOL grid = layout == TouchLayoutGrid;
     int set = message & AllButtons;
     // Start goes into the grid only over a hidden grid button, and only if it
     // shows itself.
     if (slot >= GridButtons || (slot >= 0 && (set & (1 << slot)) != 0) || (set & (1 << StartIndex)) == 0) {
         slot = -1;
     }
-    if (set == _shownButtons && slot == _startSlot && grid == _gridLayout) {
+    if (set == _shownButtons && slot == _startSlot && layout == _layout) {
         return;
     }
     _shownButtons = set;
     _startSlot = slot;
     _gridLayout = grid;
+    if (layout != _layout) {
+        _layout = layout;
+        // Each layout keeps the player's own changes.
+        self.customLayout = [TouchCustomLayout loadForLayout:layout];
+    }
     for (int i = 0; i < ButtonCount; i++) {
         UIButton *btn = [self buttonAtIndex:i];
         if (btn && (set & (1 << i)) == 0 && [self.currentlyPressedButtons containsObject:btn]) {
             [self handleButtonState:btn isPressed:NO];
             [self.currentlyPressedButtons removeObject:btn];
-            btn.alpha = 0.75f;
+            btn.alpha = [self buttonAlpha:NO];
         }
     }
     [self applyVisibility];
@@ -486,9 +539,16 @@ static SDL_JoystickID virtualJoystickID = -1;
 // Shows or hides each part, for controlsShown and the buttons the game chose.
 - (void)applyVisibility {
     BOOL shown = self.controlsShown;
+    // The analog sticks sit where a panel's buttons go.
+    BOOL panel = TouchLayoutIsPanel(self.layout);
     self.dPadView.hidden = !shown;
-    self.leftJoystickView.hidden = !shown;
+    self.leftJoystickView.hidden = !shown || panel;
+    self.rightJoystickView.hidden = panel;
     self.vewlixButtonView.hidden = !shown;
+    // The player's opacity (the buttons take it with their pressed look).
+    self.dPadView.alpha = self.customLayout.alpha;
+    self.leftJoystickView.alpha = self.customLayout.alpha;
+    self.rightJoystickView.alpha = self.customLayout.alpha;
     for (int i = 0; i < ButtonCount; i++) {
         [self buttonAtIndex:i].hidden = !shown || (self.shownButtons & (1 << i)) == 0;
     }
@@ -502,17 +562,35 @@ static SDL_JoystickID virtualJoystickID = -1;
     v.transform = CGAffineTransformMakeTranslation(target.x - v.center.x, target.y - v.center.y);
 }
 
-// Lays the buttons out, as the Android app does (third_party/ikemen-droid's
-// ControllerOverlay): in the arcade layout each row's shown buttons keep
-// their order in the row's rightmost places, Start taking the place of the
-// grid button start.slot names; in the grid layout each punch sits straight
-// above its kick, with Start, in the grid, apart on the right. Start and Menu
-// close up when one of them leaves.
+// Element i of TouchEditNames: the d-pad, then buttons 0 to 9.
+- (UIView *)elementView:(int)i {
+    if (i == 0) {
+        return self.dPadView;
+    }
+    return i < TOUCH_EDIT_ELEMENTS ? [self buttonAtIndex:i - 1] : nil;
+}
+
+// v's centre in this view's coordinates as the xib places it, without its
+// transform.
+- (CGPoint)naturalCentre:(UIView *)v {
+    return [v.superview convertPoint:v.center toView:self];
+}
+
+- (void)setPlace:(int)i centre:(CGPoint)centre size:(CGFloat)size {
+    _placeKnown[i] = YES;
+    _placeCentre[i] = centre;
+    _placeSize[i] = size;
+}
+
+// Lays everything out, as the Android app does (third_party/ikemen-droid's
+// ControllerOverlay applyLayout): first where the layout puts each element
+// (arrangeGrid or placePanel), then where the player moved and resized it
+// (customLayout), by a transform from its place in the xib (Auto Layout and
+// the xib's frames stay as they are).
 - (void)arrangeButtons {
-    UIView *start = [self buttonAtIndex:StartIndex];
-    UIView *menu = [self buttonAtIndex:MenuIndex];
-    for (int i = 0; i < ButtonCount; i++) {
-        [self buttonAtIndex:i].transform = CGAffineTransformIdentity;
+    for (int i = 0; i < TOUCH_EDIT_ELEMENTS; i++) {
+        [self elementView:i].transform = CGAffineTransformIdentity;
+        _placeKnown[i] = NO;
     }
     for (int i = 0; i < GridButtons; i++) {
         if (![self buttonAtIndex:i]) {
@@ -522,6 +600,93 @@ static SDL_JoystickID virtualJoystickID = -1;
     // The buttons' own places first: Auto Layout reaches the xib's views
     // after this one's layoutSubviews.
     [self.vewlixButtonView.superview layoutIfNeeded];
+    if (self.bounds.size.width <= 0 || self.bounds.size.height <= 0) {
+        return;
+    }
+    if (TouchLayoutIsPanel(self.layout)) {
+        [self placePanel];
+    } else {
+        [self arrangeGrid];
+    }
+    // The places the layout gave by moving the views, and those it left.
+    for (int i = 0; i < TOUCH_EDIT_ELEMENTS; i++) {
+        UIView *v = [self elementView:i];
+        if (!v || _placeKnown[i]) {
+            continue;
+        }
+        CGPoint c = [self naturalCentre:v];
+        [self setPlace:i centre:CGPointMake(c.x + v.transform.tx, c.y + v.transform.ty) size:v.bounds.size.width];
+    }
+    [self applyCustom];
+}
+
+// Moves and scales each element to its place, or the player's.
+- (void)applyCustom {
+    CGSize size = self.bounds.size;
+    TouchCustomLayout *custom = self.customLayout;
+    for (int i = 0; i < TOUCH_EDIT_ELEMENTS; i++) {
+        UIView *v = [self elementView:i];
+        if (!v || !_placeKnown[i]) {
+            continue;
+        }
+        CGPoint c = _placeCentre[i];
+        CGFloat diameter = _placeSize[i];
+        if ([custom hasPosition:i]) {
+            CGPoint own = [custom centreOf:i];
+            c = CGPointMake(own.x * size.width, own.y * size.height);
+            diameter *= [custom sizeOf:i];
+        }
+        CGPoint natural = [self naturalCentre:v];
+        CGFloat width = v.bounds.size.width;
+        CGFloat scale = width > 0 ? diameter / width : 1.0;
+        v.transform = CGAffineTransformScale(CGAffineTransformMakeTranslation(c.x - natural.x, c.y - natural.y), scale, scale);
+    }
+}
+
+// An arcade panel (TouchPanelPlace) in the safe area: the d-pad where the
+// stick is, each attack button in its place on the panel (panelMap), Start
+// in its hidden button's place or, with Menu, in the top right corner.
+- (void)placePanel {
+    CGRect area = UIEdgeInsetsInsetRect(self.bounds, self.safeAreaInsets);
+    TouchPanelPlacement placement = TouchPanelPlace(self.layout, area);
+    [self setPlace:0 centre:placement.dpadCentre size:placement.dpad];
+    BOOL startPlaced = NO;
+    for (int b = 0; b < GridButtons; b++) {
+        int p = TouchPanelPlaceOf(self.panelMap, b);
+        if (p < 0) {
+            continue;
+        }
+        [self setPlace:1 + b centre:placement.centre[p] size:placement.button];
+        if (b == self.startSlot) {
+            [self setPlace:1 + StartIndex centre:placement.centre[p] size:placement.button];
+            startPlaced = YES;
+        }
+    }
+    CGFloat x = CGRectGetMaxX(area) - CornerMargin - CornerButtonSize / 2.0;
+    CGFloat y = CGRectGetMinY(area) + CornerMargin + CornerButtonSize / 2.0;
+    // Below the game folder button, which shares that corner.
+    UIButton *folder = self.gameFolderButton;
+    if (folder && !folder.hidden && folder.superview) {
+        CGRect f = [self convertRect:folder.bounds fromView:folder];
+        if (CGRectGetMinX(f) < x + CornerButtonSize / 2.0) {
+            y = MAX(y, CGRectGetMaxY(f) + CornerGap + CornerButtonSize / 2.0);
+        }
+    }
+    if (!startPlaced) {
+        [self setPlace:1 + StartIndex centre:CGPointMake(x, y) size:CornerButtonSize];
+        x -= CornerButtonSize + CornerGap;
+    }
+    [self setPlace:1 + MenuIndex centre:CGPointMake(x, y) size:CornerButtonSize];
+}
+
+// The classic and grid layouts: in the classic one each row's shown buttons
+// keep their order in the row's rightmost places, Start taking the place of
+// the grid button start.slot names; in the grid layout each punch sits
+// straight above its kick, with Start, in the grid, apart on the right. Start
+// and Menu close up when one of them leaves.
+- (void)arrangeGrid {
+    UIView *start = [self buttonAtIndex:StartIndex];
+    UIView *menu = [self buttonAtIndex:MenuIndex];
     int slot = start ? self.startSlot : -1;
 
     if (self.gridLayout) {
@@ -609,8 +774,107 @@ static SDL_JoystickID virtualJoystickID = -1;
     }
 }
 
+#pragma mark - Panels and the player's layout
+
+- (void)setPanelMap:(uint32_t)map {
+    if (map == 0) {
+        map = TouchPanelDefaultMap;
+    }
+    if (map == _panelMap) {
+        return;
+    }
+    _panelMap = map;
+    [self arrangeButtons];
+    [self setNeedsLayout];
+}
+
+- (TouchCustomLayout *)custom {
+    return self.customLayout;
+}
+
+- (void)setCustom:(TouchCustomLayout *)custom {
+    self.customLayout = custom ?: [[TouchCustomLayout alloc] init];
+    for (UIButton *btn in self.buttons) {
+        btn.alpha = [self buttonAlpha:[self.currentlyPressedButtons containsObject:btn]];
+    }
+    [self applyVisibility];
+    [self arrangeButtons];
+}
+
+- (void)saveCustom {
+    [self.customLayout saveForLayout:self.layout];
+}
+
+- (void)setEditing:(BOOL)editing {
+    _editing = editing;
+    [self releaseAllButtons];
+    // A finger already on the d-pad or a stick keeps reaching it: centred,
+    // and kept so while editing (dPad:didChangeDirection:, joystick:didMoveX:y:).
+    // Without their controller yet, nothing was ever held.
+    if (virtualJoystick != NULL) {
+        [self.dPadView resetDPad];
+        [self.leftJoystickView resetHandle];
+        [self.rightJoystickView resetHandle];
+    }
+    [self resetHideTimer];
+}
+
+// Whether v shows: neither it nor a view it is in, up to this one, hidden.
+- (BOOL)isShown:(UIView *)v {
+    for (UIView *p = v; p && p != self; p = p.superview) {
+        if (p.hidden) {
+            return NO;
+        }
+    }
+    return v != nil;
+}
+
+- (CGRect)elementRect:(int)i {
+    UIView *v = [self elementView:i];
+    if (![self isShown:v]) {
+        return CGRectNull;
+    }
+    // Takes its transform: where it is drawn.
+    return [self convertRect:v.bounds fromView:v];
+}
+
+- (int)elementAtPoint:(CGPoint)point {
+    int best = -1;
+    CGFloat bestDist = CGFLOAT_MAX;
+    for (int i = 0; i < TOUCH_EDIT_ELEMENTS; i++) {
+        CGRect r = [self elementRect:i];
+        if (CGRectIsNull(r) || !CGRectContainsPoint(r, point)) {
+            continue;
+        }
+        CGFloat dx = CGRectGetMidX(r) - point.x, dy = CGRectGetMidY(r) - point.y;
+        CGFloat d = dx * dx + dy * dy;
+        if (d < bestDist) {
+            best = i;
+            bestDist = d;
+        }
+    }
+    return best;
+}
+
+- (BOOL)layoutPlace:(int)i centre:(CGPoint *)centre size:(CGFloat *)size {
+    if (i < 0 || i >= TOUCH_EDIT_ELEMENTS || !_placeKnown[i]) {
+        return NO;
+    }
+    if (centre) {
+        *centre = _placeCentre[i];
+    }
+    if (size) {
+        *size = _placeSize[i];
+    }
+    return YES;
+}
+
 #pragma mark - DPadView Delegate
 - (void)dPad:(DPadView *)dPad didChangeDirection:(DPadDirection)direction {
+    if (self.editing) {
+        // Held from before the editor opened: centred.
+        direction = DPadDirectionNeutral;
+    }
     [self initVirtualJoystick];
     if (virtualJoystick == NULL) {
         return;

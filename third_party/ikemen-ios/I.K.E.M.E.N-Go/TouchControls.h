@@ -7,7 +7,9 @@
 //  and keeps the settings and keyboard buttons that go with them, as the
 //  Android app's TouchControls does. The game tells it when a text box opens
 //  or closes, when it wrote the buttons' glyph images, which buttons to show
-//  and how many real controllers it has, through IkemenTouchControlsMessage.
+//  and in which layout, where they sit on an arcade panel, how many real
+//  controllers it has, and when to open the layout editor, through
+//  IkemenTouchControlsMessage.
 //
 
 #import <UIKit/UIKit.h>
@@ -17,8 +19,10 @@
 enum {
     IkemenMsgTextEntry    = 0x8001, // a text box opened (1) or closed (0)
     IkemenMsgTouchGlyphs  = 0x8002, // the buttons' glyph images changed
-    IkemenMsgTouchButtons = 0x8003, // the buttons to show (TouchOverlayView setButtonsShown:)
+    IkemenMsgTouchButtons = 0x8003, // the buttons to show and the layout (TouchOverlayView setButtonsShown:)
     IkemenMsgControllers  = 0x8004, // the number of real controllers the game has
+    IkemenMsgTouchEdit    = 0x8005, // open the layout editor (TouchLayoutEditor)
+    IkemenMsgTouchPanel   = 0x8006, // the attack buttons' places on a panel (TouchOverlayView setPanelMap:)
 };
 
 typedef NS_ENUM(NSInteger, TouchControlsMode) {
@@ -35,6 +39,12 @@ typedef NS_ENUM(NSInteger, TouchControlsMode) {
 - (void)attachToOverlay:(TouchOverlayView *)overlay;
 
 @property (nonatomic, assign) TouchControlsMode mode;
+
+// Opens the player's editor of the buttons' layout, from the game's options
+// (IkemenMsgTouchEdit) or the settings button. The buttons play nothing
+// meanwhile.
+- (void)openEditor;
+@property (nonatomic, assign, readonly) BOOL editing;
 
 @end
 
