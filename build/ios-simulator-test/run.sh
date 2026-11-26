@@ -113,7 +113,9 @@ body += "\n".join(ours.values())
 open(dst, "w", encoding="utf-8", errors="surrogateescape").write(body)
 EOF
 [[ -s "$game/data/ikemen1/system_ci.def" ]] || { gh_error "could not write the test screenpack"; exit 1; }
-printf '[Config]\nMotif = data/ikemen1/system_ci.def\n' > "$game/save/config.ini"
+# FirstRun = 0: on a first run main.lua shows the engine's welcome infobox, which
+# waits for a key before the title menu, so the test would never reach it.
+printf '[Config]\nMotif = data/ikemen1/system_ci.def\nFirstRun = 0\n' > "$game/save/config.ini"
 
 # --- Launch ---
 # The app's unified log (NSLog) for the whole run.
