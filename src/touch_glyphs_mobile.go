@@ -78,8 +78,12 @@ func touchControlsUpdate() {
 }
 
 // touchEditButtons opens the app's editor of the on-screen buttons, where the
-// player moves, resizes and fades them (appMsgTouchEdit).
+// player moves, resizes and fades them (appMsgTouchEdit). The buttons, layout
+// and panel places go first, so that it opens on the layout just chosen
+// rather than on the one of the last check.
 func touchEditButtons() bool {
+	touchGlyphsWait = 0
+	touchControlsUpdate()
 	sendToApp(appMsgTouchEdit, 1)
 	return true
 }
