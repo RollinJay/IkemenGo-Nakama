@@ -11,6 +11,11 @@
 # crashes or the title screen never comes up. See BUILDING.md ("iOS Simulator
 # test").
 #
+# The built app itself (arm64 iOS Simulator .app, zipped with ditto so its
+# frameworks' symlinks and executable bits survive) is uploaded as the
+# "ios-simulator-app-<run>" artifact, so it can also be run elsewhere, e.g. on
+# Linux with x86Sim (x86sim install I.K.E.M.E.N-Go.app).
+#
 # Runs on demand (gh workflow run ios-simulator.yml --ref <branch>), and on
 # pushes and pull requests that touch the iOS app or the engine's iOS code.
 name: iOS Simulator test
@@ -102,6 +107,21 @@ jobs:
           echo "==> Platform of the app's binary (7 = iOS Simulator):"
           otool -l "$exe" | awk '/LC_BUILD_VERSION/{f=1} f&&/platform/{print "  platform "$2; exit}'
           lipo -info "$exe"
+
+      - name: Zip the simulator app
+        shell: bash
+        run: |
+          mkdir -p ios-simulator-app
+          ditto -c -k --keepParent bin/ios-simulator/I.K.E.M.E.N-Go.app ios-simulator-app/I.K.E.M.E.N-Go-simulator.zip
+          ls -lah ios-simulator-app
+
+      - name: Upload the simulator app
+        uses: actions/upload-artifact@v7
+        with:
+          name: ios-simulator-app-${{ github.run_number }}
+          path: ios-simulator-app/
+          if-no-files-found: error
+          retention-days: 14
 
       - name: Test on an iPhone
         id: iphone
