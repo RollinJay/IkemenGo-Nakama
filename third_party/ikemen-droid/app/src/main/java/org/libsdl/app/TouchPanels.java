@@ -12,10 +12,11 @@ import java.util.Locale;
  * The four panels are slagcoin.com's Japanese 8-button layouts, read from its
  * drawings: each button's centre in millimetres from the stick's, x to the
  * right and y down, the top row left to right and then the bottom row. The
- * d-pad stands for the stick. The panel is scaled, alike both ways, to fit
- * the screen; then the d-pad goes to the left edge and the eight buttons, as
- * one block keeping the drawing's shape, to the right edge, both at the
- * height the drawing gives them, so that the middle of the game stays clear.
+ * d-pad stands for the stick. Every panel takes one scale, alike both ways,
+ * at which the largest of them fits the screen; then the d-pad goes to the
+ * left edge and the eight buttons, as one block keeping the drawing's shape,
+ * to the right edge, both at the height the drawing gives them, so that the
+ * middle of the game stays clear.
  */
 final class TouchPanels {
     static final int CLASSIC = 1;
@@ -99,30 +100,23 @@ final class TouchPanels {
     /**
      * Lays a panel out in a w by h area, density pixels to the dp: for each
      * place p, {centre x, centre y, diameter} in pixels, and the d-pad's at
-     * index PLACES. The scale s fits the whole panel as drawn, stick and
-     * buttons, in the width less margins and in the bottom MAX_HEIGHT of the
-     * height, and sizes the d-pad and the buttons alike. The d-pad then sits
-     * a margin from the left edge and the button block a margin from the
-     * right, the stick's row shared, the lower of them a margin from the
-     * bottom.
+     * index PLACES. The scale (scale()) is the same on every panel, so that
+     * a button is the same size on each, and sizes the d-pad and the buttons
+     * alike; a shorter panel just stands lower. The d-pad sits a margin from
+     * the left edge and the button block a margin from the right, the
+     * stick's row shared, the lower of them a margin from the bottom.
      */
     static float[][] place(int layout, float w, float h, float density) {
         float[][] panel = PANELS[layout - STRAIGHT];
-        float r = BUTTON_MM / 2, rd = DPAD_MM / 2;
-        float minX = -rd, maxX = rd, minY = -rd, maxY = rd;
+        float rd = DPAD_MM / 2;
         // The rightmost and lowest button centres.
         float lastX = 0, lowY = -rd;
         for (float[] b : panel) {
-            minX = Math.min(minX, b[0] - r);
-            maxX = Math.max(maxX, b[0] + r);
-            minY = Math.min(minY, b[1] - r);
-            maxY = Math.max(maxY, b[1] + r);
             lastX = Math.max(lastX, b[0]);
             lowY = Math.max(lowY, b[1]);
         }
         float margin = MARGIN_DP * density;
-        float availW = w - 2 * margin, availH = h * MAX_HEIGHT - margin;
-        float s = Math.max(0, Math.min(availW / (maxX - minX), availH / (maxY - minY)));
+        float s = scale(w, h, density);
         float button = Math.max(BUTTON_MM * s, MIN_BUTTON_DP * density);
         float dpad = Math.max(DPAD_MM * s, MIN_DPAD_DP * density);
         // The stick's row; the block's stick, from which its buttons are
@@ -136,6 +130,29 @@ final class TouchPanels {
         }
         out[PLACES] = new float[] {dx, oy, dpad};
         return out;
+    }
+
+    /**
+     * Pixels to the mm on every panel in a w by h area: the largest scale at
+     * which each panel, as drawn, fits the width less margins and the bottom
+     * MAX_HEIGHT of the height less a margin.
+     */
+    static float scale(float w, float h, float density) {
+        float r = BUTTON_MM / 2, rd = DPAD_MM / 2;
+        float margin = MARGIN_DP * density;
+        float availW = w - 2 * margin, availH = h * MAX_HEIGHT - margin;
+        float s = Float.MAX_VALUE;
+        for (float[][] panel : PANELS) {
+            float minX = -rd, maxX = rd, minY = -rd, maxY = rd;
+            for (float[] b : panel) {
+                minX = Math.min(minX, b[0] - r);
+                maxX = Math.max(maxX, b[0] + r);
+                minY = Math.min(minY, b[1] - r);
+                maxY = Math.max(maxY, b[1] + r);
+            }
+            s = Math.min(s, Math.min(availW / (maxX - minX), availH / (maxY - minY)));
+        }
+        return Math.max(0, s);
     }
 
     /** The panel's coordinates in mm, for tests and the editor's reset. */
