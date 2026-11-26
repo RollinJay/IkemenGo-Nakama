@@ -251,6 +251,8 @@ type Config struct {
 		PauseExitDelay             int32   `ini:"PauseExitDelay" sync:"host"`
 		// The Android app's on-screen buttons shown (touchButtonsShown).
 		TouchButtons string `ini:"TouchButtons"`
+		// Their layout (touchLayoutID); empty is the screenpack's.
+		TouchLayout string `ini:"TouchLayout"`
 	} `ini:"Input"`
 	// CBR AI settings, applied before each fight by external/mods/cbr.lua.
 	// None is synced: the CBR layer is inactive in netplay anyway.

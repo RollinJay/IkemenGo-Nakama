@@ -45,6 +45,8 @@ class TouchControls implements InputManager.InputDeviceListener {
     private static final String PREF_MODE = "touch_controls";
     // The on-screen buttons the game last chose to show, for the next start.
     private static final String PREF_BUTTONS = "touch_buttons";
+    // And where on an arcade panel the attack buttons sit.
+    private static final String PREF_PANEL = "touch_panel";
     // A press from the remote lasts at least this long, so that the game,
     // which reads its controllers once a frame, sees it.
     private static final long MIN_PRESS_MS = 60;
@@ -57,6 +59,9 @@ class TouchControls implements InputManager.InputDeviceListener {
     private final List<View> otherButtons = new ArrayList<>();
     private final FocusRing ring;
     private final Runnable showControls;
+    private final ViewGroup layout;
+    // The player's editor of the buttons' layout, while it is open.
+    private TouchLayoutEditor editor;
     private final InputManager inputManager;
     private final Handler handler = new Handler(Looper.getMainLooper());
     private boolean textEntry;
@@ -80,6 +85,7 @@ class TouchControls implements InputManager.InputDeviceListener {
         this.prefs = prefs;
         this.overlay = overlay;
         this.showControls = showControls;
+        this.layout = layout;
 
         settingsButton = addButton(layout, R.drawable.ic_touch_settings, R.string.touch_settings_button, 40,
                 RelativeLayout.ALIGN_PARENT_LEFT, 0.5f);
@@ -94,6 +100,8 @@ class TouchControls implements InputManager.InputDeviceListener {
 
         inputManager = (InputManager) activity.getSystemService(Context.INPUT_SERVICE);
         inputManager.registerInputDeviceListener(this, handler);
+        overlay.setPrefs(prefs);
+        overlay.setPanelMap(prefs.getInt(PREF_PANEL, TouchPanels.DEFAULT_MAP));
         overlay.setButtonsShown(prefs.getInt(PREF_BUTTONS, ControllerOverlay.ALL_BUTTONS));
         reloadGlyphs();
         update();
@@ -144,7 +152,9 @@ class TouchControls implements InputManager.InputDeviceListener {
      */
     void update() {
         int mode = mode();
-        overlay.setShown(mode == MODE_SHOW || (mode == MODE_AUTO && ControllerOverlay.getPhysicalJoystickCount() == 0));
+        // The editor shows them whatever the setting.
+        overlay.setShown(editor != null || mode == MODE_SHOW
+                || (mode == MODE_AUTO && ControllerOverlay.getPhysicalJoystickCount() == 0));
         boolean closed = textEntry && !SDLActivity.mScreenKeyboardShown;
         keyboardButton.setVisibility(closed ? View.VISIBLE : View.GONE);
         boolean justClosed = closed && !keyboardClosed;
@@ -190,11 +200,65 @@ class TouchControls implements InputManager.InputDeviceListener {
     }
 
     /**
+     * The game placed the attack buttons on the arcade panels
+     * (src/touch_glyphs.go touchPanelMessage).
+     */
+    void setPanel(int map) {
+        prefs.edit().putInt(PREF_PANEL, map).apply();
+        overlay.setPanelMap(map);
+    }
+
+    boolean isEditing() {
+        return editor != null;
+    }
+
+    /**
+     * Opens the player's editor of the buttons' layout, from the game's
+     * options or the settings button. The buttons play nothing meanwhile.
+     */
+    void openEditor() {
+        if (editor != null) {
+            return;
+        }
+        onTouch();
+        releaseAll();
+        overlay.setEditing(true);
+        editor = new TouchLayoutEditor(activity, overlay, this::closeEditor);
+        editor.setZ(300f);
+        layout.addView(editor, new RelativeLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        update();
+        showControls.run();
+    }
+
+    private void closeEditor() {
+        if (editor == null) {
+            return;
+        }
+        layout.removeView(editor);
+        editor = null;
+        overlay.setEditing(false);
+        update();
+        showControls.run();
+    }
+
+    /**
      * Takes a TV remote's arrows and OK: they move the highlight and press the
      * highlighted button, and never reach the game themselves. Returns false
      * for every other key, Back among them, which goes on to the game.
      */
     boolean onRemoteKey(KeyEvent e) {
+        if (editor != null) {
+            // Back leaves the editor without saving; a remote's keys do
+            // nothing there, and the game gets neither.
+            if (e.getKeyCode() == KeyEvent.KEYCODE_BACK || e.getKeyCode() == KeyEvent.KEYCODE_ESCAPE) {
+                if (e.getAction() == KeyEvent.ACTION_UP && !e.isCanceled()) {
+                    editor.cancel();
+                }
+                return true;
+            }
+            return isRemote(e);
+        }
         int dx = 0, dy = 0;
         switch (e.getKeyCode()) {
             case KeyEvent.KEYCODE_DPAD_UP:
@@ -351,9 +415,11 @@ class TouchControls implements InputManager.InputDeviceListener {
     }
 
     private static Rect screenRect(View v) {
+        // The location takes the view's move and scale; its size doesn't.
         int[] loc = new int[2];
         v.getLocationOnScreen(loc);
-        return new Rect(loc[0], loc[1], loc[0] + v.getWidth(), loc[1] + v.getHeight());
+        return new Rect(loc[0], loc[1], loc[0] + Math.round(v.getWidth() * v.getScaleX()),
+                loc[1] + Math.round(v.getHeight() * v.getScaleY()));
     }
 
     // Moves the highlight to v. On an on-screen button, it registers their
@@ -432,10 +498,15 @@ class TouchControls implements InputManager.InputDeviceListener {
                     update();
                     dialog.dismiss();
                 })
+                .setNeutralButton(R.string.touch_edit_button, (dialog, which) -> openEditor())
                 .show();
     }
 
     void close() {
+        if (editor != null) {
+            layout.removeView(editor);
+            editor = null;
+        }
         inputManager.unregisterInputDeviceListener(this);
         handler.removeCallbacksAndMessages(null);
     }
@@ -487,7 +558,8 @@ class TouchControls implements InputManager.InputDeviceListener {
             float w = getResources().getDisplayMetrics().density * 3;
             paint.setStrokeWidth(w);
             float left = t[0] - me[0], top = t[1] - me[1];
-            rect.set(left - w, top - w, left + target.getWidth() + w, top + target.getHeight() + w);
+            rect.set(left - w, top - w, left + target.getWidth() * target.getScaleX() + w,
+                    top + target.getHeight() * target.getScaleY() + w);
             float r = Math.min(rect.width(), rect.height()) / 2f;
             canvas.drawRoundRect(rect, r, r, paint);
         }

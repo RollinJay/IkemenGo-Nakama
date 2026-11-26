@@ -212,7 +212,10 @@ func Java_org_libsdl_app_SDLActivity_nativeSetKeyboardCover(env *C.JNIEnv, clazz
 const (
 	appMsgTextEntry    = 0x8001 // a text box opened (1) or closed (0)
 	appMsgTouchGlyphs  = 0x8002 // the touch buttons' glyph images changed
-	appMsgTouchButtons = 0x8003 // the touch buttons to show, and Start's place (touchButtonsMessage)
+	appMsgTouchButtons = 0x8003 // the touch buttons to show, Start's place and the layout (touchButtonsMessage)
+	// 0x8004 is iOS's controller count (the ios-touch branch).
+	appMsgTouchEdit  = 0x8005 // open the on-screen buttons' editor (1)
+	appMsgTouchPanel = 0x8006 // the attack buttons' places on an arcade panel (touchPanelMessage)
 )
 
 // sendToApp sends the app a command, which it handles on its own thread.
