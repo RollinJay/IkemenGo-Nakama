@@ -192,7 +192,13 @@ class TouchControls implements InputManager.InputDeviceListener {
      */
     void setButtons(int set) {
         prefs.edit().putInt(PREF_BUTTONS, set).apply();
+        int before = overlay.layout();
         overlay.setButtonsShown(set);
+        if (editor != null && overlay.layout() != before) {
+            // The editor's changes were the old layout's, and the overlay
+            // already shows the new one's as saved: it closes unsaved.
+            closeEditor();
+        }
         if (selected != null && !isTarget(selected)) {
             select(defaultTarget());
         }

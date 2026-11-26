@@ -26,7 +26,9 @@ import java.util.Locale;
  * fades them all. Save keeps the changes for the current layout (each layout
  * keeps its own, TouchPanels.Custom), Reset goes back to the layout's own
  * places, and Cancel, or Back, leaves without saving. The buttons play
- * nothing while it is open.
+ * nothing while it is open. Every element stays whole on the screen, and the
+ * bar of actions moves between the top and the bottom to keep off the one
+ * being moved, and off as many others as it can.
  */
 class TouchLayoutEditor extends FrameLayout {
     private static final float[] ALPHAS = {1f, 0.8f, 0.6f, 0.4f};
@@ -40,6 +42,7 @@ class TouchLayoutEditor extends FrameLayout {
     private final TextView title;
     private final Button opacity;
     private final LinearLayout bar;
+    private boolean barAtBottom;
     // The element being dragged (an index in ControllerOverlay.EDIT_VIEWS),
     // the finger's offset from its centre, and the one last touched.
     private int dragging = -1;
@@ -88,7 +91,7 @@ class TouchLayoutEditor extends FrameLayout {
         addAction(row, R.string.touch_edit_save, v -> save());
         FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT,
                 Gravity.TOP | Gravity.CENTER_HORIZONTAL);
-        lp.topMargin = dp(4);
+        lp.topMargin = overlay.getPaddingTop() + dp(4);
         addView(bar, lp);
 
         pinch = new ScaleGestureDetector(context, new ScaleGestureDetector.SimpleOnScaleGestureListener() {
@@ -100,6 +103,52 @@ class TouchLayoutEditor extends FrameLayout {
         });
         overlay.setCustom(working);
         updateTitle();
+        // Its size is known once it is laid out (and changes with the title).
+        bar.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> post(this::placeBar));
+    }
+
+    @Override
+    protected void onSizeChanged(int w, int h, int oldw, int oldh) {
+        super.onSizeChanged(w, h, oldw, oldh);
+        post(this::placeBar);
+    }
+
+    // The bar's rectangle at the top or the bottom, in the overlay's
+    // coordinates (this view lies over it, at the same place).
+    private RectF barRect(boolean bottom) {
+        float bw = bar.getWidth(), bh = bar.getHeight();
+        float left = (getWidth() - bw) / 2f;
+        float top = bottom ? getHeight() - overlay.getPaddingBottom() - dp(4) - bh : overlay.getPaddingTop() + dp(4);
+        return new RectF(left, top, left + bw, top + bh);
+    }
+
+    // How much of the shown elements the bar would cover there, the one
+    // selected counting above all the others together.
+    private float covered(RectF bar) {
+        float sum = 0;
+        for (int i = 0; i < ControllerOverlay.EDIT_VIEWS.length; i++) {
+            RectF r = overlay.elementRect(i);
+            if (r == null) continue;
+            RectF o = new RectF();
+            if (!o.setIntersect(r, bar)) continue;
+            float area = o.width() * o.height();
+            sum += i == selected ? area * 1000f : area;
+        }
+        return sum;
+    }
+
+    // Moves the bar to the top or the bottom, whichever covers less of the
+    // elements; it stays put on a tie.
+    private void placeBar() {
+        if (bar.getWidth() == 0 || getHeight() == 0) return;
+        float here = covered(barRect(barAtBottom)), there = covered(barRect(!barAtBottom));
+        if (there >= here) return;
+        barAtBottom = !barAtBottom;
+        FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) bar.getLayoutParams();
+        lp.gravity = (barAtBottom ? Gravity.BOTTOM : Gravity.TOP) | Gravity.CENTER_HORIZONTAL;
+        lp.topMargin = barAtBottom ? 0 : overlay.getPaddingTop() + dp(4);
+        lp.bottomMargin = barAtBottom ? overlay.getPaddingBottom() + dp(4) : 0;
+        bar.setLayoutParams(lp);
     }
 
     private Button addAction(LinearLayout row, int text, View.OnClickListener listener) {
@@ -144,6 +193,7 @@ class TouchLayoutEditor extends FrameLayout {
                     offsetY = y - r.centerY();
                     selected = i;
                     updateTitle();
+                    placeBar();
                     invalidate();
                 }
                 return true;
@@ -168,7 +218,7 @@ class TouchLayoutEditor extends FrameLayout {
         return true;
     }
 
-    // Puts element i's centre at x, y, kept on the screen.
+    // Puts element i's centre at x, y, kept whole on the screen.
     private void moveTo(int i, float x, float y) {
         float w = overlay.getWidth(), h = overlay.getHeight();
         if (w <= 0 || h <= 0) return;
@@ -176,7 +226,20 @@ class TouchLayoutEditor extends FrameLayout {
         if (p == null) return;
         p[0] = TouchPanels.clamp(x / w, 0, 1);
         p[1] = TouchPanels.clamp(y / h, 0, 1);
+        applyChange(i);
+    }
+
+    // Shows the working layout, keeps element i's place as the overlay
+    // drew it (kept inside its padded area) and moves the bar off it.
+    private void applyChange(int i) {
         overlay.setCustom(working);
+        RectF r = overlay.elementRect(i);
+        float[] p = working.pos[i];
+        if (r != null && p != null) {
+            p[0] = r.centerX() / overlay.getWidth();
+            p[1] = r.centerY() / overlay.getHeight();
+        }
+        placeBar();
         invalidate();
     }
 
@@ -195,8 +258,7 @@ class TouchLayoutEditor extends FrameLayout {
         float[] p = ensureOwn(selected);
         if (p == null) return;
         p[2] = TouchPanels.clamp(p[2] * factor, TouchPanels.Custom.MIN_SIZE, TouchPanels.Custom.MAX_SIZE);
-        overlay.setCustom(working);
-        invalidate();
+        applyChange(selected);
     }
 
     private void nextOpacity() {
@@ -219,6 +281,7 @@ class TouchLayoutEditor extends FrameLayout {
         selected = -1;
         overlay.setCustom(working);
         updateTitle();
+        placeBar();
         invalidate();
     }
 

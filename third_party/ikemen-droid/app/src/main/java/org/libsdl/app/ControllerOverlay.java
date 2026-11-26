@@ -157,6 +157,15 @@ public class ControllerOverlay extends RelativeLayout {
 
     @Override
     public boolean onTouchEvent(MotionEvent event) {
+        if (editing) {
+            // A finger already down when the editor opened still reaches
+            // this view, not the editor: it plays nothing, and whatever it
+            // pressed again since is let go.
+            if (!pointerStates.isEmpty() || hatX != 0 || hatY != 0 || leftJoyPointerId != -1 || rightJoyPointerId != -1) {
+                releaseAll();
+            }
+            return true;
+        }
         int action = event.getActionMasked();
         int index = event.getActionIndex();
         int pId = event.getPointerId(index);
@@ -710,6 +719,7 @@ public class ControllerOverlay extends RelativeLayout {
         }
         for (int i = 0; i < EDIT_VIEWS.length; i++) {
             View v = findViewById(EDIT_VIEWS[i]);
+            // Start and Menu, gone, have no size.
             if (v == null || v.getWidth() == 0) {
                 layoutPlace[i] = null;
                 continue;
@@ -725,22 +735,40 @@ public class ControllerOverlay extends RelativeLayout {
         for (int i = 0; i < EDIT_VIEWS.length; i++) {
             View v = findViewById(EDIT_VIEWS[i]);
             float[] place = layoutPlace[i];
-            if (v == null || place == null) continue;
+            // placePanel places Start and Menu even while they are gone,
+            // with no size to scale from.
+            if (v == null || place == null || v.getWidth() == 0) continue;
             float[] own = custom.pos[i];
             float cx = place[0], cy = place[1], size = place[2];
+            float scale = size / v.getWidth();
             if (own != null) {
-                cx = own[0] * w;
-                cy = own[1] * h;
                 size *= own[2];
+                scale = size / v.getWidth();
+                // Wherever the player put it, or a saved place puts it on
+                // this screen, it stays whole inside the padded area.
+                float[] k = clampCentre(own[0] * w, own[1] * h, size / 2f, v.getHeight() * scale / 2f);
+                cx = k[0];
+                cy = k[1];
             }
             float[] c = fileCentre(v);
             v.setTranslationX(cx - c[0]);
             v.setTranslationY(cy - c[1]);
-            float scale = size / v.getWidth();
             v.setScaleX(scale);
             v.setScaleY(scale);
             v.setAlpha(custom.alpha);
         }
+    }
+
+    /**
+     * cx, cy moved as little as it takes for a rectangle reaching hw and hh
+     * from it to stay inside this view less its padding (the system bars and
+     * cutouts); centred in the area where that is too small.
+     */
+    float[] clampCentre(float cx, float cy, float hw, float hh) {
+        float l = getPaddingLeft() + hw, r = getWidth() - getPaddingRight() - hw;
+        float t = getPaddingTop() + hh, b = getHeight() - getPaddingBottom() - hh;
+        return new float[] {l > r ? (l + r) / 2f : TouchPanels.clamp(cx, l, r),
+                t > b ? (t + b) / 2f : TouchPanels.clamp(cy, t, b)};
     }
 
     // Classic: moves each row's shown buttons, keeping their order, to the

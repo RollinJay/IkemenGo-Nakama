@@ -12,8 +12,10 @@ import java.util.Locale;
  * The four panels are slagcoin.com's Japanese 8-button layouts, read from its
  * drawings: each button's centre in millimetres from the stick's, x to the
  * right and y down, the top row left to right and then the bottom row. The
- * d-pad goes where the stick is, and the whole panel is scaled, keeping its
- * proportions, to fit the screen.
+ * d-pad stands for the stick. The panel is scaled, alike both ways, to fit
+ * the screen; then the d-pad goes to the left edge and the eight buttons, as
+ * one block keeping the drawing's shape, to the right edge, both at the
+ * height the drawing gives them, so that the middle of the game stays clear.
  */
 final class TouchPanels {
     static final int CLASSIC = 1;
@@ -59,7 +61,7 @@ final class TouchPanels {
     static final float DPAD_MM = 64;
     // The panel takes at most this share of the screen's height, from the
     // bottom, and its buttons and d-pad are at least this big, in dp.
-    private static final float MAX_HEIGHT = 0.6f;
+    private static final float MAX_HEIGHT = 0.45f;
     private static final float MIN_BUTTON_DP = 48;
     private static final float MIN_DPAD_DP = 120;
     private static final float MARGIN_DP = 16;
@@ -97,32 +99,42 @@ final class TouchPanels {
     /**
      * Lays a panel out in a w by h area, density pixels to the dp: for each
      * place p, {centre x, centre y, diameter} in pixels, and the d-pad's at
-     * index PLACES. The panel, scaled alike both ways, fits the width less
-     * margins and the bottom MAX_HEIGHT of the height, centred across it and
-     * at the bottom.
+     * index PLACES. The scale s fits the whole panel as drawn, stick and
+     * buttons, in the width less margins and in the bottom MAX_HEIGHT of the
+     * height, and sizes the d-pad and the buttons alike. The d-pad then sits
+     * a margin from the left edge and the button block a margin from the
+     * right, the stick's row shared, the lower of them a margin from the
+     * bottom.
      */
     static float[][] place(int layout, float w, float h, float density) {
         float[][] panel = PANELS[layout - STRAIGHT];
         float r = BUTTON_MM / 2, rd = DPAD_MM / 2;
         float minX = -rd, maxX = rd, minY = -rd, maxY = rd;
+        // The rightmost and lowest button centres.
+        float lastX = 0, lowY = -rd;
         for (float[] b : panel) {
             minX = Math.min(minX, b[0] - r);
             maxX = Math.max(maxX, b[0] + r);
             minY = Math.min(minY, b[1] - r);
             maxY = Math.max(maxY, b[1] + r);
+            lastX = Math.max(lastX, b[0]);
+            lowY = Math.max(lowY, b[1]);
         }
         float margin = MARGIN_DP * density;
         float availW = w - 2 * margin, availH = h * MAX_HEIGHT - margin;
-        float s = Math.min(availW / (maxX - minX), availH / (maxY - minY));
+        float s = Math.max(0, Math.min(availW / (maxX - minX), availH / (maxY - minY)));
         float button = Math.max(BUTTON_MM * s, MIN_BUTTON_DP * density);
         float dpad = Math.max(DPAD_MM * s, MIN_DPAD_DP * density);
-        float ox = margin + (availW - (maxX - minX) * s) / 2 - minX * s;
-        float oy = h - margin - maxY * s;
+        // The stick's row; the block's stick, from which its buttons are
+        // measured; the d-pad's centre.
+        float oy = h - margin - Math.max(dpad / 2, lowY * s + button / 2);
+        float bx = w - margin - button / 2 - lastX * s;
+        float dx = margin + dpad / 2;
         float[][] out = new float[PLACES + 1][];
         for (int p = 0; p < PLACES; p++) {
-            out[p] = new float[] {ox + panel[p][0] * s, oy + panel[p][1] * s, button};
+            out[p] = new float[] {bx + panel[p][0] * s, oy + panel[p][1] * s, button};
         }
-        out[PLACES] = new float[] {ox, oy, dpad};
+        out[PLACES] = new float[] {dx, oy, dpad};
         return out;
     }
 
