@@ -57,6 +57,10 @@ options.t_touchLayouts = {
 --doesn't offer shows as the first
 function options.f_touchLayoutIndex()
 	local current = (gameOption('Input.TouchLayout') or ""):gsub('%s', ''):lower()
+	--[Touch Controls]'s old name for the classic layout
+	if current == 'arcade' then
+		current = 'classic'
+	end
 	for i, v in ipairs(options.t_touchLayouts) do
 		if v.value == current then
 			return i
