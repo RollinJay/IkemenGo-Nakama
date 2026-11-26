@@ -48,7 +48,7 @@ static const CGFloat ButtonMM = 30;
 static const CGFloat DPadMM = 64;
 // The panel takes at most this share of the height, from the bottom, and its
 // buttons and d-pad are at least this big, in points (the Android app's dp).
-static const CGFloat MaxHeight = 0.6;
+static const CGFloat MaxHeight = 0.45;
 static const CGFloat MinButtonPt = 48;
 static const CGFloat MinDPadPt = 120;
 static const CGFloat MarginPt = 16;
@@ -83,26 +83,30 @@ TouchPanelPlacement TouchPanelPlace(int layout, CGRect area) {
     const CGFloat (*panel)[2] = Panels[layout - TouchLayoutStraight];
     CGFloat r = ButtonMM / 2, rd = DPadMM / 2;
     CGFloat minX = -rd, maxX = rd, minY = -rd, maxY = rd;
+    // The rightmost and lowest button centres.
+    CGFloat lastX = 0, lowY = -rd;
     for (int p = 0; p < TOUCH_PANEL_PLACES; p++) {
         minX = MIN(minX, panel[p][0] - r);
         maxX = MAX(maxX, panel[p][0] + r);
         minY = MIN(minY, panel[p][1] - r);
         maxY = MAX(maxY, panel[p][1] + r);
+        lastX = MAX(lastX, panel[p][0]);
+        lowY = MAX(lowY, panel[p][1]);
     }
     CGFloat w = area.size.width, h = area.size.height;
     CGFloat availW = w - 2 * MarginPt, availH = h * MaxHeight - MarginPt;
-    CGFloat s = MIN(availW / (maxX - minX), availH / (maxY - minY));
-    if (s <= 0) {
-        s = 0;
-    }
+    CGFloat s = MAX(0, MIN(availW / (maxX - minX), availH / (maxY - minY)));
     out.button = MAX(ButtonMM * s, MinButtonPt);
     out.dpad = MAX(DPadMM * s, MinDPadPt);
-    CGFloat ox = area.origin.x + MarginPt + (availW - (maxX - minX) * s) / 2 - minX * s;
-    CGFloat oy = area.origin.y + h - MarginPt - maxY * s;
+    // The stick's row; the block's stick, from which its buttons are
+    // measured; the d-pad's centre.
+    CGFloat oy = area.origin.y + h - MarginPt - MAX(out.dpad / 2, lowY * s + out.button / 2);
+    CGFloat bx = area.origin.x + w - MarginPt - out.button / 2 - lastX * s;
+    CGFloat dx = area.origin.x + MarginPt + out.dpad / 2;
     for (int p = 0; p < TOUCH_PANEL_PLACES; p++) {
-        out.centre[p] = CGPointMake(ox + panel[p][0] * s, oy + panel[p][1] * s);
+        out.centre[p] = CGPointMake(bx + panel[p][0] * s, oy + panel[p][1] * s);
     }
-    out.dpadCentre = CGPointMake(ox, oy);
+    out.dpadCentre = CGPointMake(dx, oy);
     return out;
 }
 

@@ -520,8 +520,11 @@ static SDL_JoystickID virtualJoystickID = -1;
     _gridLayout = grid;
     if (layout != _layout) {
         _layout = layout;
-        // Each layout keeps the player's own changes.
+        // Each layout keeps the player's own changes, its opacity too.
         self.customLayout = [TouchCustomLayout loadForLayout:layout];
+        for (UIButton *btn in self.buttons) {
+            btn.alpha = [self buttonAlpha:[self.currentlyPressedButtons containsObject:btn]];
+        }
     }
     for (int i = 0; i < ButtonCount; i++) {
         UIButton *btn = [self buttonAtIndex:i];
@@ -545,10 +548,9 @@ static SDL_JoystickID virtualJoystickID = -1;
     self.leftJoystickView.hidden = !shown || panel;
     self.rightJoystickView.hidden = panel;
     self.vewlixButtonView.hidden = !shown;
-    // The player's opacity (the buttons take it with their pressed look).
+    // The player's opacity, on what the editor moves as on Android: the
+    // d-pad and the buttons (with their pressed look), not the sticks.
     self.dPadView.alpha = self.customLayout.alpha;
-    self.leftJoystickView.alpha = self.customLayout.alpha;
-    self.rightJoystickView.alpha = self.customLayout.alpha;
     for (int i = 0; i < ButtonCount; i++) {
         [self buttonAtIndex:i].hidden = !shown || (self.shownButtons & (1 << i)) == 0;
     }
@@ -631,16 +633,32 @@ static SDL_JoystickID virtualJoystickID = -1;
         }
         CGPoint c = _placeCentre[i];
         CGFloat diameter = _placeSize[i];
-        if ([custom hasPosition:i]) {
-            CGPoint own = [custom centreOf:i];
-            c = CGPointMake(own.x * size.width, own.y * size.height);
-            diameter *= [custom sizeOf:i];
-        }
-        CGPoint natural = [self naturalCentre:v];
         CGFloat width = v.bounds.size.width;
         CGFloat scale = width > 0 ? diameter / width : 1.0;
+        if ([custom hasPosition:i]) {
+            CGPoint own = [custom centreOf:i];
+            diameter *= [custom sizeOf:i];
+            scale = width > 0 ? diameter / width : 1.0;
+            // Wherever the player put it, or a saved place puts it on this
+            // screen, it stays whole inside the safe area.
+            c = [self clampCentre:CGPointMake(own.x * size.width, own.y * size.height)
+                       halfWidth:width * scale / 2.0
+                      halfHeight:v.bounds.size.height * scale / 2.0];
+        }
+        CGPoint natural = [self naturalCentre:v];
         v.transform = CGAffineTransformScale(CGAffineTransformMakeTranslation(c.x - natural.x, c.y - natural.y), scale, scale);
     }
+}
+
+// c moved as little as it takes for a rectangle reaching hw and hh from it
+// to stay inside the safe area; centred in it where that is too small. As
+// the Android app's ControllerOverlay clampCentre.
+- (CGPoint)clampCentre:(CGPoint)c halfWidth:(CGFloat)hw halfHeight:(CGFloat)hh {
+    CGRect area = UIEdgeInsetsInsetRect(self.bounds, self.safeAreaInsets);
+    CGFloat l = CGRectGetMinX(area) + hw, r = CGRectGetMaxX(area) - hw;
+    CGFloat t = CGRectGetMinY(area) + hh, b = CGRectGetMaxY(area) - hh;
+    return CGPointMake(l > r ? (l + r) / 2.0 : MIN(MAX(c.x, l), r),
+                       t > b ? (t + b) / 2.0 : MIN(MAX(c.y, t), b));
 }
 
 // An arcade panel (TouchPanelPlace) in the safe area: the d-pad where the

@@ -9,7 +9,9 @@
 //  60, 40%). Save keeps the changes for the current layout (each layout keeps
 //  its own, TouchCustomLayout), Reset goes back to the layout's own places
 //  (Save to keep that), and Cancel leaves without saving. The buttons play
-//  nothing while it is open (TouchOverlayView editing).
+//  nothing while it is open (TouchOverlayView editing). Every element stays
+//  whole inside the safe area, and the bar of actions moves between the top
+//  and the bottom to keep off the element being moved.
 //
 
 #import <UIKit/UIKit.h>

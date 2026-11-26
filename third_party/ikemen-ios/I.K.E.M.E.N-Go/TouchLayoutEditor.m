@@ -25,6 +25,10 @@ static NSString *Str(NSString *key, NSString *english) {
 @property (nonatomic, strong) UILabel *titleLabel;
 @property (nonatomic, strong) UIButton *opacityButton;
 @property (nonatomic, strong) UIView *bar;
+// The bar at the top or at the bottom of the safe area (placeBar).
+@property (nonatomic, strong) NSLayoutConstraint *barTop;
+@property (nonatomic, strong) NSLayoutConstraint *barBottom;
+@property (nonatomic, assign) BOOL barAtBottom;
 // The element being dragged (an index in TouchEditNames), the touch that
 // drags it and its offset from the element's centre, and the one last
 // touched, which the resize buttons and a pinch resize.
@@ -108,8 +112,10 @@ static NSString *Str(NSString *key, NSString *english) {
     bar.layer.cornerRadius = 12;
     bar.translatesAutoresizingMaskIntoConstraints = NO;
     [self addSubview:bar];
+    self.barTop = [bar.topAnchor constraintEqualToAnchor:self.safeAreaLayoutGuide.topAnchor constant:4];
+    self.barBottom = [bar.bottomAnchor constraintEqualToAnchor:self.safeAreaLayoutGuide.bottomAnchor constant:-4];
     [NSLayoutConstraint activateConstraints:@[
-        [bar.topAnchor constraintEqualToAnchor:self.safeAreaLayoutGuide.topAnchor constant:4],
+        self.barTop,
         [bar.centerXAnchor constraintEqualToAnchor:self.centerXAnchor],
         [bar.widthAnchor constraintLessThanOrEqualToAnchor:self.safeAreaLayoutGuide.widthAnchor constant:-8],
         [self.titleLabel.widthAnchor constraintLessThanOrEqualToAnchor:self.safeAreaLayoutGuide.widthAnchor constant:-20],
@@ -128,7 +134,53 @@ static NSString *Str(NSString *key, NSString *english) {
 
 - (void)layoutSubviews {
     [super layoutSubviews];
+    [self placeBar];
     [self setNeedsDisplay];
+}
+
+// The bar's rectangle at the top or the bottom of the safe area, in the
+// overlay's coordinates (this view is the overlay's size, at its origin).
+- (CGRect)barRect:(BOOL)bottom {
+    CGSize b = self.bar.bounds.size;
+    CGRect area = UIEdgeInsetsInsetRect(self.bounds, self.safeAreaInsets);
+    CGFloat y = bottom ? CGRectGetMaxY(area) - 4 - b.height : CGRectGetMinY(area) + 4;
+    CGRect r = CGRectMake(CGRectGetMidX(self.bounds) - b.width / 2.0, y, b.width, b.height);
+    return [self convertRect:r toView:self.overlay];
+}
+
+// How much of the shown elements the bar would cover there, the one
+// selected counting above all the others together.
+- (CGFloat)covered:(CGRect)bar {
+    CGFloat sum = 0;
+    for (int i = 0; i < TOUCH_EDIT_ELEMENTS; i++) {
+        CGRect r = [self.overlay elementRect:i];
+        if (CGRectIsNull(r)) {
+            continue;
+        }
+        CGRect o = CGRectIntersection(r, bar);
+        if (CGRectIsNull(o)) {
+            continue;
+        }
+        CGFloat area = o.size.width * o.size.height;
+        sum += i == self.selected ? area * 1000 : area;
+    }
+    return sum;
+}
+
+// Moves the bar to the top or the bottom, whichever covers less of the
+// elements; it stays put on a tie. As the Android app's editor.
+- (void)placeBar {
+    if (self.bar.bounds.size.width <= 0 || self.bounds.size.height <= 0) {
+        return;
+    }
+    if ([self covered:[self barRect:!self.barAtBottom]] >= [self covered:[self barRect:self.barAtBottom]]) {
+        return;
+    }
+    self.barAtBottom = !self.barAtBottom;
+    // Off first, then on, so that the two never hold at once.
+    (self.barAtBottom ? self.barTop : self.barBottom).active = NO;
+    (self.barAtBottom ? self.barBottom : self.barTop).active = YES;
+    [self setNeedsLayout];
 }
 
 #pragma mark - Touches
@@ -153,6 +205,7 @@ static NSString *Str(NSString *key, NSString *english) {
     self.offset = CGPointMake(p.x - CGRectGetMidX(r), p.y - CGRectGetMidY(r));
     self.selected = i;
     [self updateTitle];
+    [self placeBar];
     [self setNeedsDisplay];
 }
 
@@ -203,16 +256,15 @@ static NSString *Str(NSString *key, NSString *english) {
     return YES;
 }
 
-// Puts element i's centre at p, in the overlay's coordinates, kept on the
-// screen.
+// Puts element i's centre at p, in the overlay's coordinates, kept whole on
+// the screen.
 - (void)move:(int)i to:(CGPoint)p {
     CGSize size = self.overlay.bounds.size;
     if (size.width <= 0 || size.height <= 0 || ![self ensureOwn:i]) {
         return;
     }
     [self.working setElement:i centre:CGPointMake(p.x / size.width, p.y / size.height) size:[self.working sizeOf:i]];
-    [self.overlay setCustom:self.working];
-    [self setNeedsDisplay];
+    [self applyChange:i];
 }
 
 - (void)resize:(CGFloat)factor {
@@ -221,7 +273,21 @@ static NSString *Str(NSString *key, NSString *english) {
         return;
     }
     [self.working setElement:i centre:[self.working centreOf:i] size:[self.working sizeOf:i] * factor];
+    [self applyChange:i];
+}
+
+// Shows the working layout, keeps element i's place as the overlay drew it
+// (kept inside the safe area) and moves the bar off it.
+- (void)applyChange:(int)i {
     [self.overlay setCustom:self.working];
+    CGRect r = [self.overlay elementRect:i];
+    CGSize size = self.overlay.bounds.size;
+    if (!CGRectIsNull(r) && [self.working hasPosition:i]) {
+        [self.working setElement:i
+                          centre:CGPointMake(CGRectGetMidX(r) / size.width, CGRectGetMidY(r) / size.height)
+                            size:[self.working sizeOf:i]];
+    }
+    [self placeBar];
     [self setNeedsDisplay];
 }
 
@@ -264,6 +330,7 @@ static NSString *Str(NSString *key, NSString *english) {
     self.selected = -1;
     [self.overlay setCustom:self.working];
     [self updateTitle];
+    [self placeBar];
     [self setNeedsDisplay];
 }
 

@@ -57,9 +57,12 @@ typedef struct {
 } TouchPanelPlacement;
 
 // Lays panel layout out in area, as the Android app does in its pixels with
-// dp for points: scaled alike both ways to fit the width less margins and
-// the bottom 60% of the height, centred across it and at its bottom; buttons
-// at least 48 points across and the d-pad 120.
+// dp for points: the scale fits the whole panel as drawn in the width less
+// margins and the bottom 45% of the height (MaxHeight), and sizes the d-pad
+// and the buttons alike (buttons at least 48 points across, the d-pad 120);
+// then the d-pad sits a margin from the left edge and the eight buttons, as
+// one block keeping the drawing's shape, a margin from the right, the
+// stick's row shared and the lower of them a margin from the bottom.
 TouchPanelPlacement TouchPanelPlace(int layout, CGRect area);
 
 // The panel's coordinates in mm (8 x {x, y}), or NULL for another layout.
