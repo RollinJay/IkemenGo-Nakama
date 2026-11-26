@@ -154,11 +154,13 @@ local function goToItem(t, item, sec, name, confirm)
 end
 
 -- The menus ask for keys through getInput; a pressed token counts as any
--- player's, once, in the frame it is pressed. Once only: a submenu opened by
--- a press starts its loop in the same frame, and would take it again.
+-- player's, once. Once only: a submenu opened by a press starts its loop in the
+-- same frame, and would take it again. The press is made from the menu's draw
+-- call, which ends with refresh() (main.f_menuCommonDraw), so the menu reads
+-- input one frame later: the press holds for that frame too.
 local realGetInput = getInput
 getInput = function(pn, ...)
-	if ci.press ~= nil and ci.pressAt == ci.frame then
+	if ci.press ~= nil and ci.frame - ci.pressAt <= 1 then
 		for _, keys in ipairs({...}) do
 			if hasKey(keys, ci.press) then
 				ci.press = nil
