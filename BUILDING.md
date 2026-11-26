@@ -288,8 +288,10 @@ The **iOS Simulator test** workflow (`.github/workflows/ios-simulator.yml`) buil
 `macos-26` runner and runs `build/ios-simulator-test/run.sh` on a simulated iPhone, then iPad.
 Each run gives the app a test game folder (the simulator-only `IKEMEN_TEST_GAME_FOLDER` hook
 replaces the folder picker), with a test mod and the default screenpack set up like HDBZ
-(`[Touch Controls] layout = grid`, no D and W buttons, `start.slot = d`). The mod presses
-the screenpack's menu keys to reach each screen and waits for the screenshot.
+(`[Touch Controls] layout = vewlix`, `panel.top = x, y, z, d`, `panel.bottom = a, b, c, w`,
+no D and W buttons, `start.slot = d`). The mod presses the screenpack's menu keys to reach
+each screen and waits for the screenshot. In Options > Input Settings it steps On-screen
+Layout through every value, then opens Edit On-screen Buttons' layout editor.
 
 * Start it from the Actions tab or with `gh workflow run ios-simulator.yml --ref <branch>`
   (dispatching needs the workflow on the default branch; until then a push of a branch
@@ -299,7 +301,10 @@ the screenpack's menu keys to reach each screen and waits for the screenshot.
 * The run's summary lists each device's result. The `ios-simulator-<run number>` artifact
   holds, for `iphone/` and `ipad/`:
   * `screenshots/`: `01-title`, `02-touch-controls`, `03-textbox-keyboard`,
-    `04-options-onscreen-buttons` and `99-last` (`missing-<step>` where a step never came);
+    `04-options-onscreen-buttons`, `05-layout-default-vewlix` (the screenpack's), `06-layout-straight`,
+    `07-layout-vewlix`, `08-layout-arch`, `09-layout-staggered`, `10-layout-grid`,
+    `11-layout-classic`, `12-layout-editor` and `99-last` (`missing-<step>` where a step
+    never came);
   * `logs/game-stdout.txt` and `game-stderr.txt` (the engine's own output and the mod's
     `[ios-ci]` lines), `device-log.txt` (the app's `NSLog`), `steps.txt` (the mod's steps),
     `crash-reports/` and the test's `config.ini` and `system_ci.def`;
