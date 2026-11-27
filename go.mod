@@ -13,19 +13,19 @@ require (
 	github.com/ikemen-engine/reisen v0.1.10-0.20261002224432-3a7df23d0df2
 	github.com/leonkasovan/gl v0.0.0-20251110213347-e04040ce71e2
 	github.com/lukegb/dds v0.0.0-20190402175749-8b7170e64003
-	github.com/mdouchement/hdr v0.2.4
+	github.com/mdouchement/hdr v0.2.5
 	github.com/qmuntal/gltf v0.24.2
 	github.com/sqweek/dialog v0.0.0-20220809060634-e981b270ebbf
-	github.com/tidwall/gjson v1.20.3
+	github.com/tidwall/gjson v1.20.4
 	github.com/tidwall/sjson v1.2.9
 	github.com/veandco/go-sdl2 v0.5.0-alpha.7.0.20250220045537-7f43f67a3a12
-	github.com/xtaci/kcp-go/v5 v5.7.5
+	github.com/xtaci/kcp-go/v5 v5.7.6
 	github.com/yuin/gopher-lua v1.1.2
 	golang.org/x/image v0.48.0
 	golang.org/x/mobile v0.0.0-20261117202452-47699113848a
 	golang.org/x/sys v0.50.0
 	golang.org/x/text v0.44.0
-	gopkg.in/ini.v1 v1.67.3
+	gopkg.in/ini.v1 v1.68.0
 )
 
 require (
@@ -38,7 +38,7 @@ require (
 	github.com/klauspost/cpuid/v2 v2.4.1 // indirect
 	github.com/klauspost/reedsolomon v1.14.2 // indirect
 	github.com/kr/pretty v0.3.1 // indirect
-	github.com/lucasb-eyer/go-colorful v1.2.0 // indirect
+	github.com/lucasb-eyer/go-colorful v1.4.1 // indirect
 	github.com/mewkiz/flac v1.0.12 // indirect
 	github.com/mewkiz/pkg v0.0.0-20230226050401-4010bf0fec14 // indirect
 	github.com/pion/transport/v5 v5.1.4 // indirect
