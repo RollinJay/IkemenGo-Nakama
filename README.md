@@ -70,6 +70,8 @@ In this fork, the Android app asks for the game's folder on its first start, and
 - **TV remote:** it never plays as a controller. As in other Android apps, its arrows move a highlight between the buttons on the screen, and OK presses the highlighted one for as long as it's held. While a text box's keyboard is closed, the highlight goes to the keyboard button.
 - **Back:** works as Escape.
 
+The iOS app has the same on-screen buttons: glyphs, layouts, moving the buttons (Edit layout is under its settings button too), hiding and the keyboard. It has no TV remote or Back handling.
+
 ## Developing
 These instructions are for those interested in developing the Ikemen GO engine itself. Instructions for creating custom stages, fonts, characters and other resources can be found in the community forum.
 

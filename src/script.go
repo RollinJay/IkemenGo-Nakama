@@ -4110,10 +4110,10 @@ func systemScriptInit(l *lua.LState) {
 		return 1
 	})
 	luaRegister(l, "touchEditButtons", func(l *lua.LState) int {
-		/*Open the Android app's editor of its on-screen buttons, where the
-		player moves, resizes and fades them for the current layout.
+		/*Open the Android or iOS app's editor of its on-screen buttons, where
+		the player moves, resizes and fades them for the current layout.
 		@function touchEditButtons
-		@treturn bool opened `true` if the app has one (Android only).*/
+		@treturn bool opened `true` if the app has one (Android and iOS only).*/
 		l.Push(lua.LBool(touchEditButtons()))
 		return 1
 	})

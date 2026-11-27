@@ -1,0 +1,2 @@
+# Keep the vendored files byte for byte as upstream has them.
+* -text

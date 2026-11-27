@@ -97,8 +97,10 @@ ANDROID_APK_OUT="${ANDROID_APK_OUT:-$REPO_ROOT/bin/ikemen-go.apk}"
 # iOS IPA packaging (ikemen-ios)
 BUILD_IOS_IPA="${BUILD_IOS_IPA:-1}"  # 1=yes, 0=no
 # IOS_WRAPPER_DIR: an existing ikemen-ios checkout, used in place (for opening it in Xcode).
-# If unset, IOS_APP_REPO@IOS_APP_REF is freshly cloned into build/ios-app/ikemen-ios.
-IOS_APP_REPO="${IOS_APP_REPO:-https://github.com/Jesuszilla/ikemen-ios.git}"
+# If unset, IOS_APP_REPO is copied to build/ios-app/ikemen-ios: by default the copy in
+# third_party/ikemen-ios (see its VENDOR.md), or another local checkout, or a git URL
+# (cloned at IOS_APP_REF).
+IOS_APP_REPO="${IOS_APP_REPO:-$REPO_ROOT/third_party/ikemen-ios}"
 IOS_APP_REF="${IOS_APP_REF:-main}"
 IOS_WRAPPER_DIR="${IOS_WRAPPER_DIR:-}"
 IOS_MIN_VERSION="${IOS_MIN_VERSION:-17.0}"
@@ -1565,7 +1567,8 @@ function xcodebuild_clean() {
 }
 
 # Resolve the ikemen-ios Xcode wrapper. IOS_WRAPPER_DIR (if set) is used in place;
-# otherwise IOS_APP_REPO@IOS_APP_REF is cloned into build/ios-app/ikemen-ios.
+# otherwise IOS_APP_REPO is copied (a local folder, by default third_party/ikemen-ios)
+# or cloned at IOS_APP_REF (a git URL) into build/ios-app/ikemen-ios.
 function sync_ios_app_repo() {
 	if [[ -n "$IOS_WRAPPER_DIR" ]]; then
 		if [[ ! -d "$IOS_WRAPPER_DIR/I.K.E.M.E.N-Go.xcodeproj" ]]; then
@@ -1579,6 +1582,26 @@ function sync_ios_app_repo() {
 
 	IOS_WRAPPER_DIR="$REPO_ROOT/$BUILDDIR/ios-app/ikemen-ios"
 	mkdir -p "$(dirname "$IOS_WRAPPER_DIR")"
+	if [[ -d "$IOS_APP_REPO" ]]; then
+		local src
+		src="$(cd "$IOS_APP_REPO" && pwd -P)"
+		echo "==> Using local ikemen-ios checkout: $src -> $IOS_WRAPPER_DIR"
+		# A fresh copy each build, keeping only the SDL2 and MoltenVK frameworks
+		# built or downloaded for an earlier one (ensure_ios_*_framework).
+		local kept="$REPO_ROOT/$BUILDDIR/ios-app/Frameworks.kept"
+		rm -rf "$kept"
+		[[ -d "$IOS_WRAPPER_DIR/Frameworks" ]] && mv "$IOS_WRAPPER_DIR/Frameworks" "$kept"
+		rm -rf "$IOS_WRAPPER_DIR"
+		cp -a "$src" "$IOS_WRAPPER_DIR"
+		if [[ -d "$kept" ]]; then
+			local fw
+			for fw in "$kept"/*.xcframework; do
+				[[ -e "$fw" ]] && mv "$fw" "$IOS_WRAPPER_DIR/Frameworks/"
+			done
+			rm -rf "$kept"
+		fi
+		return 0
+	fi
 	if [[ ! -d "$IOS_WRAPPER_DIR/.git" ]]; then
 		rm -rf "$IOS_WRAPPER_DIR"
 		echo "==> Cloning ikemen-ios: $IOS_APP_REPO ($IOS_APP_REF) -> $IOS_WRAPPER_DIR"
@@ -1651,6 +1674,40 @@ function ensure_ios_moltenvk_framework() {
 	rm -rf "$work"
 }
 
+# Adds to ikemen-ios's manifest.txt the files the desktop release ships that it
+# lacks. Like ikemen-droid's, it only knows upstream Ikemen GO's files, so the
+# fork's own scripts (online.lua, lobby.lua, ...), mods, fonts and server list
+# would be left out of DefaultAssets.zip, and main.lua stops at
+# require('external.script.online'). The app installs everything in the zip, so
+# the zip only has to hold them. Merging an already merged manifest (a wrapper
+# used in place through IOS_WRAPPER_DIR) changes nothing.
+function add_ios_extra_assets() {
+	local manifest="$1"
+	echo "==> Adding the desktop release's files to $manifest"
+	# (echo: the upstream file may lack a final newline)
+	{ cat "$manifest"; echo; android_apk_extra_assets; } | awk '{
+		gsub(/^[ \t\r]+|[ \t\r]+$/, "")
+		if ($0 == "" || seen[$0]++) next
+		print
+	}' > "$manifest.tmp"
+	mv "$manifest.tmp" "$manifest"
+}
+
+# Stops the build when an engine file from data, font or external did not make it
+# into the staged DefaultAssets folder.
+function check_ios_default_assets() {
+	local assets_dir="$1" missing
+	missing="$(list_tree_files "$REPO_ROOT" data font external | while IFS= read -r p; do
+		[[ -z "$p" || -f "$assets_dir/$p" ]] || printf '%s\n' "$p"
+	done)"
+	if [[ -n "$missing" ]]; then
+		echo "ERROR: These engine files are missing from DefaultAssets.zip:" >&2
+		printf '%s\n' "$missing" | sed 's/^/  /' >&2
+		exit 1
+	fi
+	echo "==> DefaultAssets: all $(list_tree_files "$REPO_ROOT" data font external | grep -c .) engine files from data, font and external staged"
+}
+
 # Package the wrapper into an unsigned IPA. Users sign it themselves when
 # sideloading (Apple requires a per-user signature outside the App Store).
 function build_ios_ipa() {
@@ -1666,8 +1723,10 @@ function build_ios_ipa() {
 		echo "ERROR: ikemen-ios manifest not found at: $manifest" >&2
 		exit 1
 	fi
+	add_ios_extra_assets "$manifest"
 	find "$assets_dir" -mindepth 1 -maxdepth 1 ! -name "manifest.txt" -exec rm -rf {} + 2>/dev/null || true
 	stage_manifest_assets "$manifest" "$assets_dir"
+	check_ios_default_assets "$assets_dir"
 	rm -f "$IOS_WRAPPER_DIR/DefaultAssets.zip"
 	( cd "$assets_dir" && zip -qr -X "$IOS_WRAPPER_DIR/DefaultAssets.zip" . )
 

@@ -333,6 +333,41 @@ func TestTouchStartSlot(t *testing.T) {
 	}
 }
 
+func TestRealControllerCount(t *testing.T) {
+	for _, tc := range []struct {
+		touch []bool
+		want  int
+	}{
+		{nil, 0},
+		{[]bool{true}, 0},         // only the on-screen buttons
+		{[]bool{false}, 1},        // a real pad
+		{[]bool{true, false}, 1},  // both
+		{[]bool{false, false}, 2}, // two real pads
+		{[]bool{true, true}, 0},   // never real, however many
+		{[]bool{false, true, false}, 2},
+	} {
+		if got := realControllerCount(tc.touch); got != tc.want {
+			t.Errorf("realControllerCount(%v) = %d, want %d", tc.touch, got, tc.want)
+		}
+	}
+}
+
+func TestAppMessages(t *testing.T) {
+	seen := map[int]bool{}
+	for _, c := range []int{appMsgTextEntry, appMsgTouchGlyphs, appMsgTouchButtons, appMsgControllers, appMsgTouchEdit, appMsgTouchPanel} {
+		// SDL's Android activity leaves commands from 0x8000 to apps.
+		if c < 0x8000 || seen[c] {
+			t.Errorf("app message %#x is SDL's or taken", c)
+		}
+		seen[c] = true
+	}
+	// The iOS app reads these numbers (third_party/ikemen-ios TouchControls.h).
+	if appMsgTextEntry != 0x8001 || appMsgTouchGlyphs != 0x8002 || appMsgTouchButtons != 0x8003 || appMsgControllers != 0x8004 ||
+		appMsgTouchEdit != 0x8005 || appMsgTouchPanel != 0x8006 {
+		t.Error("app message numbers changed: change the apps' too")
+	}
+}
+
 func TestTouchLayoutID(t *testing.T) {
 	for _, tc := range []struct {
 		option, screenpack string

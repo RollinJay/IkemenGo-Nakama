@@ -1425,7 +1425,7 @@ options.t_itemname = {
 		end
 		return true
 	end,
-	--On-screen Buttons (Android): the screenpack's choice, all, or all but D and W
+	--On-screen Buttons (Android and iOS): the screenpack's choice, all, or all but D and W
 	['touchbuttons'] = function(t, item, cursorPosY, moveTxt)
 		local step = 0
 		if getInput(-1, motif.option_info.menu.add.key) then
@@ -1447,7 +1447,7 @@ options.t_itemname = {
 		end
 		return true
 	end,
-	--On-screen Layout (Android): the screenpack's, an arcade panel, the grid or the classic one
+	--On-screen Layout (Android and iOS): the screenpack's, an arcade panel, the grid or the classic one
 	['touchlayout'] = function(t, item, cursorPosY, moveTxt)
 		local step = 0
 		if getInput(-1, motif.option_info.menu.add.key) then
@@ -1469,7 +1469,7 @@ options.t_itemname = {
 		end
 		return true
 	end,
-	--Edit On-screen Buttons (Android): the app's editor, over the menu
+	--Edit On-screen Buttons (Android and iOS): the app's editor, over the menu
 	['touchedit'] = function(t, item, cursorPosY, moveTxt)
 		if getInput(-1, motif.option_info.menu.done.key) then
 			sndPlay(motif.Snd, motif.option_info.cursor.done.snd[1], motif.option_info.cursor.done.snd[2])
@@ -2286,7 +2286,7 @@ function options.f_start()
 	if runtimeOS == 'android' then
 		excluded = {keyboard = true, gl33 = true}
 	elseif runtimeOS == 'ios' then
-		excluded = {keyboard = true, gl33 = true, gles32 = true, touchbuttons = true, touchlayout = true, touchedit = true}
+		excluded = {keyboard = true, gl33 = true, gles32 = true}
 	end
 	main.f_pruneMenu(options.menu, excluded)
 	main.f_prunePointers(options.t_vardisplayPointers, excluded)

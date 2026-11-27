@@ -494,12 +494,13 @@ func (w *Window) pollEvents() {
 	}
 }
 
-// touchControlsName is the name the Android app gives the controller its
-// on-screen buttons play as (third_party/ikemen-droid's ControllerOverlay).
+// touchControlsName is the name the Android and iOS apps give the controller
+// their on-screen buttons play as (third_party/ikemen-droid's
+// ControllerOverlay, third_party/ikemen-ios's TouchOverlayView).
 const touchControlsName = "IKEMEN Touch Controls"
 
-// isTouchControls reports whether c is the controller the Android app's
-// on-screen buttons play as.
+// isTouchControls reports whether c is the controller the app's on-screen
+// buttons play as.
 func isTouchControls(c *sdl.GameController) bool {
 	if c == nil {
 		return false
@@ -509,9 +510,9 @@ func isTouchControls(c *sdl.GameController) bool {
 }
 
 // packControllers moves the controllers in the slots from from on down, in
-// order, to fill the free ones. The Android app removes its on-screen
-// buttons' controller when a real one connects, which then takes their slot,
-// and so their player, instead of the next one.
+// order, to fill the free ones. The Android and iOS apps remove their
+// on-screen buttons' controller when a real one connects, which then takes
+// their slot, and so their player, instead of the next one.
 func packControllers(from int) {
 	next := from
 	for i := from; i < len(input.controllers); i++ {

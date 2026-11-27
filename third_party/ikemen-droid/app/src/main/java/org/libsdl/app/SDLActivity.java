@@ -1737,7 +1737,7 @@ public class SDLActivity extends Activity implements View.OnSystemUiVisibilityCh
     // on-screen keyboard covers, so that it draws itself above the keyboard:
     // a text box and what is typed in it stay in sight wherever the game
     // draws them. SDL's text field sits at the top of the screen, so that
-    // Android doesn't pan the window instead (src/text_entry_android.go).
+    // Android doesn't pan the window instead (src/text_entry_mobile.go).
     private void updateKeyboardCover() {
         int cover = 0;
         if (mScreenKeyboardShown && mSurface != null && mSurface.getHeight() > 0) {

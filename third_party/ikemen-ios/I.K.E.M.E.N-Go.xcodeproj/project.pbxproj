@@ -1,0 +1,497 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		F1E2A06A303E3CA7001C162E /* SDL2.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = F1E2A069303E3CA7001C162E /* SDL2.xcframework */; };
+		F1E2A06B303E3CA7001C162E /* SDL2.xcframework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = F1E2A069303E3CA7001C162E /* SDL2.xcframework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
+		F1E2A06F303E5E7B001C162E /* MoltenVK.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = F1E2A06E303E5E7B001C162E /* MoltenVK.xcframework */; };
+		F1E2A070303E5E7B001C162E /* MoltenVK.xcframework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = F1E2A06E303E5E7B001C162E /* MoltenVK.xcframework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
+		F1E2A072303E62CB001C162E /* Metal.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = F1E2A071303E62CB001C162E /* Metal.framework */; };
+		F1E2A074303E62D6001C162E /* QuartzCore.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = F1E2A073303E62D6001C162E /* QuartzCore.framework */; };
+		F1E2A076303E62DF001C162E /* AudioToolbox.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = F1E2A075303E62DF001C162E /* AudioToolbox.framework */; };
+		F1E2A078303E62EB001C162E /* AVFoundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = F1E2A077303E62EB001C162E /* AVFoundation.framework */; };
+		F1E2A07A303E62F6001C162E /* GameController.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = F1E2A079303E62F6001C162E /* GameController.framework */; };
+		F1E2A080303FA833001C162E /* Localizable.xcstrings in Resources */ = {isa = PBXBuildFile; fileRef = F1E2A07F303FA833001C162E /* Localizable.xcstrings */; };
+		F1E2A08330409079001C162E /* libikemen.a in Frameworks */ = {isa = PBXBuildFile; fileRef = F1E2A08230409079001C162E /* libikemen.a */; };
+		F1E2A08D3040A52E001C162E /* libswresample.a in Frameworks */ = {isa = PBXBuildFile; fileRef = F1E2A0893040A52E001C162E /* libswresample.a */; };
+		F1E2A08E3040A52E001C162E /* libswscale.a in Frameworks */ = {isa = PBXBuildFile; fileRef = F1E2A08A3040A52E001C162E /* libswscale.a */; };
+		F1E2A08F3040A52E001C162E /* libavformat.a in Frameworks */ = {isa = PBXBuildFile; fileRef = F1E2A0873040A52E001C162E /* libavformat.a */; };
+		F1E2A0903040A52E001C162E /* libavcodec.a in Frameworks */ = {isa = PBXBuildFile; fileRef = F1E2A0843040A52E001C162E /* libavcodec.a */; };
+		F1E2A0913040A52E001C162E /* libavutil.a in Frameworks */ = {isa = PBXBuildFile; fileRef = F1E2A0883040A52E001C162E /* libavutil.a */; };
+		F1E2A0923040A52E001C162E /* libavfilter.a in Frameworks */ = {isa = PBXBuildFile; fileRef = F1E2A0863040A52E001C162E /* libavfilter.a */; };
+		F1E2A0933040A52E001C162E /* libvpx.a in Frameworks */ = {isa = PBXBuildFile; fileRef = F1E2A08B3040A52E001C162E /* libvpx.a */; };
+		F1E2A0943040A52E001C162E /* libavdevice.a in Frameworks */ = {isa = PBXBuildFile; fileRef = F1E2A0853040A52E001C162E /* libavdevice.a */; };
+		F1E2A0953040A52E001C162E /* libxmp.a in Frameworks */ = {isa = PBXBuildFile; fileRef = F1E2A08C3040A52E001C162E /* libxmp.a */; };
+		F1E2A6F03040F483001C162E /* DefaultAssets.zip in Resources */ = {isa = PBXBuildFile; fileRef = F1E2A6EF3040F483001C162E /* DefaultAssets.zip */; };
+		F1E2A6F33040F93D001C162E /* ZipArchive in Frameworks */ = {isa = PBXBuildFile; productRef = F1E2A6F23040F93D001C162E /* ZipArchive */; };
+		F1E2A6F5304104CB001C162E /* libc++.tbd in Frameworks */ = {isa = PBXBuildFile; fileRef = F1E2A6F4304104CB001C162E /* libc++.tbd */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		F1E2A06C303E3CA7001C162E /* Embed Frameworks */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 10;
+			files = (
+				F1E2A06B303E3CA7001C162E /* SDL2.xcframework in Embed Frameworks */,
+				F1E2A070303E5E7B001C162E /* MoltenVK.xcframework in Embed Frameworks */,
+			);
+			name = "Embed Frameworks";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
+
+/* Begin PBXFileReference section */
+		F106513E303D2EDA0039BD6A /* I.K.E.M.E.N-Go.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "I.K.E.M.E.N-Go.app"; sourceTree = BUILT_PRODUCTS_DIR; };
+		F1E2A069303E3CA7001C162E /* SDL2.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = SDL2.xcframework; path = Frameworks/SDL2.xcframework; sourceTree = "<group>"; };
+		F1E2A06E303E5E7B001C162E /* MoltenVK.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = MoltenVK.xcframework; path = Frameworks/MoltenVK.xcframework; sourceTree = "<group>"; };
+		F1E2A071303E62CB001C162E /* Metal.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Metal.framework; path = System/Library/Frameworks/Metal.framework; sourceTree = SDKROOT; };
+		F1E2A073303E62D6001C162E /* QuartzCore.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = QuartzCore.framework; path = System/Library/Frameworks/QuartzCore.framework; sourceTree = SDKROOT; };
+		F1E2A075303E62DF001C162E /* AudioToolbox.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = AudioToolbox.framework; path = System/Library/Frameworks/AudioToolbox.framework; sourceTree = SDKROOT; };
+		F1E2A077303E62EB001C162E /* AVFoundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = AVFoundation.framework; path = System/Library/Frameworks/AVFoundation.framework; sourceTree = SDKROOT; };
+		F1E2A079303E62F6001C162E /* GameController.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = GameController.framework; path = System/Library/Frameworks/GameController.framework; sourceTree = SDKROOT; };
+		F1E2A07F303FA833001C162E /* Localizable.xcstrings */ = {isa = PBXFileReference; lastKnownFileType = text.json.xcstrings; path = Localizable.xcstrings; sourceTree = "<group>"; };
+		F1E2A08130409079001C162E /* libikemen.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = libikemen.h; sourceTree = "<group>"; };
+		F1E2A08230409079001C162E /* libikemen.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; path = libikemen.a; sourceTree = "<group>"; };
+		F1E2A0843040A52E001C162E /* libavcodec.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; path = libavcodec.a; sourceTree = "<group>"; };
+		F1E2A0853040A52E001C162E /* libavdevice.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; path = libavdevice.a; sourceTree = "<group>"; };
+		F1E2A0863040A52E001C162E /* libavfilter.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; path = libavfilter.a; sourceTree = "<group>"; };
+		F1E2A0873040A52E001C162E /* libavformat.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; path = libavformat.a; sourceTree = "<group>"; };
+		F1E2A0883040A52E001C162E /* libavutil.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; path = libavutil.a; sourceTree = "<group>"; };
+		F1E2A0893040A52E001C162E /* libswresample.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; path = libswresample.a; sourceTree = "<group>"; };
+		F1E2A08A3040A52E001C162E /* libswscale.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; path = libswscale.a; sourceTree = "<group>"; };
+		F1E2A08B3040A52E001C162E /* libvpx.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; path = libvpx.a; sourceTree = "<group>"; };
+		F1E2A08C3040A52E001C162E /* libxmp.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; path = libxmp.a; sourceTree = "<group>"; };
+		F1E2A6EF3040F483001C162E /* DefaultAssets.zip */ = {isa = PBXFileReference; lastKnownFileType = archive.zip; path = DefaultAssets.zip; sourceTree = "<group>"; };
+		F1E2A6F4304104CB001C162E /* libc++.tbd */ = {isa = PBXFileReference; lastKnownFileType = "sourcecode.text-based-dylib-definition"; name = "libc++.tbd"; path = "usr/lib/libc++.tbd"; sourceTree = SDKROOT; };
+/* End PBXFileReference section */
+
+/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
+		F1065155303D2EDC0039BD6A /* Exceptions for "I.K.E.M.E.N-Go" folder in "I.K.E.M.E.N-Go" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Info.plist,
+			);
+			target = F106513D303D2EDA0039BD6A /* I.K.E.M.E.N-Go */;
+		};
+/* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
+
+/* Begin PBXFileSystemSynchronizedRootGroup section */
+		F1065140303D2EDA0039BD6A /* I.K.E.M.E.N-Go */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				F1065155303D2EDC0039BD6A /* Exceptions for "I.K.E.M.E.N-Go" folder in "I.K.E.M.E.N-Go" target */,
+			);
+			path = "I.K.E.M.E.N-Go";
+			sourceTree = "<group>";
+		};
+/* End PBXFileSystemSynchronizedRootGroup section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		F106513B303D2EDA0039BD6A /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				F1E2A6F5304104CB001C162E /* libc++.tbd in Frameworks */,
+				F1E2A07A303E62F6001C162E /* GameController.framework in Frameworks */,
+				F1E2A078303E62EB001C162E /* AVFoundation.framework in Frameworks */,
+				F1E2A08330409079001C162E /* libikemen.a in Frameworks */,
+				F1E2A076303E62DF001C162E /* AudioToolbox.framework in Frameworks */,
+				F1E2A08D3040A52E001C162E /* libswresample.a in Frameworks */,
+				F1E2A08E3040A52E001C162E /* libswscale.a in Frameworks */,
+				F1E2A08F3040A52E001C162E /* libavformat.a in Frameworks */,
+				F1E2A0903040A52E001C162E /* libavcodec.a in Frameworks */,
+				F1E2A0913040A52E001C162E /* libavutil.a in Frameworks */,
+				F1E2A0923040A52E001C162E /* libavfilter.a in Frameworks */,
+				F1E2A0933040A52E001C162E /* libvpx.a in Frameworks */,
+				F1E2A0943040A52E001C162E /* libavdevice.a in Frameworks */,
+				F1E2A0953040A52E001C162E /* libxmp.a in Frameworks */,
+				F1E2A074303E62D6001C162E /* QuartzCore.framework in Frameworks */,
+				F1E2A072303E62CB001C162E /* Metal.framework in Frameworks */,
+				F1E2A06A303E3CA7001C162E /* SDL2.xcframework in Frameworks */,
+				F1E2A06F303E5E7B001C162E /* MoltenVK.xcframework in Frameworks */,
+				F1E2A6F33040F93D001C162E /* ZipArchive in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		F1065135303D2EDA0039BD6A = {
+			isa = PBXGroup;
+			children = (
+				F1E2A07F303FA833001C162E /* Localizable.xcstrings */,
+				F1065140303D2EDA0039BD6A /* I.K.E.M.E.N-Go */,
+				F1E2A068303E3CA6001C162E /* Frameworks */,
+				F106513F303D2EDA0039BD6A /* Products */,
+				F1E2A08130409079001C162E /* libikemen.h */,
+				F1E2A08230409079001C162E /* libikemen.a */,
+				F1E2A0843040A52E001C162E /* libavcodec.a */,
+				F1E2A0853040A52E001C162E /* libavdevice.a */,
+				F1E2A0863040A52E001C162E /* libavfilter.a */,
+				F1E2A0873040A52E001C162E /* libavformat.a */,
+				F1E2A0883040A52E001C162E /* libavutil.a */,
+				F1E2A0893040A52E001C162E /* libswresample.a */,
+				F1E2A08A3040A52E001C162E /* libswscale.a */,
+				F1E2A08B3040A52E001C162E /* libvpx.a */,
+				F1E2A08C3040A52E001C162E /* libxmp.a */,
+				F1E2A6EF3040F483001C162E /* DefaultAssets.zip */,
+			);
+			sourceTree = "<group>";
+		};
+		F106513F303D2EDA0039BD6A /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				F106513E303D2EDA0039BD6A /* I.K.E.M.E.N-Go.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		F1E2A068303E3CA6001C162E /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				F1E2A6F4304104CB001C162E /* libc++.tbd */,
+				F1E2A079303E62F6001C162E /* GameController.framework */,
+				F1E2A077303E62EB001C162E /* AVFoundation.framework */,
+				F1E2A075303E62DF001C162E /* AudioToolbox.framework */,
+				F1E2A073303E62D6001C162E /* QuartzCore.framework */,
+				F1E2A071303E62CB001C162E /* Metal.framework */,
+				F1E2A06E303E5E7B001C162E /* MoltenVK.xcframework */,
+				F1E2A069303E3CA7001C162E /* SDL2.xcframework */,
+			);
+			name = Frameworks;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		F106513D303D2EDA0039BD6A /* I.K.E.M.E.N-Go */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = F1065156303D2EDC0039BD6A /* Build configuration list for PBXNativeTarget "I.K.E.M.E.N-Go" */;
+			buildPhases = (
+				F106513A303D2EDA0039BD6A /* Sources */,
+				F106513B303D2EDA0039BD6A /* Frameworks */,
+				F106513C303D2EDA0039BD6A /* Resources */,
+				F1E2A06C303E3CA7001C162E /* Embed Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				F1065140303D2EDA0039BD6A /* I.K.E.M.E.N-Go */,
+			);
+			name = "I.K.E.M.E.N-Go";
+			packageProductDependencies = (
+				F1E2A6F23040F93D001C162E /* ZipArchive */,
+			);
+			productName = "I.K.E.M.E.N-Go";
+			productReference = F106513E303D2EDA0039BD6A /* I.K.E.M.E.N-Go.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		F1065136303D2EDA0039BD6A /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastUpgradeCheck = 2660;
+				TargetAttributes = {
+					F106513D303D2EDA0039BD6A = {
+						CreatedOnToolsVersion = 26.6;
+					};
+				};
+			};
+			buildConfigurationList = F1065139303D2EDA0039BD6A /* Build configuration list for PBXProject "I.K.E.M.E.N-Go" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+				fr,
+				fil,
+				es,
+				de,
+				ja,
+				"pt-BR",
+				zh,
+			);
+			mainGroup = F1065135303D2EDA0039BD6A;
+			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				F1E2A6F13040F93D001C162E /* XCRemoteSwiftPackageReference "ZipArchive" */,
+			);
+			preferredProjectObjectVersion = 77;
+			productRefGroup = F106513F303D2EDA0039BD6A /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				F106513D303D2EDA0039BD6A /* I.K.E.M.E.N-Go */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		F106513C303D2EDA0039BD6A /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				F1E2A6F03040F483001C162E /* DefaultAssets.zip in Resources */,
+				F1E2A080303FA833001C162E /* Localizable.xcstrings in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		F106513A303D2EDA0039BD6A /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		F1065157303D2EDC0039BD6A /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 6W73QW64V7;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "I.K.E.M.E.N-Go/Info.plist";
+				INFOPLIST_KEY_GCSupportsControllerUserInteraction = YES;
+				INFOPLIST_KEY_NSBluetoothAlwaysUsageDescription = "This app requires Bluetooth access to connect game controllers.";
+				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+				INFOPLIST_KEY_UILaunchStoryboardName = LaunchScreen;
+				INFOPLIST_KEY_UIMainStoryboardFile = Main;
+				INFOPLIST_KEY_UIRequiresFullScreen = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationLandscapeRight UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown";
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				LIBRARY_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(PROJECT_DIR)",
+				);
+				MARKETING_VERSION = 1.1;
+				PRODUCT_BUNDLE_IDENTIFIER = "ikemen-engine.I-K-E-M-E-N-Go";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		F1065158303D2EDC0039BD6A /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 6W73QW64V7;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "I.K.E.M.E.N-Go/Info.plist";
+				INFOPLIST_KEY_GCSupportsControllerUserInteraction = YES;
+				INFOPLIST_KEY_NSBluetoothAlwaysUsageDescription = "This app requires Bluetooth access to connect game controllers.";
+				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+				INFOPLIST_KEY_UILaunchStoryboardName = LaunchScreen;
+				INFOPLIST_KEY_UIMainStoryboardFile = Main;
+				INFOPLIST_KEY_UIRequiresFullScreen = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationLandscapeRight UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown";
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				LIBRARY_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(PROJECT_DIR)",
+				);
+				MARKETING_VERSION = 1.1;
+				PRODUCT_BUNDLE_IDENTIFIER = "ikemen-engine.I-K-E-M-E-N-Go";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		F1065159303D2EDC0039BD6A /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"$(inherited)",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.5;
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = iphoneos;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+			};
+			name = Debug;
+		};
+		F106515A303D2EDC0039BD6A /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.5;
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				SDKROOT = iphoneos;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		F1065139303D2EDA0039BD6A /* Build configuration list for PBXProject "I.K.E.M.E.N-Go" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				F1065159303D2EDC0039BD6A /* Debug */,
+				F106515A303D2EDC0039BD6A /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		F1065156303D2EDC0039BD6A /* Build configuration list for PBXNativeTarget "I.K.E.M.E.N-Go" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				F1065157303D2EDC0039BD6A /* Debug */,
+				F1065158303D2EDC0039BD6A /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		F1E2A6F13040F93D001C162E /* XCRemoteSwiftPackageReference "ZipArchive" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/ZipArchive/ZipArchive.git";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 2.6.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		F1E2A6F23040F93D001C162E /* ZipArchive */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = F1E2A6F13040F93D001C162E /* XCRemoteSwiftPackageReference "ZipArchive" */;
+			productName = ZipArchive;
+		};
+/* End XCSwiftPackageProductDependency section */
+	};
+	rootObject = F1065136303D2EDA0039BD6A /* Project object */;
+}

@@ -42,6 +42,7 @@ import (
 	"unsafe"
 
 	findfont "github.com/flopp/go-findfont"
+	"github.com/veandco/go-sdl2/sdl"
 )
 
 var (
@@ -207,20 +208,25 @@ func Java_org_libsdl_app_SDLActivity_nativeSetKeyboardCover(env *C.JNIEnv, clazz
 	keyboardCover.Store(int32(pixels))
 }
 
-// Commands for the app's SDLActivity.onUnhandledMessage; SDL leaves those from
-// 0x8000 to apps.
-const (
-	appMsgTextEntry    = 0x8001 // a text box opened (1) or closed (0)
-	appMsgTouchGlyphs  = 0x8002 // the touch buttons' glyph images changed
-	appMsgTouchButtons = 0x8003 // the touch buttons to show, Start's place and the layout (touchButtonsMessage)
-	// 0x8004 is iOS's controller count (the ios-touch branch).
-	appMsgTouchEdit  = 0x8005 // open the on-screen buttons' editor (1)
-	appMsgTouchPanel = 0x8006 // the attack buttons' places on an arcade panel (touchPanelMessage)
-)
-
-// sendToApp sends the app a command, which it handles on its own thread.
+// sendToApp sends the app a command (app_messages.go), which its
+// SDLActivity.onUnhandledMessage handles on its own thread.
 func sendToApp(command, param int) {
 	C.SDL_AndroidSendMessage(C.Uint32(command), C.int(param))
+}
+
+// The app's ControllerOverlay hides itself while a real gamepad is connected,
+// as Android reports them, so it needs no appMsgControllers.
+const appWantsControllerCount = false
+
+// touchGlyphsDir is where the app's on-screen buttons find their glyph
+// images (TouchControls.reloadGlyphs): files/touch-glyphs in its internal
+// storage.
+func touchGlyphsDir() string {
+	storage := sdl.AndroidGetInternalStoragePath()
+	if storage == "" {
+		return ""
+	}
+	return filepath.Join(storage, "touch-glyphs")
 }
 
 func Logcat(s string) {
