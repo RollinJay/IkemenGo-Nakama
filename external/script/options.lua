@@ -41,6 +41,34 @@ function options.f_touchButtonsIndex()
 	return 1
 end
 
+--On-screen Layout values: config.ini's [Input] TouchLayout (empty is the
+--screenpack's [Touch Controls] layout) and their [Option Info] valuenames
+options.t_touchLayouts = {
+	{value = "", valuename = 'default', name = 'Default'},
+	{value = "straight", valuename = 'touchlayout_straight', name = 'Straight'},
+	{value = "vewlix", valuename = 'touchlayout_vewlix', name = 'Vewlix'},
+	{value = "arch", valuename = 'touchlayout_arch', name = 'Arch'},
+	{value = "staggered", valuename = 'touchlayout_staggered', name = 'Staggered'},
+	{value = "grid", valuename = 'touchlayout_grid', name = 'Grid'},
+	{value = "classic", valuename = 'touchlayout_classic', name = 'Classic'},
+}
+
+--index in options.t_touchLayouts of the current value; one the menu
+--doesn't offer shows as the first
+function options.f_touchLayoutIndex()
+	local current = (gameOption('Input.TouchLayout') or ""):gsub('%s', ''):lower()
+	--[Touch Controls]'s old name for the classic layout
+	if current == 'arcade' then
+		current = 'classic'
+	end
+	for i, v in ipairs(options.t_touchLayouts) do
+		if v.value == current then
+			return i
+		end
+	end
+	return 1
+end
+
 --return correct precision
 function options.f_precision(v, decimal)
 	return tonumber(string.format(decimal, v))
@@ -277,6 +305,7 @@ options.t_itemname = {
 			--modifyGameOption('Input.UiRepeatRate', 4)
 			--modifyGameOption('Input.PauseExitDelay', 10)
 			modifyGameOption('Input.TouchButtons', "")
+			modifyGameOption('Input.TouchLayout', "")
 
 			loadFightScreen(motif.files.fight)
 			setPlayers()
@@ -1418,6 +1447,36 @@ options.t_itemname = {
 		end
 		return true
 	end,
+	--On-screen Layout (Android): the screenpack's, an arcade panel, the grid or the classic one
+	['touchlayout'] = function(t, item, cursorPosY, moveTxt)
+		local step = 0
+		if getInput(-1, motif.option_info.menu.add.key) then
+			step = 1
+		elseif getInput(-1, motif.option_info.menu.subtract.key) then
+			step = -1
+		end
+		if step ~= 0 then
+			sndPlay(motif.Snd, motif.option_info.cursor.move.snd[1], motif.option_info.cursor.move.snd[2])
+			local i = options.f_touchLayoutIndex() + step
+			if i < 1 then
+				i = #options.t_touchLayouts
+			elseif i > #options.t_touchLayouts then
+				i = 1
+			end
+			modifyGameOption('Input.TouchLayout', options.t_touchLayouts[i].value)
+			t.items[item].vardisplay = options.t_vardisplay['touchlayout']()
+			options.modified = true
+		end
+		return true
+	end,
+	--Edit On-screen Buttons (Android): the app's editor, over the menu
+	['touchedit'] = function(t, item, cursorPosY, moveTxt)
+		if getInput(-1, motif.option_info.menu.done.key) then
+			sndPlay(motif.Snd, motif.option_info.cursor.done.snd[1], motif.option_info.cursor.done.snd[2])
+			touchEditButtons()
+		end
+		return true
+	end,
 	--Players
 	['players'] = function(t, item, cursorPosY, moveTxt)
 		if getInput(-1, motif.option_info.menu.add.key) and gameOption('Config.Players') < 8 then
@@ -1990,6 +2049,10 @@ options.t_vardisplay = {
 		local entry = options.t_touchButtons[options.f_touchButtonsIndex()]
 		return motif.option_info.menu.valuename[entry.valuename] or entry.name
 	end,
+	['touchlayout'] = function()
+		local entry = options.t_touchLayouts[options.f_touchLayoutIndex()]
+		return motif.option_info.menu.valuename[entry.valuename] or entry.name
+	end,
 	['vsync'] = function()
 		return options.f_definedDisplay(gameOption('Video.VSync'), {[1] = motif.option_info.menu.valuename.enabled}, motif.option_info.menu.valuename.disabled)
 	end,
@@ -2219,11 +2282,11 @@ function options.f_start()
 	end
 	-- Runtime platform filtering
 	local runtimeOS = getRuntimeOS()
-	local excluded = {gles32 = true, touchbuttons = true}
+	local excluded = {gles32 = true, touchbuttons = true, touchlayout = true, touchedit = true}
 	if runtimeOS == 'android' then
 		excluded = {keyboard = true, gl33 = true}
 	elseif runtimeOS == 'ios' then
-		excluded = {keyboard = true, gl33 = true, gles32 = true, touchbuttons = true}
+		excluded = {keyboard = true, gl33 = true, gles32 = true, touchbuttons = true, touchlayout = true, touchedit = true}
 	end
 	main.f_pruneMenu(options.menu, excluded)
 	main.f_prunePointers(options.t_vardisplayPointers, excluded)

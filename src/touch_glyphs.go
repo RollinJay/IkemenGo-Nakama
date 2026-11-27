@@ -34,11 +34,18 @@ type TouchControlsProperties struct {
 	Start struct {
 		Slot string `ini:"slot"`
 	} `ini:"start"`
-	// Layout is how the grid is arranged: "arcade" (the default) staggers
-	// it, "grid" puts each punch straight above its kick
-	// (touchLayoutGrid).
+	// Layout is how the buttons are arranged (touchLayouts): "arcade" (the
+	// default) staggers the grid, "grid" puts each punch straight above its
+	// kick, and straight, vewlix, arch and staggered lay the d-pad and the
+	// eight attack buttons out as those arcade panels are.
 	Layout string `ini:"layout"`
-	Glyph  struct {
+	// Panel places the attack buttons on an arcade panel's eight buttons,
+	// left to right on its top and bottom rows (touchPanelMessage).
+	Panel struct {
+		Top    []string `ini:"top"`
+		Bottom []string `ini:"bottom"`
+	} `ini:"panel"`
+	Glyph struct {
 		A     []string `ini:"a"`
 		B     []string `ini:"b"`
 		C     []string `ini:"c"`
@@ -119,19 +126,109 @@ func touchStartSlot(slot string, set int) int {
 	return -1
 }
 
+// touchLayouts name the on-screen layouts, layout i+1 being touchLayouts[i]
+// (bits 16 to 19 of appMsgTouchButtons' parameter): classic, the app's own
+// staggered grid ("arcade" in [Touch Controls]); grid, two straight rows;
+// and four arcade panels from slagcoin.com's Japanese layouts, the d-pad
+// where the stick is: straight (two straight rows of four), vewlix (the
+// first two columns curving down to the stick), arch (the second column
+// highest) and staggered (the top row 7 mm right of the bottom one, the
+// first column lower). The app keeps the panels' coordinates
+// (TouchPanels.java).
+var touchLayouts = []string{"classic", "grid", "straight", "vewlix", "arch", "staggered"}
+
+const (
+	touchLayoutClassic = 1
+	touchLayoutGridID  = 2
+)
+
+// touchLayoutID is the layout to use: the player's option (config.ini's
+// [Input] TouchLayout) if it names one, or else the screenpack's
+// [Touch Controls] layout, or else classic.
+func touchLayoutID(option, screenpack string) int {
+	for _, name := range []string{option, screenpack} {
+		name = strings.ToLower(strings.TrimSpace(name))
+		if name == "arcade" {
+			name = "classic"
+		}
+		for i, l := range touchLayouts {
+			if name == l {
+				return i + 1
+			}
+		}
+	}
+	return touchLayoutClassic
+}
+
 // touchLayoutGrid is bit 14 of appMsgTouchButtons' parameter: the grid's
 // buttons in two straight rows, x, y and z above a, b and c, with d and w in
-// a fourth column and Start, when it is in the grid, apart on the right.
+// a fourth column and Start, when it is in the grid, apart on the right. An
+// app that reads the layout from bits 16 to 19 ignores it.
 const touchLayoutGrid = 1 << 14
 
 // touchButtonsMessage is the parameter of appMsgTouchButtons: the set of
 // buttons shown in bits 0 to 9, in bits 10 to 13 one more than the grid
-// place Start takes (touchStartSlot), 0 for none, and touchLayoutGrid for
-// [Touch Controls] layout = grid.
-func touchButtonsMessage(set, startSlot int, layout string) int {
-	msg := set | (startSlot+1)<<10
-	if strings.EqualFold(strings.TrimSpace(layout), "grid") {
+// place Start takes (touchStartSlot), 0 for none, touchLayoutGrid for the
+// grid layout, and the layout (touchLayoutID) in bits 16 to 19.
+func touchButtonsMessage(set, startSlot, layout int) int {
+	msg := set | (startSlot+1)<<10 | layout<<16
+	if layout == touchLayoutGridID {
 		msg |= touchLayoutGrid
+	}
+	return msg
+}
+
+// touchPanelDefault is where the attack buttons sit on a panel by default,
+// top row then bottom row, left to right: the punches above the kicks, as in
+// the classic layout.
+var touchPanelDefault = [touchGridButtons]string{"x", "y", "z", "w", "a", "b", "c", "d"}
+
+// touchPanelMessage is the parameter of appMsgTouchPanel: for each of a
+// panel's eight places (top row left to right, then bottom row), in the 4
+// bits from 4 times its number, one more than the index in
+// touchButtonTokens of the grid button there. The places top and bottom
+// name ([Touch Controls] panel.top and panel.bottom) come first; each grid
+// button they leave out, or name twice, goes to the first place left free,
+// those of touchPanelDefault first, so that every button has one.
+func touchPanelMessage(top, bottom []string) int {
+	var places [touchGridButtons]int // index+1, 0 for free
+	placed := 0                      // bit i: button i has a place
+	name := func(tok string) int {
+		tok = strings.ToLower(strings.TrimSpace(tok))
+		for i, n := range touchButtonTokens[:touchGridButtons] {
+			if tok == n {
+				return i
+			}
+		}
+		return -1
+	}
+	for row, tokens := range [][]string{top, bottom} {
+		for col, tok := range tokens {
+			if col >= touchGridButtons/2 {
+				break
+			}
+			if b := name(tok); b >= 0 && placed&(1<<b) == 0 {
+				places[row*touchGridButtons/2+col] = b + 1
+				placed |= 1 << b
+			}
+		}
+	}
+	for p, tok := range touchPanelDefault {
+		b := name(tok)
+		if placed&(1<<b) != 0 {
+			continue
+		}
+		if places[p] != 0 {
+			// Its own place is taken: the first free one.
+			for p = 0; places[p] != 0; p++ {
+			}
+		}
+		places[p] = b + 1
+		placed |= 1 << b
+	}
+	msg := 0
+	for p, v := range places {
+		msg |= v << (4 * p)
 	}
 	return msg
 }

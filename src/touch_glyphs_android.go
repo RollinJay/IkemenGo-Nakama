@@ -11,12 +11,13 @@ import (
 
 // touchGlyphsKey is what the app's button images were last written from, and
 // touchGlyphsWait the frames until the next check.
-// touchButtonsSent is the set of on-screen buttons the app last got, -1
-// before the first.
+// touchButtonsSent is the set of on-screen buttons the app last got, and
+// touchPanelSent their places on an arcade panel, -1 before the first.
 var (
 	touchGlyphsKey   string
 	touchGlyphsWait  int
 	touchButtonsSent = -1
+	touchPanelSent   = -1
 )
 
 // touchControlsUpdate keeps the app's on-screen buttons showing the glyphs of
@@ -31,7 +32,14 @@ func touchControlsUpdate() {
 	touchGlyphsWait = 30
 	m := &sys.motif
 	set := touchButtonsShown(sys.cfg.Input.TouchButtons, m.TouchControls.Buttons)
-	if msg := touchButtonsMessage(set, touchStartSlot(m.TouchControls.Start.Slot, set), m.TouchControls.Layout); msg != touchButtonsSent {
+	// The panel's places first: the app lays the buttons out again as the
+	// set and layout arrive.
+	if msg := touchPanelMessage(m.TouchControls.Panel.Top, m.TouchControls.Panel.Bottom); msg != touchPanelSent {
+		touchPanelSent = msg
+		sendToApp(appMsgTouchPanel, msg)
+	}
+	layout := touchLayoutID(sys.cfg.Input.TouchLayout, m.TouchControls.Layout)
+	if msg := touchButtonsMessage(set, touchStartSlot(m.TouchControls.Start.Slot, set), layout); msg != touchButtonsSent {
 		touchButtonsSent = msg
 		sendToApp(appMsgTouchButtons, msg)
 	}
@@ -56,6 +64,17 @@ func touchControlsUpdate() {
 		Logcat("Touch control glyphs: " + err.Error())
 	}
 	sendToApp(appMsgTouchGlyphs, len(sprites))
+}
+
+// touchEditButtons opens the app's editor of the on-screen buttons, where the
+// player moves, resizes and fades them (appMsgTouchEdit). The buttons, layout
+// and panel places go first, so that it opens on the layout just chosen
+// rather than on the one of the last check.
+func touchEditButtons() bool {
+	touchGlyphsWait = 0
+	touchControlsUpdate()
+	sendToApp(appMsgTouchEdit, 1)
+	return true
 }
 
 // touchControlsKeyConfig is the joystick mapping of the player the on-screen
