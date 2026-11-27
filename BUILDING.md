@@ -275,7 +275,43 @@ make ios-ipa
 
 To run it straight from Xcode instead, open `build/ios-app/ikemen-ios/I.K.E.M.E.N-Go.xcodeproj`,
 choose your team under *Signing & Capabilities*, and press Run with your device connected.
-Simulator builds are not supported.
+
+### iOS Simulator build and test
+
+`./build/build.sh iOSSimulator` builds the same app for the iOS Simulator on Apple silicon
+(arm64 only): the engine and its libraries from the `iphonesimulator` SDK, SDL2 for the
+simulator, and MoltenVK from its `MoltenVK-all.tar` release (the only one with a simulator
+slice). It keeps its own `build/ios-sim-deps` and `build/ios-sim-app`, so the device build is
+untouched, and leaves `bin/ios-simulator/I.K.E.M.E.N-Go.app` (unsigned, for `xcrun simctl install`).
+
+The **iOS Simulator test** workflow (`.github/workflows/ios-simulator.yml`) builds it on a
+`macos-26` runner and runs `build/ios-simulator-test/run.sh` on a simulated iPhone, then iPad.
+Each run gives the app a test game folder (the simulator-only `IKEMEN_TEST_GAME_FOLDER` hook
+replaces the folder picker), with a test mod and the default screenpack set up like HDBZ
+(`[Touch Controls] layout = vewlix`, `panel.top = x, y, z, d`, `panel.bottom = a, b, c, w`,
+no D and W buttons, `start.slot = d`). The mod presses the screenpack's menu keys to reach
+each screen and waits for the screenshot. In Options > Input Settings it steps On-screen
+Layout through every value, then opens Edit On-screen Buttons' layout editor.
+
+* Start it from the Actions tab or with `gh workflow run ios-simulator.yml --ref <branch>`
+  (dispatching needs the workflow on the default branch; until then a push of a branch
+  that changes it starts it). Pushes and pull requests touching iOS files start it too.
+* The job fails when the app crashes or no title screen comes up within 7 minutes. Steps
+  after the title only warn (`STRICT=1` makes them fail too).
+* The run's summary lists each device's result. The `ios-simulator-<run number>` artifact
+  holds, for `iphone/` and `ipad/`:
+  * `screenshots/`: `01-title`, `02-touch-controls`, `03-textbox-keyboard`,
+    `04-options-onscreen-buttons`, `05-layout-default-vewlix` (the screenpack's), `06-layout-straight`,
+    `07-layout-vewlix`, `08-layout-arch`, `09-layout-staggered`, `10-layout-grid`,
+    `11-layout-classic`, `12-layout-editor` and `99-last` (`missing-<step>` where a step
+    never came);
+  * `logs/game-stdout.txt` and `game-stderr.txt` (the engine's own output and the mod's
+    `[ios-ci]` lines), `device-log.txt` (the app's `NSLog`), `steps.txt` (the mod's steps),
+    `crash-reports/` and the test's `config.ini` and `system_ci.def`;
+  * `result.txt`, the run in short.
+
+On a Mac with Xcode the test runs the same way:
+`build/ios-simulator-test/run.sh bin/ios-simulator/I.K.E.M.E.N-Go.app build/ios-sim-app/ikemen-ios/DefaultAssets iPhone out/iphone`.
 
 ### Customizing the iOS wrapper
 

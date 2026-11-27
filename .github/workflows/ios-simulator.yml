@@ -1,0 +1,156 @@
+# Builds the iOS app for the iOS Simulator and runs it on a simulated iPhone
+# and iPad, so that the iOS app can be checked without a Mac or an iPhone.
+#
+# For each device, build/ios-simulator-test/run.sh boots a simulator, installs
+# the app with a test game folder (the engine's default assets, a test mod and
+# the default screenpack with HDBZ-like [Touch Controls]), and screenshots the
+# title screen with the touch controls, a text box with the on-screen keyboard,
+# Options > Input Settings > On-screen Buttons, each On-screen Layout and the
+# layout editor. Screenshots and logs are
+# uploaded as the "ios-simulator-<run>" artifact. The job fails when the app
+# crashes or the title screen never comes up. See BUILDING.md ("iOS Simulator
+# test").
+#
+# Runs on demand (gh workflow run ios-simulator.yml --ref <branch>), and on
+# pushes and pull requests that touch the iOS app or the engine's iOS code.
+name: iOS Simulator test
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/ios-simulator.yml'
+      - 'build/build.sh'
+      - 'build/ios-simulator-test/**'
+      - 'third_party/ikemen-ios/**'
+      - 'src/*_ios.go'
+      - 'src/*_mobile.go'
+      - 'src/app_messages.go'
+      - 'src/text_entry*.go'
+      - 'src/touch_glyphs*.go'
+  pull_request:
+    paths:
+      - '.github/workflows/ios-simulator.yml'
+      - 'build/build.sh'
+      - 'build/ios-simulator-test/**'
+      - 'third_party/ikemen-ios/**'
+      - 'src/*_ios.go'
+      - 'src/*_mobile.go'
+      - 'src/app_messages.go'
+      - 'src/text_entry*.go'
+      - 'src/touch_glyphs*.go'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-simulator-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ios-simulator:
+    # Same runner as releases.yml's iOS build: the ikemen-ios Xcode project needs
+    # Xcode 26 (default on macos-26), and the runner is Apple silicon (arm64),
+    # which the arm64-only simulator build needs.
+    runs-on: macos-26
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: '1.27.x'
+          cache: true
+          cache-dependency-path: |
+            go.sum
+            **/go.sum
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          # As releases.yml's iOS build: libxmp, FFmpeg and SDL2 are built for the
+          # target and MoltenVK comes from its release, so only host tools.
+          pkgs="pkg-config git nasm"
+          export HOMEBREW_NO_ANALYTICS=1
+          export HOMEBREW_NO_AUTO_UPDATE=1
+          export HOMEBREW_NO_INSTALL_FROM_API=1
+          brew update-reset || true
+          ( brew install --quiet $pkgs ) || (
+            echo "First attempt failed; retrying with API mode..." >&2
+            unset HOMEBREW_NO_INSTALL_FROM_API
+            brew install --quiet $pkgs
+          )
+          xcodebuild -version
+          xcrun --sdk iphonesimulator --show-sdk-path
+          xcrun simctl list runtimes
+          xcrun simctl list devices available
+
+      - name: Build the simulator app
+        shell: bash
+        env:
+          CGO_ENABLED: "1"
+          APP_VERSION: ios-simulator-test
+        run: |
+          go env -w GO111MODULE=on
+          go mod download
+          ./build/build.sh iOSSimulator
+          app=bin/ios-simulator/I.K.E.M.E.N-Go.app
+          test -d "$app"
+          ls -lah "$app"
+          exe="$app/$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app/Info.plist")"
+          echo "==> Platform of the app's binary (7 = iOS Simulator):"
+          otool -l "$exe" | awk '/LC_BUILD_VERSION/{f=1} f&&/platform/{print "  platform "$2; exit}'
+          lipo -info "$exe"
+
+      - name: Test on an iPhone
+        id: iphone
+        continue-on-error: true
+        shell: bash
+        run: |
+          build/ios-simulator-test/run.sh bin/ios-simulator/I.K.E.M.E.N-Go.app \
+            build/ios-sim-app/ikemen-ios/DefaultAssets iPhone ios-simulator-results/iphone
+
+      - name: Test on an iPad
+        id: ipad
+        continue-on-error: true
+        shell: bash
+        run: |
+          build/ios-simulator-test/run.sh bin/ios-simulator/I.K.E.M.E.N-Go.app \
+            build/ios-sim-app/ikemen-ios/DefaultAssets iPad ios-simulator-results/ipad
+
+      - name: Summary
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          {
+            echo "## iOS Simulator test"
+            for d in iphone ipad; do
+              f="ios-simulator-results/$d/result.txt"
+              echo "### $d"
+              if [ -f "$f" ]; then
+                echo '```'
+                cat "$f"
+                echo '```'
+              else
+                echo "(not run)"
+              fi
+            done
+            echo "Screenshots and logs: the ios-simulator-${{ github.run_number }} artifact."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload screenshots and logs
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: ios-simulator-${{ github.run_number }}
+          path: ios-simulator-results/
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Fail on a failed test
+        if: ${{ steps.iphone.outcome == 'failure' || steps.ipad.outcome == 'failure' }}
+        shell: bash
+        run: |
+          echo "iPhone: ${{ steps.iphone.outcome }}, iPad: ${{ steps.ipad.outcome }}"
+          exit 1

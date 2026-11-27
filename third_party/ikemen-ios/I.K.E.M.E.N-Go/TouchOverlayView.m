@@ -190,6 +190,13 @@ static SDL_JoystickID virtualJoystickID = -1;
     if (self.editing) {
         return;
     }
+#if TARGET_OS_SIMULATOR
+    // Test hook, iOS Simulator builds only: test runs cannot touch the screen to
+    // bring faded buttons back, and screenshot them at full opacity instead.
+    if (getenv("IKEMEN_TEST_KEEP_TOUCH_CONTROLS") != NULL) {
+        return;
+    }
+#endif
     // Fade out smoothly
     [UIView animateWithDuration:0.3 animations:^{
         self.alpha = 0.025f;
