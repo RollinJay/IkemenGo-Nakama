@@ -19,7 +19,7 @@ require (
 	github.com/tidwall/gjson v1.20.4
 	github.com/tidwall/sjson v1.2.9
 	github.com/veandco/go-sdl2 v0.5.0-alpha.7.0.20250220045537-7f43f67a3a12
-	github.com/xtaci/kcp-go/v5 v5.7.5
+	github.com/xtaci/kcp-go/v5 v5.7.6
 	github.com/yuin/gopher-lua v1.1.2
 	golang.org/x/image v0.48.0
 	golang.org/x/mobile v0.0.0-20261117202452-47699113848a
