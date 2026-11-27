@@ -25,7 +25,7 @@ require (
 	golang.org/x/mobile v0.0.0-20261117202452-47699113848a
 	golang.org/x/sys v0.50.0
 	golang.org/x/text v0.44.0
-	gopkg.in/ini.v1 v1.67.3
+	gopkg.in/ini.v1 v1.68.0
 )
 
 require (
